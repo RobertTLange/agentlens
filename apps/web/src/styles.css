@@ -135,10 +135,31 @@ body {
   margin: 0;
   background: #e2e8f0;
   cursor: pointer;
+  transition:
+    filter 180ms ease,
+    transform 220ms ease;
 }
 
 .timeline-segment:hover {
   filter: brightness(0.95);
+}
+
+.timeline-segment.timeline-segment-enter {
+  animation: timeline-segment-enter 440ms cubic-bezier(0.2, 0.9, 0.2, 1) 1 both;
+}
+
+@keyframes timeline-segment-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(5px) scale(0.86);
+    filter: saturate(0.9) brightness(1.08);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: saturate(1) brightness(1);
+  }
 }
 
 .timeline-segment.active {
@@ -266,6 +287,28 @@ body {
   white-space: normal;
   min-width: 0;
   position: relative;
+  transition:
+    border-color 200ms ease,
+    background-color 200ms ease,
+    box-shadow 280ms ease;
+}
+
+.trace-row.trace-row-enter {
+  animation: trace-row-enter 520ms cubic-bezier(0.2, 0.9, 0.2, 1) 1 both;
+}
+
+@keyframes trace-row-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+    filter: saturate(0.9) brightness(1.04);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: saturate(1) brightness(1);
+  }
 }
 
 .trace-row.status-running {
@@ -296,7 +339,7 @@ body {
 }
 
 .trace-row-inner.pulse {
-  animation: trace-row-pulse 820ms ease-out 1;
+  animation: trace-row-pulse 940ms cubic-bezier(0.22, 1, 0.36, 1) 1;
 }
 
 @keyframes trace-row-pulse {
@@ -554,7 +597,8 @@ body {
   overflow-x: hidden;
   min-height: 0;
   padding: 8px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
 }
 
@@ -564,6 +608,8 @@ body {
   background: #f8fafc;
   border-radius: 10px;
   padding: 7px;
+  height: 38px;
+  min-height: 38px;
   cursor: pointer;
   display: grid;
   grid-template-columns: auto auto auto minmax(0, 1fr);
@@ -576,17 +622,19 @@ body {
 }
 
 .toc-row.toc-row-enter {
-  animation: toc-row-enter 340ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+  animation: toc-row-enter 420ms cubic-bezier(0.2, 0.9, 0.2, 1) 1 both;
 }
 
 @keyframes toc-row-enter {
   0% {
     opacity: 0;
-    filter: saturate(0.88) brightness(1.04);
+    transform: translateY(8px) scale(0.986);
+    filter: saturate(0.9) brightness(1.05);
   }
 
   100% {
     opacity: 1;
+    transform: translateY(0) scale(1);
     filter: saturate(1) brightness(1);
   }
 }
@@ -665,17 +713,19 @@ body {
 }
 
 .event-card.event-card-enter {
-  animation: event-card-enter 360ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+  animation: event-card-enter 480ms cubic-bezier(0.2, 0.9, 0.2, 1) 1 both;
 }
 
 @keyframes event-card-enter {
   0% {
     opacity: 0;
-    filter: saturate(0.86) brightness(1.03);
+    transform: translateY(10px) scale(0.985);
+    filter: saturate(0.88) brightness(1.04);
   }
 
   100% {
     opacity: 1;
+    transform: translateY(0) scale(1);
     filter: saturate(1) brightness(1);
   }
 }
@@ -790,7 +840,9 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .trace-row.trace-row-enter,
   .trace-row-inner.pulse,
+  .timeline-segment.timeline-segment-enter,
   .toc-row.toc-row-enter,
   .event-card.event-card-enter {
     animation: none;

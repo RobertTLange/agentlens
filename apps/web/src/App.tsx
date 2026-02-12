@@ -18,6 +18,8 @@ const API = "";
 const EVENT_SNIPPET_CHAR_LIMIT = 320;
 const RUNNING_WINDOW_MS = 10_000;
 const WAITING_WINDOW_MS = 120_000;
+const EVENT_ENTER_ANIMATION_MS = 560;
+const TRACE_ENTER_ANIMATION_MS = 620;
 
 function fmtTime(ms: number | null): string {
   if (!ms) return "-";
@@ -45,6 +47,13 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+function clearAnimationTimers(timerById: Map<string, number>): void {
+  for (const timeoutId of timerById.values()) {
+    window.clearTimeout(timeoutId);
+  }
+  timerById.clear();
+}
+
 export function App(): JSX.Element {
   const [overview, setOverview] = useState<OverviewStats | null>(null);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
@@ -61,13 +70,18 @@ export function App(): JSX.Element {
   const [autoFollow, setAutoFollow] = useState(true);
   const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("first-latest");
   const [liveTick, setLiveTick] = useState(0);
+  const [enteringTraceIds, setEnteringTraceIds] = useState<Set<string>>(new Set());
   const [enteringEventIds, setEnteringEventIds] = useState<Set<string>>(new Set());
   const [pulseSeqByTraceId, setPulseSeqByTraceId] = useState<Record<string, number>>({});
   const [nowMs, setNowMs] = useState(() => Date.now());
   const selectedIdRef = useRef("");
+  const previousTraceFilterRef = useRef("");
+  const traceEnterAnimationInitializedRef = useRef(false);
+  const previousVisibleTraceIdsRef = useRef<Set<string>>(new Set());
   const previousSelectedTraceIdRef = useRef("");
   const previousAnimatedTraceIdRef = useRef("");
   const previousPageEventIdsRef = useRef<Set<string>>(new Set());
+  const enterAnimationTimerByTraceIdRef = useRef<Map<string, number>>(new Map());
   const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
 
   const filteredTraces = useMemo(() => {
@@ -124,13 +138,54 @@ export function App(): JSX.Element {
 
   useEffect(
     () => () => {
-      for (const timeoutId of enterAnimationTimerByEventIdRef.current.values()) {
-        window.clearTimeout(timeoutId);
-      }
-      enterAnimationTimerByEventIdRef.current.clear();
+      clearAnimationTimers(enterAnimationTimerByTraceIdRef.current);
+      clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
     },
     [],
   );
+
+  useEffect(() => {
+    const filter = query.trim().toLowerCase();
+    const filterChanged = previousTraceFilterRef.current !== filter;
+    previousTraceFilterRef.current = filter;
+
+    const currentTraceIds = new Set(filteredTraceIds);
+    if (filterChanged || !traceEnterAnimationInitializedRef.current) {
+      traceEnterAnimationInitializedRef.current = true;
+      previousVisibleTraceIdsRef.current = currentTraceIds;
+      setEnteringTraceIds(new Set());
+      clearAnimationTimers(enterAnimationTimerByTraceIdRef.current);
+      return;
+    }
+
+    const appendedTraceIds = filteredTraceIds.filter((traceId) => !previousVisibleTraceIdsRef.current.has(traceId));
+    previousVisibleTraceIdsRef.current = currentTraceIds;
+    if (appendedTraceIds.length === 0) return;
+
+    setEnteringTraceIds((prev) => {
+      const next = new Set(prev);
+      for (const traceId of appendedTraceIds) next.add(traceId);
+      return next;
+    });
+
+    appendedTraceIds.forEach((traceId, index) => {
+      const existingTimer = enterAnimationTimerByTraceIdRef.current.get(traceId);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+        enterAnimationTimerByTraceIdRef.current.delete(traceId);
+      }
+      const timeoutId = window.setTimeout(() => {
+        setEnteringTraceIds((prev) => {
+          if (!prev.has(traceId)) return prev;
+          const next = new Set(prev);
+          next.delete(traceId);
+          return next;
+        });
+        enterAnimationTimerByTraceIdRef.current.delete(traceId);
+      }, TRACE_ENTER_ANIMATION_MS + index * 45);
+      enterAnimationTimerByTraceIdRef.current.set(traceId, timeoutId);
+    });
+  }, [filteredTraceIds, query]);
 
   useEffect(() => {
     const interval = setInterval(() => setNowMs(Date.now()), 1_000);
@@ -220,6 +275,17 @@ export function App(): JSX.Element {
       setTraces((prev) => prev.filter((trace) => trace.id !== id));
       setSelectedId((prev) => (prev === id ? "" : prev));
       removeTraceRow(id);
+      setEnteringTraceIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      const traceEnterTimer = enterAnimationTimerByTraceIdRef.current.get(id);
+      if (traceEnterTimer !== undefined) {
+        window.clearTimeout(traceEnterTimer);
+        enterAnimationTimerByTraceIdRef.current.delete(id);
+      }
       setPulseSeqByTraceId((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
@@ -260,10 +326,7 @@ export function App(): JSX.Element {
       setEnteringEventIds(new Set());
       previousAnimatedTraceIdRef.current = "";
       previousPageEventIdsRef.current = new Set();
-      for (const timeoutId of enterAnimationTimerByEventIdRef.current.values()) {
-        window.clearTimeout(timeoutId);
-      }
-      enterAnimationTimerByEventIdRef.current.clear();
+      clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
       previousSelectedTraceIdRef.current = "";
       return;
     }
@@ -331,10 +394,7 @@ export function App(): JSX.Element {
     if (isTraceChanged) {
       previousPageEventIdsRef.current = currentEventIds;
       setEnteringEventIds(new Set());
-      for (const timeoutId of enterAnimationTimerByEventIdRef.current.values()) {
-        window.clearTimeout(timeoutId);
-      }
-      enterAnimationTimerByEventIdRef.current.clear();
+      clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
       return;
     }
 
@@ -365,7 +425,7 @@ export function App(): JSX.Element {
           return next;
         });
         enterAnimationTimerByEventIdRef.current.delete(eventId);
-      }, 420);
+      }, EVENT_ENTER_ANIMATION_MS);
       enterAnimationTimerByEventIdRef.current.set(eventId, timeoutId);
     }
   }, [page, selectedId]);
@@ -443,7 +503,7 @@ export function App(): JSX.Element {
                   <button
                     key={event.eventId}
                     type="button"
-                    className={`timeline-segment kind-${kindClassSuffix(event.colorKey)} ${isActive ? "active" : ""}`}
+                    className={`timeline-segment kind-${kindClassSuffix(event.colorKey)} ${isActive ? "active" : ""} ${enteringEventIds.has(event.eventId) ? "timeline-segment-enter" : ""}`}
                     onClick={() => jumpToEvent(event.eventId)}
                     title={`${eventLabel} (${event.eventKind}) #${event.index} ${eventTime}`}
                     aria-label={`Jump to event #${event.index} ${event.eventKind}: ${eventLabel}`}
@@ -487,6 +547,7 @@ export function App(): JSX.Element {
                   activityStatus={activityStatus}
                   isActive={isActive}
                   isPathExpanded={isPathExpanded}
+                  isEntering={enteringTraceIds.has(trace.id)}
                   pulseSeq={pulseSeq}
                   onSelect={setSelectedId}
                   onTogglePath={toggleTracePathExpanded}

@@ -6,6 +6,7 @@ interface SessionTraceRowProps {
   activityStatus: SessionActivityStatus;
   isActive: boolean;
   isPathExpanded: boolean;
+  isEntering: boolean;
   pulseSeq: number;
   onSelect: (traceId: string) => void;
   onTogglePath: (traceId: string) => void;
@@ -14,7 +15,8 @@ interface SessionTraceRowProps {
 }
 
 export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
-  const { trace, activityStatus, isActive, isPathExpanded, pulseSeq, onSelect, onTogglePath, rowRef, fmtTime } = props;
+  const { trace, activityStatus, isActive, isPathExpanded, isEntering, pulseSeq, onSelect, onTogglePath, rowRef, fmtTime } =
+    props;
   const traceIcon = iconForAgent(trace.agent);
   const sessionName = trace.sessionId || trace.id;
   const startMs = trace.firstEventTs ?? null;
@@ -30,7 +32,7 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
 
   return (
     <div
-      className={`trace-row ${statusClass} ${isActive ? "active" : ""}`}
+      className={`trace-row ${statusClass} ${isActive ? "active" : ""} ${isEntering ? "trace-row-enter" : ""}`}
       data-trace-id={trace.id}
       ref={rowRef}
       onClick={() => onSelect(trace.id)}
