@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 
-const SESSION_REORDER_TRANSITION = "transform 280ms cubic-bezier(0.22, 1, 0.36, 1)";
+const SESSION_REORDER_TRANSITION = "transform 360ms cubic-bezier(0.2, 0.9, 0.2, 1)";
 
 function reducedMotionPreferred(): boolean {
   return typeof window !== "undefined" &&

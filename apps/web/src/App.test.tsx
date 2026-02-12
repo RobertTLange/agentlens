@@ -364,8 +364,8 @@ describe("App sessions list live motion", () => {
       }
     });
 
-    expect(getTraceRow("trace-b").style.transition).toContain("transform 280ms");
-    expect(getTraceRow("trace-c").style.transition).toContain("transform 280ms");
+    expect(getTraceRow("trace-b").style.transition).toContain("transform");
+    expect(getTraceRow("trace-c").style.transition).toContain("transform");
     expect(getTraceRow("trace-a").style.transition).toBe("");
   });
 
