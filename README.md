@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="apps/web/public/favicon.png" alt="AgentLens logo" width="220" />
+</p>
+
 # AgentLens
 
 AgentLens is local observability for coding-agent traces. It watches Codex, Claude, Cursor, and OpenCode logs, normalizes events, and gives you live inspection in browser, CLI, and API.
@@ -46,7 +50,9 @@ agentlens --browser
 agentlens summary
 agentlens summary --json --since 24h
 agentlens sessions list --limit 20
+agentlens session latest --show-tools
 agentlens session <trace_id_or_session_id> --show-tools
+agentlens sessions events latest --follow
 agentlens sessions events <trace_id_or_session_id> --follow
 ```
 
