@@ -28,6 +28,13 @@ const EVENT_KIND_KEYS: EventKind[] = [
 
 const WAITING_INPUT_PATTERN =
   /\b(?:await(?:ing)?\s+(?:user|input)|waiting\s+for\s+(?:user|input|approval)|user\s+input\s+required|needs?\s+user\s+input|permission\s+required|approval\s+required|confirm(?:ation)?\s+(?:required|needed)|press\s+enter\s+to\s+continue)\b/i;
+const WAITING_PROMPT_PATTERN =
+  /\b(?:do\s+you\s+want(?:\s+me)?|would\s+you\s+like(?:\s+me)?|should\s+i\b|can\s+you\s+confirm|please\s+confirm|let\s+me\s+know\s+if\s+you(?:'d)?\s+like|which\s+(?:option|approach)|choose\s+(?:one|an?\s+option)|pick\s+(?:one|an?\s+option)|approve(?:\s+this)?|permission\s+to)\b/i;
+const ACTIVITY_BIN_COUNT = 12;
+const ACTIVITY_WINDOW_MINUTES = 60;
+const ACTIVITY_BIN_MINUTES = ACTIVITY_WINDOW_MINUTES / ACTIVITY_BIN_COUNT;
+const ACTIVITY_WINDOW_MS = ACTIVITY_WINDOW_MINUTES * 60_000;
+const ACTIVITY_BIN_MS = ACTIVITY_BIN_MINUTES * 60_000;
 
 interface TraceEntry {
   file: DiscoveredTraceFile;
@@ -67,6 +74,46 @@ function emptyEventKindCounts(): Record<EventKind, number> {
     reasoning: 0,
     meta: 0,
   };
+}
+
+function buildActivityBins(events: NormalizedEvent[], anchorMs: number): number[] {
+  const bins = Array.from({ length: ACTIVITY_BIN_COUNT }, () => 0);
+  if (anchorMs <= 0) return bins;
+
+  const windowStartMs = anchorMs - ACTIVITY_WINDOW_MS;
+  for (const event of events) {
+    const timestampMs = event.timestampMs;
+    if (timestampMs === null || timestampMs <= 0) continue;
+    if (timestampMs < windowStartMs || timestampMs > anchorMs) continue;
+
+    const elapsedMs = timestampMs - windowStartMs;
+    const rawBinIndex = Math.floor(elapsedMs / ACTIVITY_BIN_MS);
+    const binIndex = Math.max(0, Math.min(ACTIVITY_BIN_COUNT - 1, rawBinIndex));
+    bins[binIndex] = (bins[binIndex] ?? 0) + 1;
+  }
+
+  let maxCount = 0;
+  for (const count of bins) {
+    if (count > maxCount) maxCount = count;
+  }
+  if (maxCount <= 0) return bins;
+
+  return bins.map((count) => count / maxCount);
+}
+
+function quantizeActivityAnchorMs(nowMsValue: number): number {
+  if (nowMsValue <= 0) return 0;
+  return Math.floor(nowMsValue / ACTIVITY_BIN_MS) * ACTIVITY_BIN_MS;
+}
+
+function activityBinsEqual(left: number[] | undefined, right: number[]): boolean {
+  if (!left || left.length !== right.length) return false;
+  for (let idx = 0; idx < right.length; idx += 1) {
+    const lhs = left[idx];
+    const rhs = right[idx] ?? 0;
+    if (lhs === undefined || Math.abs(lhs - rhs) > 1e-9) return false;
+  }
+  return true;
 }
 
 function normalizeMarkerText(value: unknown): string {
@@ -136,17 +183,21 @@ function hasTextWaitingSignal(event: NormalizedEvent): boolean {
     event.toolArgsText,
     event.toolResultText,
   ].join(" ");
-  return WAITING_INPUT_PATTERN.test(latestText);
+  return WAITING_INPUT_PATTERN.test(latestText) || WAITING_PROMPT_PATTERN.test(latestText);
 }
 
-function findLatestWaitSignalEvent(events: NormalizedEvent[]): NormalizedEvent | undefined {
+function isWaitResolutionEvent(event: NormalizedEvent): boolean {
+  return event.eventKind === "user" || event.eventKind === "tool_use" || event.eventKind === "tool_result";
+}
+
+function findPendingWaitSignalEvent(events: NormalizedEvent[]): NormalizedEvent | undefined {
   for (let idx = events.length - 1; idx >= 0; idx -= 1) {
     const event = events[idx];
     if (!event) continue;
-    if (event.role === "assistant" || event.role === "system") return event;
-    if (event.eventKind === "assistant" || event.eventKind === "reasoning" || event.eventKind === "meta") return event;
+    if (isWaitResolutionEvent(event)) return undefined;
+    if (hasStructuredWaitingSignal(event) || hasTextWaitingSignal(event)) return event;
   }
-  return events[events.length - 1];
+  return undefined;
 }
 
 function applyFreshnessTtl(
@@ -170,8 +221,8 @@ function applyFreshnessTtl(
 }
 
 function deriveActivityStatus(options: ActivityStatusOptions): ActivityStatus {
-  const latestSignalEvent = findLatestWaitSignalEvent(options.events);
-  if (latestSignalEvent && (hasStructuredWaitingSignal(latestSignalEvent) || hasTextWaitingSignal(latestSignalEvent))) {
+  const pendingWaitSignalEvent = findPendingWaitSignalEvent(options.events);
+  if (pendingWaitSignalEvent) {
     return applyFreshnessTtl(
       { status: "waiting_input", reason: "explicit_wait_marker_fresh" },
       options.updatedMs,
@@ -195,6 +246,11 @@ function deriveActivityStatus(options: ActivityStatusOptions): ActivityStatus {
     if (runningAgeMs <= runningTtlMs) {
       return { status: "running", reason: "recent_activity_fresh" };
     }
+
+    const waitingTtlMs = Math.max(0, options.scanConfig.statusWaitingTtlMs);
+    if (runningAgeMs > runningTtlMs && runningAgeMs <= waitingTtlMs) {
+      return { status: "waiting_input", reason: "recent_activity_cooling" };
+    }
   }
 
   return { status: "idle", reason: "no_active_signal" };
@@ -207,6 +263,8 @@ function withDerivedActivityStatus(
   scanConfig: AppConfig["scan"],
   nowMsValue: number,
 ): TraceSummary {
+  const activityAnchorMs = quantizeActivityAnchorMs(nowMsValue);
+  const nextActivityBins = buildActivityBins(events, activityAnchorMs);
   const activityStatus = deriveActivityStatus({
     events,
     unmatchedToolUses: summary.unmatchedToolUses,
@@ -214,13 +272,27 @@ function withDerivedActivityStatus(
     nowMs: nowMsValue,
     scanConfig,
   });
-  if (summary.activityStatus === activityStatus.status && summary.activityReason === activityStatus.reason) {
+  const activityMetaUnchanged =
+    summary.activityWindowMinutes === ACTIVITY_WINDOW_MINUTES &&
+    summary.activityBinMinutes === ACTIVITY_BIN_MINUTES &&
+    summary.activityBinCount === ACTIVITY_BIN_COUNT;
+  const binsUnchanged = activityBinsEqual(summary.activityBins, nextActivityBins);
+  if (
+    summary.activityStatus === activityStatus.status &&
+    summary.activityReason === activityStatus.reason &&
+    binsUnchanged &&
+    activityMetaUnchanged
+  ) {
     return summary;
   }
   return {
     ...summary,
     activityStatus: activityStatus.status,
     activityReason: activityStatus.reason,
+    activityBins: nextActivityBins,
+    activityWindowMinutes: ACTIVITY_WINDOW_MINUTES,
+    activityBinMinutes: ACTIVITY_BIN_MINUTES,
+    activityBinCount: ACTIVITY_BIN_COUNT,
   };
 }
 
@@ -272,13 +344,15 @@ function summarize(
     if (!toolUseIds.has(id)) unmatchedToolResults += 1;
   }
 
+  const updatedMs = Math.max(lastEventTs ?? 0, file.mtimeMs);
   const activityStatus = deriveActivityStatus({
     events,
     unmatchedToolUses,
-    updatedMs: Math.max(lastEventTs ?? 0, file.mtimeMs),
+    updatedMs,
     nowMs: nowMsValue,
     scanConfig,
   });
+  const activityBins = buildActivityBins(events, quantizeActivityAnchorMs(nowMsValue));
 
   return {
     id: file.id,
@@ -301,6 +375,10 @@ function summarize(
     unmatchedToolResults,
     activityStatus: activityStatus.status,
     activityReason: activityStatus.reason,
+    activityBins,
+    activityWindowMinutes: ACTIVITY_WINDOW_MINUTES,
+    activityBinMinutes: ACTIVITY_BIN_MINUTES,
+    activityBinCount: ACTIVITY_BIN_COUNT,
     eventKindCounts,
   };
 }

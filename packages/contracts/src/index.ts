@@ -85,6 +85,10 @@ export interface TraceSummary {
   unmatchedToolResults: number;
   activityStatus: SessionActivityStatus;
   activityReason: string;
+  activityBins?: number[];
+  activityWindowMinutes?: number;
+  activityBinMinutes?: number;
+  activityBinCount?: number;
   eventKindCounts: Record<EventKind, number>;
 }
 
