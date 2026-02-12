@@ -1,0 +1,26 @@
+{
+  "name": "agentlens",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "bin": {
+    "agentlens": "dist/main.js"
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@agentlens/contracts": "0.1.0",
+    "@agentlens/core": "0.1.0",
+    "@agentlens/server": "0.1.0",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

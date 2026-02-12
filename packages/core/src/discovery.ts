@@ -1,0 +1,120 @@
+import { stat } from "node:fs/promises";
+import path from "node:path";
+import fg from "fast-glob";
+import type { AgentKind, AppConfig } from "@agentlens/contracts";
+import { expandHome, stableId } from "./utils.js";
+
+export interface DiscoveredTraceFile {
+  id: string;
+  path: string;
+  sourceProfile: string;
+  agentHint: AgentKind;
+  parserHint?: AgentKind;
+  sizeBytes: number;
+  mtimeMs: number;
+  ino: number;
+  dev: number;
+}
+
+async function discoverProfile(config: AppConfig, profileName: string): Promise<DiscoveredTraceFile[]> {
+  const profile = config.sources[profileName];
+  if (!profile || !profile.enabled) {
+    return [];
+  }
+
+  const files: DiscoveredTraceFile[] = [];
+  for (const rootRaw of profile.roots) {
+    const root = expandHome(rootRaw);
+    const matches = await fg(profile.includeGlobs, {
+      cwd: root,
+      absolute: true,
+      onlyFiles: true,
+      dot: true,
+      deep: profile.maxDepth,
+      suppressErrors: true,
+      ignore: profile.excludeGlobs,
+      unique: true,
+      followSymbolicLinks: false,
+    });
+
+    for (const filePath of matches) {
+      try {
+        const fileStat = await stat(filePath);
+        const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
+        files.push({
+          id,
+          path: path.resolve(filePath),
+          sourceProfile: profileName,
+          agentHint: profile.agentHint ?? "unknown",
+          sizeBytes: fileStat.size,
+          mtimeMs: fileStat.mtimeMs,
+          ino: Number(fileStat.ino),
+          dev: Number(fileStat.dev),
+        });
+      } catch {
+        // ignore stale files
+      }
+    }
+  }
+
+  return files;
+}
+
+async function discoverSessionLogDirectories(config: AppConfig): Promise<DiscoveredTraceFile[]> {
+  const files: DiscoveredTraceFile[] = [];
+  for (const entry of config.sessionLogDirectories) {
+    const root = expandHome(entry.directory);
+    const matches = await fg(["**/*.jsonl"], {
+      cwd: root,
+      absolute: true,
+      onlyFiles: true,
+      dot: true,
+      deep: 12,
+      suppressErrors: true,
+      unique: true,
+      followSymbolicLinks: false,
+    });
+
+    for (const filePath of matches) {
+      try {
+        const fileStat = await stat(filePath);
+        const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
+        files.push({
+          id,
+          path: path.resolve(filePath),
+          sourceProfile: "session_log",
+          agentHint: entry.logType,
+          parserHint: entry.logType,
+          sizeBytes: fileStat.size,
+          mtimeMs: fileStat.mtimeMs,
+          ino: Number(fileStat.ino),
+          dev: Number(fileStat.dev),
+        });
+      } catch {
+        // ignore stale files
+      }
+    }
+  }
+  return files;
+}
+
+export async function discoverTraceFiles(config: AppConfig): Promise<DiscoveredTraceFile[]> {
+  const dedup = new Map<string, DiscoveredTraceFile>();
+  const sessionLogFiles = await discoverSessionLogDirectories(config);
+  for (const file of sessionLogFiles) {
+    dedup.set(file.id, file);
+  }
+
+  const names = Object.keys(config.sources).sort();
+  for (const name of names) {
+    const profileFiles = await discoverProfile(config, name);
+    for (const file of profileFiles) {
+      if (!dedup.has(file.id)) {
+        dedup.set(file.id, file);
+      }
+    }
+  }
+  const all = Array.from(dedup.values());
+  all.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
+  return all;
+}

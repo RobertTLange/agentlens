@@ -1,0 +1,21 @@
+{
+  "name": "agentlens-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm -w packages/contracts run build && npm -w packages/core run build && npm -w apps/web run build && npm -w apps/server run build && npm -w apps/cli run build",
+    "typecheck": "npm run -ws typecheck",
+    "pretest": "npm -w packages/contracts run build && npm -w packages/core run build",
+    "test": "npm run -ws test",
+    "dev:server": "npm -w apps/server run dev",
+    "dev:web": "npm -w apps/web run dev",
+    "dev:cli": "npm -w apps/cli run dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0"
+  }
+}
