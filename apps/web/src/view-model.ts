@@ -1,4 +1,4 @@
-import type { NormalizedEvent } from "@agentlens/contracts";
+import type { AgentKind, NormalizedEvent } from "@agentlens/contracts";
 
 export type TimelineSortDirection = "first-latest" | "latest-first";
 
@@ -12,16 +12,39 @@ export interface TruncatedText {
   isTruncated: boolean;
 }
 
+const AGENT_ICON_BY_KIND: Record<AgentKind, string | null> = {
+  claude: "/icons/claude.svg",
+  codex: "/icons/codex.webp",
+  cursor: "/icons/cursor.png",
+  opencode: "/icons/opencode.png",
+  unknown: null,
+};
+
 function sanitizeKind(kind: string): string {
   return kind.replace(/[^a-z_]/g, "");
 }
 
+export function kindClassSuffix(kind: string): string {
+  return sanitizeKind(kind);
+}
+
 export function classForKind(kind: string): string {
-  return `kind kind-${sanitizeKind(kind)}`;
+  return `kind kind-${kindClassSuffix(kind)}`;
 }
 
 export function eventCardClass(kind: string): string {
-  return `event-card event-kind-${sanitizeKind(kind)}`;
+  return `event-card event-kind-${kindClassSuffix(kind)}`;
+}
+
+export function iconForAgent(agent: AgentKind): string | null {
+  return AGENT_ICON_BY_KIND[agent] ?? null;
+}
+
+export function pathTail(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/g, "");
+  if (!trimmed) return path;
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || trimmed;
 }
 
 export function domIdForEvent(eventId: string): string {
@@ -29,6 +52,15 @@ export function domIdForEvent(eventId: string): string {
 }
 
 export interface TimelineTocRow {
+  eventId: string;
+  index: number;
+  timestampMs: number | null;
+  eventKind: string;
+  label: string;
+  colorKey: string;
+}
+
+export interface TimelineStripSegment {
   eventId: string;
   index: number;
   timestampMs: number | null;
@@ -46,6 +78,20 @@ export function buildTimelineTocRows(events: NormalizedEvent[]): TimelineTocRow[
     label: event.tocLabel || event.preview,
     colorKey: event.eventKind,
   }));
+}
+
+export function buildTimelineStripSegments(events: NormalizedEvent[]): TimelineStripSegment[] {
+  return sortTimelineItems(
+    events.map((event) => ({
+      eventId: event.eventId,
+      index: event.index,
+      timestampMs: event.timestampMs,
+      eventKind: event.eventKind,
+      label: event.tocLabel || event.preview,
+      colorKey: event.eventKind,
+    })),
+    "first-latest",
+  );
 }
 
 export function sortTimelineItems<T extends TimelineSortable>(items: T[], direction: TimelineSortDirection): T[] {

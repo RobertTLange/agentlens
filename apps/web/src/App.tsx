@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import {
+  buildTimelineStripSegments,
   classForKind,
   domIdForEvent,
   eventCardClass,
+  kindClassSuffix,
   sortTimelineItems,
   truncateText,
   type TimelineSortDirection,
 } from "./view-model.js";
+import { SessionTraceRow } from "./SessionTraceRow.js";
+import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
 const API = "";
 const EVENT_SNIPPET_CHAR_LIMIT = 320;
@@ -41,9 +45,11 @@ export function App(): JSX.Element {
   const [selectedEventId, setSelectedEventId] = useState("");
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
   const [expandedSnippetEventIds, setExpandedSnippetEventIds] = useState<Set<string>>(new Set());
+  const [expandedPathTraceIds, setExpandedPathTraceIds] = useState<Set<string>>(new Set());
   const [autoFollow, setAutoFollow] = useState(true);
   const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("first-latest");
   const [liveTick, setLiveTick] = useState(0);
+  const [pulseSeqByTraceId, setPulseSeqByTraceId] = useState<Record<string, number>>({});
   const selectedIdRef = useRef("");
 
   const filteredTraces = useMemo(() => {
@@ -70,12 +76,23 @@ export function App(): JSX.Element {
     () => sortTimelineItems(page?.events ?? [], timelineSortDirection),
     [page, timelineSortDirection],
   );
+  const timelineStripEvents = useMemo(() => buildTimelineStripSegments(page?.events ?? []), [page]);
+  const filteredTraceIds = useMemo(() => filteredTraces.map((trace) => trace.id), [filteredTraces]);
+  const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(filteredTraceIds);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
 
   useEffect(() => {
+    const bumpPulse = (traceId: string): void => {
+      if (!traceId) return;
+      setPulseSeqByTraceId((prev) => ({
+        ...prev,
+        [traceId]: (prev[traceId] ?? 0) + 1,
+      }));
+    };
+
     const loadBoot = async (): Promise<void> => {
       try {
         const [overviewResp, tracesResp] = await Promise.all([
@@ -129,12 +146,18 @@ export function App(): JSX.Element {
 
     source.addEventListener("trace_added", (event) => {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { summary?: TraceSummary } };
-      if (data.payload?.summary) upsert(data.payload.summary);
+      if (data.payload?.summary) {
+        upsert(data.payload.summary);
+        bumpPulse(data.payload.summary.id);
+      }
     });
 
     source.addEventListener("trace_updated", (event) => {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { summary?: TraceSummary } };
-      if (data.payload?.summary) upsert(data.payload.summary);
+      if (data.payload?.summary) {
+        upsert(data.payload.summary);
+        bumpPulse(data.payload.summary.id);
+      }
     });
 
     source.addEventListener("trace_removed", (event) => {
@@ -143,6 +166,13 @@ export function App(): JSX.Element {
       if (!id) return;
       setTraces((prev) => prev.filter((trace) => trace.id !== id));
       setSelectedId((prev) => (prev === id ? "" : prev));
+      removeTraceRow(id);
+      setPulseSeqByTraceId((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     });
 
     source.addEventListener("overview_updated", (event) => {
@@ -167,7 +197,7 @@ export function App(): JSX.Element {
     return () => {
       source.close();
     };
-  }, []);
+  }, [removeTraceRow]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -208,9 +238,15 @@ export function App(): JSX.Element {
   const jumpToEvent = (eventId: string): void => {
     setSelectedEventId(eventId);
     const target = document.getElementById(domIdForEvent(eventId));
-    if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+    if (!target) return;
+    const scroller = target.closest(".events-scroll");
+    if (!(scroller instanceof HTMLElement)) return;
+    const targetRect = target.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    const relativeTop = targetRect.top - scrollerRect.top;
+    const centeredOffset = (scroller.clientHeight - targetRect.height) / 2;
+    const top = scroller.scrollTop + relativeTop - centeredOffset;
+    scroller.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   };
 
   const toggleExpanded = (eventId: string): void => {
@@ -227,6 +263,15 @@ export function App(): JSX.Element {
       const next = new Set(prev);
       if (next.has(eventId)) next.delete(eventId);
       else next.add(eventId);
+      return next;
+    });
+  };
+
+  const toggleTracePathExpanded = (traceId: string): void => {
+    setExpandedPathTraceIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(traceId)) next.delete(traceId);
+      else next.add(traceId);
       return next;
     });
   };
@@ -251,6 +296,32 @@ export function App(): JSX.Element {
         </div>
       </header>
 
+      <section className="timeline-strip-panel" aria-label="Session timeline summary">
+        {timelineStripEvents.length > 0 ? (
+          <div className="timeline-strip-scroll">
+            <div className="timeline-strip-track" aria-label="Chronological timeline events">
+              {timelineStripEvents.map((event) => {
+                const isActive = event.eventId === selectedEventId;
+                const eventTime = fmtTime(event.timestampMs);
+                const eventLabel = event.label || event.eventKind;
+                return (
+                  <button
+                    key={event.eventId}
+                    type="button"
+                    className={`timeline-segment kind-${kindClassSuffix(event.colorKey)} ${isActive ? "active" : ""}`}
+                    onClick={() => jumpToEvent(event.eventId)}
+                    title={`${eventLabel} (${event.eventKind}) #${event.index} ${eventTime}`}
+                    aria-label={`Jump to event #${event.index} ${event.eventKind}: ${eventLabel}`}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <div className="timeline-strip-empty">No timeline events</div>
+        )}
+      </section>
+
       <div className="grid">
         <section className="panel list-panel">
           <div className="panel-head">
@@ -265,23 +336,20 @@ export function App(): JSX.Element {
           <div className="list-scroll">
             {filteredTraces.map((trace) => {
               const isActive = trace.id === selectedId;
+              const isPathExpanded = expandedPathTraceIds.has(trace.id);
+              const pulseSeq = pulseSeqByTraceId[trace.id] ?? 0;
               return (
-                <button
+                <SessionTraceRow
                   key={trace.id}
-                  className={`trace-row ${isActive ? "active" : ""}`}
-                  onClick={() => setSelectedId(trace.id)}
-                >
-                  <div className="trace-main">
-                    <strong>{trace.agent}</strong>
-                    <span className="mono">{trace.sessionId || trace.id}</span>
-                  </div>
-                  <div className="trace-meta mono">
-                    <span>{fmtTime(trace.lastEventTs ?? trace.mtimeMs)}</span>
-                    <span>{`events ${trace.eventCount}`}</span>
-                    <span>{`errors ${trace.errorCount}`}</span>
-                  </div>
-                  <div className="trace-path mono">{trace.path}</div>
-                </button>
+                  trace={trace}
+                  isActive={isActive}
+                  isPathExpanded={isPathExpanded}
+                  pulseSeq={pulseSeq}
+                  onSelect={setSelectedId}
+                  onTogglePath={toggleTracePathExpanded}
+                  rowRef={bindTraceRowRef(trace.id)}
+                  fmtTime={fmtTime}
+                />
               );
             })}
             {filteredTraces.length === 0 && <div className="empty">No sessions</div>}
@@ -319,7 +387,7 @@ export function App(): JSX.Element {
                   className={`toc-row ${isActive ? "active" : ""}`}
                   onClick={() => jumpToEvent(row.eventId)}
                 >
-                  <span className={`toc-dot kind-${row.colorKey.replace(/[^a-z_]/g, "")}`} />
+                  <span className={`toc-dot kind-${kindClassSuffix(row.colorKey)}`} />
                   <span className="mono toc-index">{`#${row.index}`}</span>
                   <span className={classForKind(row.eventKind)}>{row.eventKind}</span>
                   <span className="toc-label">{row.label}</span>
@@ -399,7 +467,7 @@ export function App(): JSX.Element {
                         )}
                       </p>
                       {expandedEventIds.has(event.eventId) && (
-                        <pre>{JSON.stringify(event.raw, null, 2)}</pre>
+                        <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
                       )}
                     </article>
                   );
