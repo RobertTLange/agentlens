@@ -31,6 +31,8 @@ export interface AppConfig {
     intervalSeconds: number;
     recentEventWindow: number;
     includeMetaDefault: boolean;
+    statusRunningTtlMs: number;
+    statusWaitingTtlMs: number;
   };
   sessionLogDirectories: SessionLogDirectoryConfig[];
   sources: Record<string, SourceProfileConfig>;

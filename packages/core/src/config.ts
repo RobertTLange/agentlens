@@ -116,6 +116,8 @@ export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
       intervalSeconds: input?.scan?.intervalSeconds ?? DEFAULT_CONFIG.scan.intervalSeconds,
       recentEventWindow: input?.scan?.recentEventWindow ?? DEFAULT_CONFIG.scan.recentEventWindow,
       includeMetaDefault: input?.scan?.includeMetaDefault ?? DEFAULT_CONFIG.scan.includeMetaDefault,
+      statusRunningTtlMs: input?.scan?.statusRunningTtlMs ?? DEFAULT_CONFIG.scan.statusRunningTtlMs,
+      statusWaitingTtlMs: input?.scan?.statusWaitingTtlMs ?? DEFAULT_CONFIG.scan.statusWaitingTtlMs,
     },
     sessionLogDirectories: mergeSessionLogDirectories(input?.sessionLogDirectories, input?.sessionJsonlDirectories),
     sources,

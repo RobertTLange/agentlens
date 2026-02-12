@@ -67,6 +67,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     intervalSeconds: 2,
     recentEventWindow: 400,
     includeMetaDefault: true,
+    statusRunningTtlMs: 300_000,
+    statusWaitingTtlMs: 900_000,
   },
   sessionLogDirectories: DEFAULT_SESSION_LOG_DIRECTORIES,
   sources: DEFAULT_SOURCE_PROFILES,

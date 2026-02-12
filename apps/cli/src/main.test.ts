@@ -18,6 +18,8 @@ function buildFixtureConfig(codexSessionsRoot: string) {
       intervalSeconds: 5,
       recentEventWindow: 200,
       includeMetaDefault: false,
+      statusRunningTtlMs: 30_000,
+      statusWaitingTtlMs: 300_000,
     },
     sessionLogDirectories: [],
     sources: {

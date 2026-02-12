@@ -14,7 +14,7 @@ import type {
 import { discoverTraceFiles, type DiscoveredTraceFile } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
-import { nowMs } from "./utils.js";
+import { asRecord, asString, nowMs } from "./utils.js";
 
 const EVENT_KIND_KEYS: EventKind[] = [
   "system",
@@ -49,6 +49,14 @@ interface ActivityStatus {
   reason: string;
 }
 
+interface ActivityStatusOptions {
+  events: NormalizedEvent[];
+  unmatchedToolUses: number;
+  updatedMs: number;
+  nowMs: number;
+  scanConfig: AppConfig["scan"];
+}
+
 function emptyEventKindCounts(): Record<EventKind, number> {
   return {
     system: 0,
@@ -61,20 +69,159 @@ function emptyEventKindCounts(): Record<EventKind, number> {
   };
 }
 
-function deriveActivityStatus(events: NormalizedEvent[], unmatchedToolUses: number): ActivityStatus {
-  const latestEvent = events[events.length - 1];
-  if (latestEvent) {
-    const latestText = [latestEvent.rawType, latestEvent.preview, ...latestEvent.textBlocks].join(" ");
-    if (WAITING_INPUT_PATTERN.test(latestText)) {
-      return { status: "waiting_input", reason: "explicit_wait_marker" };
+function normalizeMarkerText(value: unknown): string {
+  return asString(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ");
+}
+
+function isStructuredWaitingValue(value: unknown): boolean {
+  const normalized = normalizeMarkerText(value);
+  if (!normalized) return false;
+
+  if (normalized === "waiting") return true;
+  if (normalized.includes("awaiting") && (normalized.includes("user") || normalized.includes("input"))) return true;
+  if (normalized.includes("waiting for") && (normalized.includes("user") || normalized.includes("input"))) return true;
+  if ((normalized.includes("needs") || normalized.includes("requires")) && normalized.includes("input")) return true;
+  if (normalized.includes("approval required") || normalized.includes("permission required")) return true;
+  if (normalized.includes("confirmation required") || normalized.includes("confirmation needed")) return true;
+  if (normalized.includes("press enter to continue")) return true;
+  return false;
+}
+
+function hasStructuredWaitingSignal(event: NormalizedEvent): boolean {
+  const raw = asRecord(event.raw);
+  const payload = asRecord(raw.payload);
+  const part = asRecord(raw.part);
+  const partState = asRecord(part.state);
+  const message = asRecord(raw.message);
+
+  const candidates: unknown[] = [
+    event.rawType,
+    raw.type,
+    raw.subtype,
+    raw.status,
+    raw.state,
+    raw.phase,
+    raw.reason,
+    payload.type,
+    payload.subtype,
+    payload.status,
+    payload.state,
+    payload.phase,
+    payload.reason,
+    part.type,
+    part.status,
+    part.state,
+    part.phase,
+    part.reason,
+    partState.status,
+    partState.state,
+    partState.phase,
+    partState.reason,
+    message.status,
+    message.state,
+    message.phase,
+  ];
+
+  return candidates.some((value) => isStructuredWaitingValue(value));
+}
+
+function hasTextWaitingSignal(event: NormalizedEvent): boolean {
+  const latestText = [
+    event.rawType,
+    event.preview,
+    ...event.textBlocks,
+    event.toolArgsText,
+    event.toolResultText,
+  ].join(" ");
+  return WAITING_INPUT_PATTERN.test(latestText);
+}
+
+function findLatestWaitSignalEvent(events: NormalizedEvent[]): NormalizedEvent | undefined {
+  for (let idx = events.length - 1; idx >= 0; idx -= 1) {
+    const event = events[idx];
+    if (!event) continue;
+    if (event.role === "assistant" || event.role === "system") return event;
+    if (event.eventKind === "assistant" || event.eventKind === "reasoning" || event.eventKind === "meta") return event;
+  }
+  return events[events.length - 1];
+}
+
+function applyFreshnessTtl(
+  activity: ActivityStatus,
+  updatedMs: number,
+  nowMsValue: number,
+  scanConfig: AppConfig["scan"],
+): ActivityStatus {
+  if (activity.status === "idle") return activity;
+  if (updatedMs <= 0) return { status: "idle", reason: "stale_timeout" };
+
+  const ageMs = Math.max(0, nowMsValue - updatedMs);
+  const ttlMs =
+    activity.status === "running"
+      ? Math.max(0, scanConfig.statusRunningTtlMs)
+      : Math.max(0, scanConfig.statusWaitingTtlMs);
+  if (ageMs > ttlMs) {
+    return { status: "idle", reason: "stale_timeout" };
+  }
+  return activity;
+}
+
+function deriveActivityStatus(options: ActivityStatusOptions): ActivityStatus {
+  const latestSignalEvent = findLatestWaitSignalEvent(options.events);
+  if (latestSignalEvent && (hasStructuredWaitingSignal(latestSignalEvent) || hasTextWaitingSignal(latestSignalEvent))) {
+    return applyFreshnessTtl(
+      { status: "waiting_input", reason: "explicit_wait_marker_fresh" },
+      options.updatedMs,
+      options.nowMs,
+      options.scanConfig,
+    );
+  }
+
+  if (options.unmatchedToolUses > 0) {
+    return applyFreshnessTtl(
+      { status: "running", reason: "pending_tool_use_fresh" },
+      options.updatedMs,
+      options.nowMs,
+      options.scanConfig,
+    );
+  }
+
+  if (options.updatedMs > 0) {
+    const runningAgeMs = Math.max(0, options.nowMs - options.updatedMs);
+    const runningTtlMs = Math.max(0, options.scanConfig.statusRunningTtlMs);
+    if (runningAgeMs <= runningTtlMs) {
+      return { status: "running", reason: "recent_activity_fresh" };
     }
   }
 
-  if (unmatchedToolUses > 0) {
-    return { status: "running", reason: "pending_tool_use" };
-  }
-
   return { status: "idle", reason: "no_active_signal" };
+}
+
+function withDerivedActivityStatus(
+  summary: TraceSummary,
+  events: NormalizedEvent[],
+  fileMtimeMs: number,
+  scanConfig: AppConfig["scan"],
+  nowMsValue: number,
+): TraceSummary {
+  const activityStatus = deriveActivityStatus({
+    events,
+    unmatchedToolUses: summary.unmatchedToolUses,
+    updatedMs: Math.max(summary.lastEventTs ?? 0, fileMtimeMs),
+    nowMs: nowMsValue,
+    scanConfig,
+  });
+  if (summary.activityStatus === activityStatus.status && summary.activityReason === activityStatus.reason) {
+    return summary;
+  }
+  return {
+    ...summary,
+    activityStatus: activityStatus.status,
+    activityReason: activityStatus.reason,
+  };
 }
 
 function summarize(
@@ -84,6 +231,8 @@ function summarize(
   sessionId: string,
   events: NormalizedEvent[],
   parseError: string,
+  scanConfig: AppConfig["scan"],
+  nowMsValue: number,
 ): TraceSummary {
   const eventKindCounts = emptyEventKindCounts();
   let errorCount = 0;
@@ -123,7 +272,13 @@ function summarize(
     if (!toolUseIds.has(id)) unmatchedToolResults += 1;
   }
 
-  const activityStatus = deriveActivityStatus(events, unmatchedToolUses);
+  const activityStatus = deriveActivityStatus({
+    events,
+    unmatchedToolUses,
+    updatedMs: Math.max(lastEventTs ?? 0, file.mtimeMs),
+    nowMs: nowMsValue,
+    scanConfig,
+  });
 
   return {
     id: file.id,
@@ -206,6 +361,7 @@ export class TraceIndex extends EventEmitter {
   }
 
   async refresh(): Promise<void> {
+    const refreshNowMs = nowMs();
     const files = await discoverTraceFiles(this.config);
     const nextIds = new Set(files.map((file) => file.id));
 
@@ -223,7 +379,16 @@ export class TraceIndex extends EventEmitter {
 
       try {
         const parsed = await this.parserRegistry.parseFile(file);
-        const summary = summarize(file, parsed.agent, parsed.parser, parsed.sessionId, parsed.events, parsed.parseError);
+        const summary = summarize(
+          file,
+          parsed.agent,
+          parsed.parser,
+          parsed.sessionId,
+          parsed.events,
+          parsed.parseError,
+          this.config.scan,
+          refreshNowMs,
+        );
         const detail: SessionDetail = { summary, events: parsed.events };
 
         const previousCount = current?.detail.events.length ?? 0;
@@ -241,10 +406,31 @@ export class TraceIndex extends EventEmitter {
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const summary = summarize(file, file.agentHint, "unknown", "", [], message);
+        const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config.scan, refreshNowMs);
         this.entries.set(file.id, { file, detail: { summary, events: [] } });
         this.emitStream(current ? "trace_updated" : "trace_added", { summary });
       }
+    }
+
+    for (const [id, entry] of this.entries) {
+      const nextSummary = withDerivedActivityStatus(
+        entry.detail.summary,
+        entry.detail.events,
+        entry.file.mtimeMs,
+        this.config.scan,
+        refreshNowMs,
+      );
+      if (nextSummary === entry.detail.summary) continue;
+
+      const detail: SessionDetail = {
+        ...entry.detail,
+        summary: nextSummary,
+      };
+      this.entries.set(id, {
+        ...entry,
+        detail,
+      });
+      this.emitStream("trace_updated", { summary: nextSummary });
     }
 
     this.emitStream("overview_updated", { overview: this.getOverview() });

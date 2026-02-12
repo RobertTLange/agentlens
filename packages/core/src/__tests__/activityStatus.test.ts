@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,13 +9,34 @@ async function createTempRoot(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), "agentlens-core-activity-"));
 }
 
-async function loadSummaryForCodexLines(lines: string[]): Promise<import("@agentlens/contracts").TraceSummary> {
+interface StatusFixtureOptions {
+  mtimeMs?: number;
+  statusRunningTtlMs?: number;
+  statusWaitingTtlMs?: number;
+}
+
+async function loadSummaryForCodexLines(
+  lines: string[],
+  options: StatusFixtureOptions = {},
+): Promise<import("@agentlens/contracts").TraceSummary> {
   const root = await createTempRoot();
   const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "12");
   await mkdir(codexDir, { recursive: true });
-  await writeFile(path.join(codexDir, "status-test.jsonl"), lines.join("\n"), "utf8");
+  const tracePath = path.join(codexDir, "status-test.jsonl");
+  await writeFile(tracePath, lines.join("\n"), "utf8");
+  if (options.mtimeMs !== undefined) {
+    const mtime = new Date(options.mtimeMs);
+    await utimes(tracePath, mtime, mtime);
+  }
 
   const config = mergeConfig({
+    scan: {
+      intervalSeconds: 2,
+      recentEventWindow: 400,
+      includeMetaDefault: true,
+      statusRunningTtlMs: options.statusRunningTtlMs ?? 300_000,
+      statusWaitingTtlMs: options.statusWaitingTtlMs ?? 900_000,
+    },
     sessionLogDirectories: [],
     sources: {
       codex_home: {
@@ -97,10 +118,40 @@ describe("trace activity status", () => {
     ]);
 
     expect(summary.activityStatus).toBe("running");
-    expect(summary.activityReason).toBe("pending_tool_use");
+    expect(summary.activityReason).toBe("pending_tool_use_fresh");
   });
 
-  it("marks waiting_input when latest event carries an explicit waiting marker", async () => {
+  it("downgrades running to idle when running ttl expires", async () => {
+    const summary = await loadSummaryForCodexLines(
+      [
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "running-stale-status" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            id: "fc_1",
+            name: "run_command",
+            call_id: "call_1",
+            arguments: "{\"command\":\"echo hi\"}",
+          },
+        }),
+      ],
+      {
+        mtimeMs: Date.now() - 120_000,
+        statusRunningTtlMs: 10_000,
+      },
+    );
+
+    expect(summary.activityStatus).toBe("idle");
+    expect(summary.activityReason).toBe("stale_timeout");
+  });
+
+  it("marks waiting_input for explicit structured waiting markers", async () => {
     const summary = await loadSummaryForCodexLines([
       JSON.stringify({
         timestamp: "2026-02-12T10:00:00.000Z",
@@ -109,38 +160,194 @@ describe("trace activity status", () => {
       }),
       JSON.stringify({
         timestamp: "2026-02-12T10:00:01.000Z",
-        type: "response_item",
-        payload: {
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: "Waiting for user input to continue." }],
-        },
+        type: "input_required",
+        payload: { status: "awaiting_user_input" },
       }),
     ]);
 
     expect(summary.activityStatus).toBe("waiting_input");
-    expect(summary.activityReason).toBe("explicit_wait_marker");
+    expect(summary.activityReason).toBe("explicit_wait_marker_fresh");
+  });
+
+  it("downgrades waiting_input to idle when waiting ttl expires", async () => {
+    const summary = await loadSummaryForCodexLines(
+      [
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "waiting-stale-status" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Waiting for user input to continue." }],
+          },
+        }),
+      ],
+      {
+        mtimeMs: Date.now() - 120_000,
+        statusWaitingTtlMs: 5_000,
+      },
+    );
+
+    expect(summary.activityStatus).toBe("idle");
+    expect(summary.activityReason).toBe("stale_timeout");
+  });
+
+  it("marks running when there is recent session activity", async () => {
+    const summary = await loadSummaryForCodexLines(
+      [
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "recent-activity-status" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Working..." }],
+          },
+        }),
+      ],
+      {
+        mtimeMs: Date.now(),
+      },
+    );
+
+    expect(summary.activityStatus).toBe("running");
+    expect(summary.activityReason).toBe("recent_activity_fresh");
   });
 
   it("marks idle when there is no pending tool and no waiting marker", async () => {
-    const summary = await loadSummaryForCodexLines([
-      JSON.stringify({
-        timestamp: "2026-02-12T10:00:00.000Z",
-        type: "session_meta",
-        payload: { id: "idle-status" },
-      }),
-      JSON.stringify({
-        timestamp: "2026-02-12T10:00:01.000Z",
-        type: "response_item",
-        payload: {
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: "All done." }],
-        },
-      }),
-    ]);
+    const summary = await loadSummaryForCodexLines(
+      [
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "idle-status" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "All done." }],
+          },
+        }),
+      ],
+      {
+        mtimeMs: Date.now() - 600_000,
+      },
+    );
 
     expect(summary.activityStatus).toBe("idle");
     expect(summary.activityReason).toBe("no_active_signal");
+  });
+
+  it("recomputes stale status on refresh even without file changes", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "12");
+    await mkdir(codexDir, { recursive: true });
+    await writeFile(
+      path.join(codexDir, "status-refresh.jsonl"),
+      [
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "stale-refresh-status" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            id: "fc_1",
+            name: "run_command",
+            call_id: "call_1",
+            arguments: "{\"command\":\"echo hi\"}",
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      scan: {
+        intervalSeconds: 2,
+        recentEventWindow: 400,
+        includeMetaDefault: true,
+        statusRunningTtlMs: 1,
+        statusWaitingTtlMs: 300_000,
+      },
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_home: {
+          name: "cursor_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_home: {
+          name: "opencode_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+    const initial = index.getSummaries()[0];
+    expect(initial?.activityStatus).toBe("running");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+    await index.refresh();
+
+    const stale = index.getSummaries()[0];
+    expect(stale?.activityStatus).toBe("idle");
+    expect(stale?.activityReason).toBe("stale_timeout");
   });
 });

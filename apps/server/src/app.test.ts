@@ -49,6 +49,8 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
       intervalSeconds: 5,
       recentEventWindow: 200,
       includeMetaDefault: false,
+      statusRunningTtlMs: 30_000,
+      statusWaitingTtlMs: 300_000,
     },
     sessionLogDirectories: [],
     sources: {
