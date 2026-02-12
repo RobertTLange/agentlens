@@ -81,8 +81,11 @@ npm install
 `build.sh` will:
 
 - remove a conflicting global `agentlens` package (if installed),
-- build and `npm link` the local CLI,
-- start `agentlens --browser`.
+- stop any existing AgentLens background server,
+- build the full workspace (contracts/core/web/server/cli),
+- `npm link` the local CLI,
+- start `agentlens --browser`,
+- open with a cache-busting URL (`/?reload=<timestamp>`).
 
 Optional args are forwarded:
 
