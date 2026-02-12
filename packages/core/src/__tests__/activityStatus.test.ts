@@ -370,7 +370,7 @@ describe("trace activity status", () => {
         intervalSeconds: 2,
         recentEventWindow: 400,
         includeMetaDefault: true,
-        statusRunningTtlMs: 1,
+        statusRunningTtlMs: 50,
         statusWaitingTtlMs: 300_000,
       },
       sessionLogDirectories: [],
@@ -429,7 +429,7 @@ describe("trace activity status", () => {
     expect(initial?.activityStatus).toBe("running");
 
     await new Promise((resolve) => {
-      setTimeout(resolve, 25);
+      setTimeout(resolve, 120);
     });
     await index.refresh();
 
