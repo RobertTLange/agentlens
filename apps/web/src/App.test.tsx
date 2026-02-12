@@ -174,6 +174,47 @@ function getTraceRow(id: string): HTMLDivElement {
   return row as HTMLDivElement;
 }
 
+function getTimelineStripPanel(): HTMLElement {
+  const panel = document.querySelector(".timeline-strip-panel");
+  if (!panel) throw new Error("missing timeline strip panel");
+  return panel as HTMLElement;
+}
+
+function getTimelineStripScroll(): HTMLDivElement {
+  const scroller = document.querySelector(".timeline-strip-scroll");
+  if (!(scroller instanceof HTMLDivElement)) {
+    throw new Error("missing timeline strip scroller");
+  }
+  return scroller;
+}
+
+function setTimelineStripMetrics(
+  scroller: HTMLDivElement,
+  metrics: { clientWidth: number; scrollWidth: number; scrollLeft: number },
+): void {
+  Object.defineProperty(scroller, "clientWidth", { configurable: true, value: metrics.clientWidth });
+  Object.defineProperty(scroller, "scrollWidth", { configurable: true, value: metrics.scrollWidth });
+  Object.defineProperty(scroller, "scrollLeft", { configurable: true, writable: true, value: metrics.scrollLeft });
+}
+
+function installTimelineStripScrollTo(scroller: HTMLDivElement) {
+  const scrollToSpy = vi.fn((options?: ScrollToOptions | number, y?: number) => {
+    if (typeof options === "number") {
+      scroller.scrollLeft = options;
+      return;
+    }
+    if (options && typeof options.left === "number") {
+      scroller.scrollLeft = options.left;
+      return;
+    }
+    if (typeof y === "number") {
+      scroller.scrollLeft = y;
+    }
+  });
+  Object.defineProperty(scroller, "scrollTo", { configurable: true, value: scrollToSpy });
+  return scrollToSpy;
+}
+
 let tracesById: Record<string, TraceSummary>;
 let tracePagesById: Record<string, TracePage>;
 let overview: OverviewStats;
@@ -231,14 +272,11 @@ afterEach(() => {
 });
 
 describe("App sessions list live motion", () => {
-  it("shows running and waiting indicators with recency heuristic", async () => {
-    const now = 2_000_000;
-    vi.spyOn(Date, "now").mockReturnValue(now);
-
+  it("shows running and waiting indicators from backend activity status", async () => {
     tracesById = {
-      "trace-a": makeTrace("trace-a", now - 5_000, "idle"),
-      "trace-b": makeTrace("trace-b", now - 45_000, "idle"),
-      "trace-c": makeTrace("trace-c", now - 300_000, "idle"),
+      "trace-a": makeTrace("trace-a", 10_000, "running"),
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": makeTrace("trace-c", 30_000, "idle"),
     };
     tracePagesById = Object.fromEntries(
       Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
@@ -443,12 +481,20 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
     await waitFor(() => expect(document.querySelectorAll(".event-raw-json").length).toBe(1));
 
-    const firstButtonAfterRefresh = document.querySelector(".event-card .expand-btn");
-    if (!(firstButtonAfterRefresh instanceof HTMLButtonElement)) {
-      throw new Error("missing first expand button after refresh");
+    const expandedRawJson = document.querySelector(".event-raw-json");
+    if (!(expandedRawJson instanceof HTMLElement)) {
+      throw new Error("missing expanded raw json block after refresh");
     }
-    expect(firstButtonAfterRefresh.textContent).toBe("collapse");
-    expect(document.querySelector(".event-raw-json")?.textContent).toContain("first payload");
+    expect(expandedRawJson.textContent).toContain("first payload");
+    const expandedCard = expandedRawJson.closest(".event-card");
+    if (!(expandedCard instanceof HTMLElement)) {
+      throw new Error("missing expanded event card after refresh");
+    }
+    const expandedButton = expandedCard.querySelector(".expand-btn");
+    if (!(expandedButton instanceof HTMLButtonElement)) {
+      throw new Error("missing expand button for expanded card after refresh");
+    }
+    expect(expandedButton.textContent).toBe("collapse");
   });
 
   it("adds enter animation classes for newly appended timeline rows and event cards", async () => {
@@ -490,14 +536,158 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(2));
     await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
 
-    const newTocRow = Array.from(document.querySelectorAll(".toc-row")).find((row) =>
-      row.textContent?.includes("new payload"),
-    );
+    const newTocRow = Array.from(document.querySelectorAll(".toc-row")).find((row) => row.textContent?.includes("#5"));
     expect(newTocRow?.className).toContain("toc-row-enter");
 
     const newEventCard = Array.from(document.querySelectorAll(".event-card")).find(
       (card) => card.querySelector("h3")?.textContent === "new payload",
     );
     expect(newEventCard?.className).toContain("event-card-enter");
+  });
+
+  it("drains large appended event chunks through a TOC queue", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) {
+      throw new Error("missing trace-c test fixture");
+    }
+
+    const firstEvent = makeEvent("event-queue-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
+
+    const appendedEvents: NormalizedEvent[] = Array.from({ length: 10 }, (_, idx) => ({
+      ...makeEvent(`event-queue-${idx}`, { signature: `queued payload ${idx}` }),
+      index: 5 + idx,
+      offset: 5 + idx,
+      timestampMs: 2_000 + idx,
+      preview: `queued payload ${idx}`,
+      textBlocks: [`queued payload ${idx}`],
+      tocLabel: `queued payload ${idx}`,
+      searchText: `queued payload ${idx}`,
+    }));
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, ...appendedEvents]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: appendedEvents.length });
+    });
+
+    await waitFor(() => {
+      const count = document.querySelectorAll(".toc-row").length;
+      expect(count).toBeGreaterThan(1);
+      expect(count).toBeLessThanOrEqual(11);
+    });
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(11));
+  });
+
+  it("auto-scrolls strip to latest when pinned at right edge and new events append", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-strip-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(1));
+
+    const panel = getTimelineStripPanel();
+    const scroller = getTimelineStripScroll();
+    const scrollToSpy = installTimelineStripScrollTo(scroller);
+
+    setTimelineStripMetrics(scroller, { clientWidth: 100, scrollWidth: 220, scrollLeft: 120 });
+    act(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+
+    await waitFor(() => expect(scroller.getAttribute("data-at-latest")).toBe("true"));
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-strip-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, appendedEvent]);
+    setTimelineStripMetrics(scroller, { clientWidth: 100, scrollWidth: 260, scrollLeft: 120 });
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: 1 });
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => expect(scrollToSpy).toHaveBeenCalled());
+
+    const lastCall = scrollToSpy.mock.calls.at(-1)?.[0] as ScrollToOptions | undefined;
+    expect(lastCall).toMatchObject({ left: 260, behavior: "smooth" });
+    expect(panel.className).not.toContain("timeline-strip-has-right-glow");
+  });
+
+  it("keeps strip position and shows right glow cue when new events append off-screen", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-strip-offscreen-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(1));
+
+    const panel = getTimelineStripPanel();
+    const scroller = getTimelineStripScroll();
+    const scrollToSpy = installTimelineStripScrollTo(scroller);
+
+    setTimelineStripMetrics(scroller, { clientWidth: 100, scrollWidth: 220, scrollLeft: 24 });
+    act(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+
+    await waitFor(() => expect(scroller.getAttribute("data-at-latest")).toBe("false"));
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-strip-offscreen-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, appendedEvent]);
+    setTimelineStripMetrics(scroller, { clientWidth: 100, scrollWidth: 260, scrollLeft: 24 });
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: 1 });
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => expect(panel.className).toContain("timeline-strip-has-right-glow"));
+    expect(scrollToSpy).not.toHaveBeenCalled();
+    expect(panel.getAttribute("aria-label")).toContain("off-screen to the right");
+
+    setTimelineStripMetrics(scroller, { clientWidth: 100, scrollWidth: 260, scrollLeft: 160 });
+    act(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+
+    await waitFor(() => expect(scroller.getAttribute("data-at-latest")).toBe("true"));
+    await waitFor(() => expect(panel.className).not.toContain("timeline-strip-has-right-glow"));
   });
 });

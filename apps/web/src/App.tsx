@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { NormalizedEvent, OverviewStats, SessionActivityStatus, TracePage, TraceSummary } from "@agentlens/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import {
   buildTimelineStripSegments,
   classForKind,
@@ -16,27 +16,37 @@ import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
 const API = "";
 const EVENT_SNIPPET_CHAR_LIMIT = 320;
-const RUNNING_WINDOW_MS = 10_000;
-const WAITING_WINDOW_MS = 120_000;
 const EVENT_ENTER_ANIMATION_MS = 560;
+const EVENT_APPEND_QUEUE_BATCH_SIZE = 6;
+const EVENT_APPEND_QUEUE_DELAY_MS = 36;
 const TRACE_ENTER_ANIMATION_MS = 620;
+const TIMELINE_LATEST_EPSILON_PX = 12;
 
 function fmtTime(ms: number | null): string {
   if (!ms) return "-";
   return new Date(ms).toLocaleString();
 }
 
-function sortTraces(traces: TraceSummary[]): TraceSummary[] {
-  return [...traces].sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
+function fmtTimeAgo(ms: number | null, nowMs: number): string {
+  if (!ms) return "-";
+  let remainingSeconds = Math.floor(Math.max(0, nowMs - ms) / 1000);
+  const days = Math.floor(remainingSeconds / 86_400);
+  remainingSeconds -= days * 86_400;
+  const hours = Math.floor(remainingSeconds / 3_600);
+  remainingSeconds -= hours * 3_600;
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds - minutes * 60;
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (days > 0 || hours > 0) parts.push(`${hours}h`);
+  if (days > 0 || hours > 0 || minutes > 0) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return `${parts.join(" ")} ago`;
 }
 
-function deriveSessionActivityStatus(trace: TraceSummary, nowMs: number): SessionActivityStatus {
-  const updatedMs = Math.max(trace.lastEventTs ?? 0, trace.mtimeMs);
-  if (updatedMs <= 0) return "idle";
-  const ageMs = Math.max(0, nowMs - updatedMs);
-  if (ageMs < RUNNING_WINDOW_MS) return "running";
-  if (ageMs < WAITING_WINDOW_MS) return "waiting_input";
-  return "idle";
+function sortTraces(traces: TraceSummary[]): TraceSummary[] {
+  return [...traces].sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -54,6 +64,13 @@ function clearAnimationTimers(timerById: Map<string, number>): void {
   timerById.clear();
 }
 
+function readTimelineStripViewport(scroller: HTMLElement): { hasOverflow: boolean; atLatest: boolean } {
+  const hasOverflow = scroller.scrollWidth > scroller.clientWidth + 1;
+  if (!hasOverflow) return { hasOverflow: false, atLatest: true };
+  const atLatest = scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - TIMELINE_LATEST_EPSILON_PX;
+  return { hasOverflow: true, atLatest };
+}
+
 export function App(): JSX.Element {
   const [overview, setOverview] = useState<OverviewStats | null>(null);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
@@ -68,19 +85,29 @@ export function App(): JSX.Element {
   const [expandedSnippetEventIds, setExpandedSnippetEventIds] = useState<Set<string>>(new Set());
   const [expandedPathTraceIds, setExpandedPathTraceIds] = useState<Set<string>>(new Set());
   const [autoFollow, setAutoFollow] = useState(true);
-  const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("first-latest");
+  const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("latest-first");
   const [liveTick, setLiveTick] = useState(0);
+  const [clockNowMs, setClockNowMs] = useState(() => Date.now());
   const [enteringTraceIds, setEnteringTraceIds] = useState<Set<string>>(new Set());
   const [enteringEventIds, setEnteringEventIds] = useState<Set<string>>(new Set());
+  const [visibleEventIds, setVisibleEventIds] = useState<Set<string>>(new Set());
   const [pulseSeqByTraceId, setPulseSeqByTraceId] = useState<Record<string, number>>({});
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [timelineStripHasOverflow, setTimelineStripHasOverflow] = useState(false);
+  const [timelineStripPinnedToLatest, setTimelineStripPinnedToLatest] = useState(true);
+  const [timelineOffscreenAppendCount, setTimelineOffscreenAppendCount] = useState(0);
   const selectedIdRef = useRef("");
+  const timelineStripRef = useRef<HTMLDivElement | null>(null);
+  const timelinePinnedToLatestRef = useRef(true);
+  const previousTimelineTraceIdRef = useRef("");
+  const previousTimelineEventCountRef = useRef(0);
   const previousTraceFilterRef = useRef("");
   const traceEnterAnimationInitializedRef = useRef(false);
   const previousVisibleTraceIdsRef = useRef<Set<string>>(new Set());
   const previousSelectedTraceIdRef = useRef("");
   const previousAnimatedTraceIdRef = useRef("");
   const previousPageEventIdsRef = useRef<Set<string>>(new Set());
+  const queuedEventIdsRef = useRef<string[]>([]);
+  const queuedEventTimerRef = useRef<number | null>(null);
   const enterAnimationTimerByTraceIdRef = useRef<Map<string, number>>(new Map());
   const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
 
@@ -94,24 +121,34 @@ export function App(): JSX.Element {
     });
   }, [traces, query]);
 
+  const visibleTimelineEvents = useMemo(() => {
+    if (!page || visibleEventIds.size === 0) return [];
+    return page.events.filter((event) => visibleEventIds.has(event.eventId));
+  }, [page, visibleEventIds]);
+
   const tocRows = useMemo(() => {
-    const rows = sortTimelineItems(page?.toc ?? [], timelineSortDirection);
+    const rows = sortTimelineItems(
+      (page?.toc ?? []).filter((row) => visibleEventIds.has(row.eventId)),
+      timelineSortDirection,
+    );
     const q = tocQuery.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((row) => {
       const search = `${row.index}\n${row.eventKind}\n${row.label}`.toLowerCase();
       return search.includes(q);
     });
-  }, [page, tocQuery, timelineSortDirection]);
+  }, [page, tocQuery, timelineSortDirection, visibleEventIds]);
 
   const timelineEvents = useMemo(
-    () => sortTimelineItems(page?.events ?? [], timelineSortDirection),
-    [page, timelineSortDirection],
+    () => sortTimelineItems(visibleTimelineEvents, timelineSortDirection),
+    [visibleTimelineEvents, timelineSortDirection],
   );
-  const timelineStripEvents = useMemo(() => buildTimelineStripSegments(page?.events ?? []), [page]);
+  const timelineStripEvents = useMemo(() => buildTimelineStripSegments(visibleTimelineEvents), [visibleTimelineEvents]);
   const tocRowIds = useMemo(() => tocRows.map((row) => row.eventId), [tocRows]);
   const timelineEventIds = useMemo(() => timelineEvents.map((event) => event.eventId), [timelineEvents]);
   const filteredTraceIds = useMemo(() => filteredTraces.map((trace) => trace.id), [filteredTraces]);
+  const timelineStripShowsRightGlow =
+    timelineStripHasOverflow && timelineOffscreenAppendCount > 0 && !timelineStripPinnedToLatest;
   const sessionStatusCounts = useMemo(() => {
     const counts = {
       running: 0,
@@ -119,18 +156,112 @@ export function App(): JSX.Element {
       idle: 0,
     };
     for (const trace of filteredTraces) {
-      const activityStatus = deriveSessionActivityStatus(trace, nowMs);
+      const activityStatus = trace.activityStatus;
       if (activityStatus === "running") counts.running += 1;
       else if (activityStatus === "waiting_input") counts.waiting_input += 1;
       else counts.idle += 1;
     }
     return counts;
-  }, [filteredTraces, nowMs]);
+  }, [filteredTraces]);
   const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(filteredTraceIds);
   const { bindItemRef: bindTocRowRef } = useListReorderAnimation<HTMLButtonElement>(tocRowIds, { resetKey: selectedId });
   const { bindItemRef: bindEventCardRef } = useListReorderAnimation<HTMLElement>(timelineEventIds, {
     resetKey: selectedId,
   });
+
+  const applyTimelineStripViewport = useCallback(
+    (nextViewport: { hasOverflow: boolean; atLatest: boolean }, clearOffscreenWhenPinned = true): void => {
+      setTimelineStripHasOverflow(nextViewport.hasOverflow);
+      timelinePinnedToLatestRef.current = nextViewport.atLatest;
+      setTimelineStripPinnedToLatest(nextViewport.atLatest);
+      if (clearOffscreenWhenPinned && (nextViewport.atLatest || !nextViewport.hasOverflow)) {
+        setTimelineOffscreenAppendCount(0);
+      }
+    },
+    [],
+  );
+
+  const clearEventAppendQueue = useCallback((): void => {
+    if (queuedEventTimerRef.current !== null) {
+      window.clearTimeout(queuedEventTimerRef.current);
+      queuedEventTimerRef.current = null;
+    }
+    queuedEventIdsRef.current = [];
+  }, []);
+
+  const scheduleEventEnterAnimationCleanup = useCallback((eventId: string): void => {
+    const existingTimer = enterAnimationTimerByEventIdRef.current.get(eventId);
+    if (existingTimer !== undefined) {
+      window.clearTimeout(existingTimer);
+      enterAnimationTimerByEventIdRef.current.delete(eventId);
+    }
+    const timeoutId = window.setTimeout(() => {
+      setEnteringEventIds((prev) => {
+        if (!prev.has(eventId)) return prev;
+        const next = new Set(prev);
+        next.delete(eventId);
+        return next;
+      });
+      enterAnimationTimerByEventIdRef.current.delete(eventId);
+    }, EVENT_ENTER_ANIMATION_MS);
+    enterAnimationTimerByEventIdRef.current.set(eventId, timeoutId);
+  }, []);
+
+  const flushQueuedEventBatch = useCallback((): void => {
+    if (queuedEventIdsRef.current.length === 0) {
+      queuedEventTimerRef.current = null;
+      return;
+    }
+
+    const batch = queuedEventIdsRef.current.splice(0, EVENT_APPEND_QUEUE_BATCH_SIZE);
+    if (batch.length > 0) {
+      setVisibleEventIds((prev) => {
+        const next = new Set(prev);
+        for (const eventId of batch) next.add(eventId);
+        return next;
+      });
+      setEnteringEventIds((prev) => {
+        const next = new Set(prev);
+        for (const eventId of batch) next.add(eventId);
+        return next;
+      });
+      for (const eventId of batch) {
+        scheduleEventEnterAnimationCleanup(eventId);
+      }
+    }
+
+    if (queuedEventIdsRef.current.length === 0) {
+      queuedEventTimerRef.current = null;
+      return;
+    }
+
+    queuedEventTimerRef.current = window.setTimeout(() => {
+      flushQueuedEventBatch();
+    }, EVENT_APPEND_QUEUE_DELAY_MS);
+  }, [scheduleEventEnterAnimationCleanup]);
+
+  const enqueueEventsForAppendReveal = useCallback(
+    (eventIds: string[]): void => {
+      if (eventIds.length === 0) return;
+      const queuedEventIdSet = new Set(queuedEventIdsRef.current);
+      for (const eventId of eventIds) {
+        if (queuedEventIdSet.has(eventId)) continue;
+        queuedEventIdSet.add(eventId);
+        queuedEventIdsRef.current.push(eventId);
+      }
+      if (queuedEventTimerRef.current !== null) return;
+      queuedEventTimerRef.current = window.setTimeout(() => {
+        flushQueuedEventBatch();
+      }, EVENT_APPEND_QUEUE_DELAY_MS);
+    },
+    [flushQueuedEventBatch],
+  );
+
+  const handleTimelineStripScroll = useCallback((): void => {
+    const scroller = timelineStripRef.current;
+    if (!scroller) return;
+    applyTimelineStripViewport(readTimelineStripViewport(scroller));
+  }, [applyTimelineStripViewport]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -138,11 +269,35 @@ export function App(): JSX.Element {
 
   useEffect(
     () => () => {
+      clearEventAppendQueue();
       clearAnimationTimers(enterAnimationTimerByTraceIdRef.current);
       clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
     },
-    [],
+    [clearEventAppendQueue],
   );
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setClockNowMs(Date.now());
+    }, 1_000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    const onResize = (): void => {
+      const scroller = timelineStripRef.current;
+      if (!scroller) return;
+      applyTimelineStripViewport(readTimelineStripViewport(scroller));
+    };
+
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+    };
+  }, [applyTimelineStripViewport]);
 
   useEffect(() => {
     const filter = query.trim().toLowerCase();
@@ -186,11 +341,6 @@ export function App(): JSX.Element {
       enterAnimationTimerByTraceIdRef.current.set(traceId, timeoutId);
     });
   }, [filteredTraceIds, query]);
-
-  useEffect(() => {
-    const interval = setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => clearInterval(interval);
-  }, []);
 
   useEffect(() => {
     const bumpPulse = (traceId: string): void => {
@@ -324,8 +474,16 @@ export function App(): JSX.Element {
       setExpandedEventIds(new Set());
       setExpandedSnippetEventIds(new Set());
       setEnteringEventIds(new Set());
+      setVisibleEventIds(new Set());
+      setTimelineStripHasOverflow(false);
+      setTimelineStripPinnedToLatest(true);
+      setTimelineOffscreenAppendCount(0);
+      timelinePinnedToLatestRef.current = true;
+      previousTimelineTraceIdRef.current = "";
+      previousTimelineEventCountRef.current = 0;
       previousAnimatedTraceIdRef.current = "";
       previousPageEventIdsRef.current = new Set();
+      clearEventAppendQueue();
       clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
       previousSelectedTraceIdRef.current = "";
       return;
@@ -369,66 +527,138 @@ export function App(): JSX.Element {
     };
 
     void loadTrace();
-  }, [selectedId, includeMeta, liveTick]);
+  }, [clearEventAppendQueue, selectedId, includeMeta, liveTick]);
 
   useEffect(() => {
     if (!autoFollow) return;
-    if (!page || page.events.length === 0) return;
-    const last = page.events[page.events.length - 1];
+    if (visibleTimelineEvents.length === 0) return;
+    const last = visibleTimelineEvents[visibleTimelineEvents.length - 1];
     if (!last) return;
     setSelectedEventId(last.eventId);
-  }, [autoFollow, page]);
+  }, [autoFollow, visibleTimelineEvents]);
+
+  useEffect(() => {
+    const scroller = timelineStripRef.current;
+    const currentCount = visibleTimelineEvents.length;
+    const hiddenCount = Math.max(0, (page?.events.length ?? 0) - currentCount);
+    if (!selectedId || !page || !scroller) {
+      previousTimelineTraceIdRef.current = selectedId;
+      previousTimelineEventCountRef.current = currentCount;
+      setTimelineStripHasOverflow(false);
+      setTimelineStripPinnedToLatest(true);
+      setTimelineOffscreenAppendCount(0);
+      timelinePinnedToLatestRef.current = true;
+      return;
+    }
+
+    const isTraceChanged = previousTimelineTraceIdRef.current !== selectedId;
+    const previousCount = isTraceChanged ? currentCount : previousTimelineEventCountRef.current;
+    const appendedCount = isTraceChanged ? 0 : Math.max(0, currentCount - previousCount);
+    const shouldAutoFollowToLatest = timelinePinnedToLatestRef.current;
+    const nextViewport = readTimelineStripViewport(scroller);
+
+    previousTimelineTraceIdRef.current = selectedId;
+    previousTimelineEventCountRef.current = currentCount;
+
+    if (isTraceChanged) {
+      applyTimelineStripViewport(nextViewport);
+      setTimelineOffscreenAppendCount(0);
+      return;
+    }
+
+    if (appendedCount === 0) {
+      if (hiddenCount > 0 || queuedEventIdsRef.current.length > 0) return;
+      applyTimelineStripViewport(nextViewport);
+      return;
+    }
+
+    if (shouldAutoFollowToLatest) {
+      if (typeof scroller.scrollTo === "function") {
+        scroller.scrollTo({ left: scroller.scrollWidth, behavior: "smooth" });
+      } else {
+        scroller.scrollLeft = scroller.scrollWidth;
+      }
+      setTimelineStripHasOverflow(scroller.scrollWidth > scroller.clientWidth + 1);
+      setTimelineStripPinnedToLatest(true);
+      setTimelineOffscreenAppendCount(0);
+      timelinePinnedToLatestRef.current = true;
+      return;
+    }
+
+    applyTimelineStripViewport(nextViewport, false);
+    if (nextViewport.hasOverflow && !nextViewport.atLatest) {
+      setTimelineOffscreenAppendCount((value) => value + appendedCount);
+    } else {
+      setTimelineOffscreenAppendCount(0);
+    }
+  }, [applyTimelineStripViewport, page, selectedId, visibleTimelineEvents.length]);
 
   useEffect(() => {
     if (!selectedId || !page) {
       previousAnimatedTraceIdRef.current = "";
       previousPageEventIdsRef.current = new Set();
+      clearEventAppendQueue();
+      setVisibleEventIds(new Set());
       setEnteringEventIds(new Set());
       return;
     }
 
-    const currentEventIds = new Set(page.events.map((event) => event.eventId));
+    const currentEventIds = page.events.map((event) => event.eventId);
+    const currentEventIdSet = new Set(currentEventIds);
     const isTraceChanged = previousAnimatedTraceIdRef.current !== selectedId;
     previousAnimatedTraceIdRef.current = selectedId;
 
     if (isTraceChanged) {
-      previousPageEventIdsRef.current = currentEventIds;
+      previousPageEventIdsRef.current = currentEventIdSet;
+      clearEventAppendQueue();
+      setVisibleEventIds(currentEventIdSet);
       setEnteringEventIds(new Set());
       clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
       return;
     }
 
-    const appendedEventIds: string[] = [];
-    for (const eventId of currentEventIds) {
-      if (!previousPageEventIdsRef.current.has(eventId)) appendedEventIds.push(eventId);
+    const previousEventIds = previousPageEventIdsRef.current;
+    let removedEventDetected = previousEventIds.size > currentEventIdSet.size;
+    if (!removedEventDetected) {
+      for (const eventId of previousEventIds) {
+        if (!currentEventIdSet.has(eventId)) {
+          removedEventDetected = true;
+          break;
+        }
+      }
     }
-    previousPageEventIdsRef.current = currentEventIds;
-    if (appendedEventIds.length === 0) return;
 
-    setEnteringEventIds((prev) => {
-      const next = new Set(prev);
-      for (const eventId of appendedEventIds) next.add(eventId);
+    if (removedEventDetected) {
+      previousPageEventIdsRef.current = currentEventIdSet;
+      clearEventAppendQueue();
+      setVisibleEventIds(currentEventIdSet);
+      setEnteringEventIds(new Set());
+      clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
+      return;
+    }
+
+    const appendedEventIds = currentEventIds.filter((eventId) => !previousEventIds.has(eventId));
+    previousPageEventIdsRef.current = currentEventIdSet;
+
+    setVisibleEventIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const eventId of prev) {
+        if (currentEventIdSet.has(eventId)) {
+          next.add(eventId);
+          continue;
+        }
+        changed = true;
+      }
+      if (!changed && next.size === prev.size) return prev;
       return next;
     });
 
-    for (const eventId of appendedEventIds) {
-      const existingTimer = enterAnimationTimerByEventIdRef.current.get(eventId);
-      if (existingTimer !== undefined) {
-        window.clearTimeout(existingTimer);
-        enterAnimationTimerByEventIdRef.current.delete(eventId);
-      }
-      const timeoutId = window.setTimeout(() => {
-        setEnteringEventIds((prev) => {
-          if (!prev.has(eventId)) return prev;
-          const next = new Set(prev);
-          next.delete(eventId);
-          return next;
-        });
-        enterAnimationTimerByEventIdRef.current.delete(eventId);
-      }, EVENT_ENTER_ANIMATION_MS);
-      enterAnimationTimerByEventIdRef.current.set(eventId, timeoutId);
+    queuedEventIdsRef.current = queuedEventIdsRef.current.filter((eventId) => currentEventIdSet.has(eventId));
+    if (appendedEventIds.length > 0) {
+      enqueueEventsForAppendReveal(appendedEventIds);
     }
-  }, [page, selectedId]);
+  }, [clearEventAppendQueue, enqueueEventsForAppendReveal, page, selectedId]);
 
   const jumpToEvent = (eventId: string): void => {
     setSelectedEventId(eventId);
@@ -491,9 +721,22 @@ export function App(): JSX.Element {
         </div>
       </header>
 
-      <section className="timeline-strip-panel" aria-label="Session timeline summary">
+      <section
+        className={`timeline-strip-panel ${timelineStripShowsRightGlow ? "timeline-strip-has-right-glow" : ""}`}
+        aria-label={
+          timelineStripShowsRightGlow
+            ? `Session timeline summary, ${timelineOffscreenAppendCount} new events off-screen to the right`
+            : "Session timeline summary"
+        }
+      >
         {timelineStripEvents.length > 0 ? (
-          <div className="timeline-strip-scroll">
+          <div
+            className="timeline-strip-scroll"
+            ref={timelineStripRef}
+            onScroll={handleTimelineStripScroll}
+            data-at-latest={timelineStripPinnedToLatest ? "true" : "false"}
+            data-has-overflow={timelineStripHasOverflow ? "true" : "false"}
+          >
             <div className="timeline-strip-track" aria-label="Chronological timeline events">
               {timelineStripEvents.map((event) => {
                 const isActive = event.eventId === selectedEventId;
@@ -539,7 +782,7 @@ export function App(): JSX.Element {
               const isActive = trace.id === selectedId;
               const isPathExpanded = expandedPathTraceIds.has(trace.id);
               const pulseSeq = pulseSeqByTraceId[trace.id] ?? 0;
-              const activityStatus = deriveSessionActivityStatus(trace, nowMs);
+              const activityStatus = trace.activityStatus;
               return (
                 <SessionTraceRow
                   key={trace.id}
@@ -595,7 +838,7 @@ export function App(): JSX.Element {
                   <span className={`toc-dot kind-${kindClassSuffix(row.colorKey)}`} />
                   <span className="mono toc-index">{`#${row.index}`}</span>
                   <span className={classForKind(row.eventKind)}>{row.eventKind}</span>
-                  <span className="toc-label">{row.label}</span>
+                  <span className="mono toc-timestamp">{fmtTimeAgo(row.timestampMs, clockNowMs)}</span>
                 </button>
               );
             })}
