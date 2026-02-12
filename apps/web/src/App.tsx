@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
+import type { OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import {
   buildTimelineStripSegments,
   classForKind,
@@ -7,7 +7,6 @@ import {
   eventCardClass,
   kindClassSuffix,
   sortTimelineItems,
-  truncateText,
   type TimelineSortDirection,
 } from "./view-model.js";
 import { SessionTraceRow } from "./SessionTraceRow.js";
@@ -15,7 +14,6 @@ import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
 const API = "";
-const EVENT_SNIPPET_CHAR_LIMIT = 320;
 const EVENT_ENTER_ANIMATION_MS = 560;
 const EVENT_APPEND_QUEUE_BATCH_SIZE = 6;
 const EVENT_APPEND_QUEUE_DELAY_MS = 36;
@@ -70,11 +68,10 @@ export function App(): JSX.Element {
   const [page, setPage] = useState<TracePage | null>(null);
   const [status, setStatus] = useState("Loading...");
   const [query, setQuery] = useState("");
-  const [includeMeta, setIncludeMeta] = useState(true);
+  const [includeMeta, setIncludeMeta] = useState(false);
   const [tocQuery, setTocQuery] = useState("");
   const [selectedEventId, setSelectedEventId] = useState("");
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
-  const [expandedSnippetEventIds, setExpandedSnippetEventIds] = useState<Set<string>>(new Set());
   const [expandedPathTraceIds, setExpandedPathTraceIds] = useState<Set<string>>(new Set());
   const [autoFollow, setAutoFollow] = useState(true);
   const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("latest-first");
@@ -126,7 +123,7 @@ export function App(): JSX.Element {
     const q = tocQuery.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((row) => {
-      const search = `${row.index}\n${row.eventKind}\n${row.label}`.toLowerCase();
+      const search = `${row.index}\n${row.eventKind}\n${row.toolType}\n${row.label}`.toLowerCase();
       return search.includes(q);
     });
   }, [page, tocQuery, timelineSortDirection, visibleEventIds]);
@@ -464,7 +461,6 @@ export function App(): JSX.Element {
     if (!selectedId) {
       setPage(null);
       setExpandedEventIds(new Set());
-      setExpandedSnippetEventIds(new Set());
       setEnteringEventIds(new Set());
       setVisibleEventIds(new Set());
       setTimelineStripHasOverflow(false);
@@ -492,14 +488,6 @@ export function App(): JSX.Element {
         const eventIds = new Set(detail.events.map((event) => event.eventId));
         setPage(detail);
         setExpandedEventIds((prev) => {
-          if (isTraceChanged) return new Set();
-          const next = new Set<string>();
-          for (const eventId of prev) {
-            if (eventIds.has(eventId)) next.add(eventId);
-          }
-          return next;
-        });
-        setExpandedSnippetEventIds((prev) => {
           if (isTraceChanged) return new Set();
           const next = new Set<string>();
           for (const eventId of prev) {
@@ -675,15 +663,6 @@ export function App(): JSX.Element {
     });
   };
 
-  const toggleSnippetExpanded = (eventId: string): void => {
-    setExpandedSnippetEventIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(eventId)) next.delete(eventId);
-      else next.add(eventId);
-      return next;
-    });
-  };
-
   const toggleTracePathExpanded = (traceId: string): void => {
     setExpandedPathTraceIds((prev) => {
       const next = new Set(prev);
@@ -691,13 +670,6 @@ export function App(): JSX.Element {
       else next.add(traceId);
       return next;
     });
-  };
-
-  const renderCompactSnippet = (event: NormalizedEvent): string => {
-    if (event.toolResultText) return event.toolResultText;
-    if (event.toolArgsText) return event.toolArgsText;
-    if (event.textBlocks[0]) return event.textBlocks[0];
-    return event.preview;
   };
 
   return (
@@ -830,6 +802,7 @@ export function App(): JSX.Element {
                   <span className={`toc-dot kind-${kindClassSuffix(row.colorKey)}`} />
                   <span className="mono toc-index">{`#${row.index}`}</span>
                   <span className={classForKind(row.eventKind)}>{row.eventKind}</span>
+                  {row.toolType && <span className="kind kind-tool-type">{row.toolType}</span>}
                   <span className="mono toc-timestamp">{fmtTimeAgo(row.timestampMs, clockNowMs)}</span>
                 </button>
               );
@@ -869,10 +842,6 @@ export function App(): JSX.Element {
               </div>
               <div className="events-scroll">
                 {timelineEvents.map((event) => {
-                  const fullSnippet = renderCompactSnippet(event);
-                  const snippet = truncateText(fullSnippet, EVENT_SNIPPET_CHAR_LIMIT);
-                  const isSnippetExpanded = expandedSnippetEventIds.has(event.eventId);
-                  const snippetText = isSnippetExpanded || !snippet.isTruncated ? fullSnippet : snippet.value;
                   return (
                     <article
                       key={event.eventId}
@@ -886,6 +855,7 @@ export function App(): JSX.Element {
                       <div className="event-top mono">
                         <span>{`#${event.index}`}</span>
                         <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
+                        {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
                         <span>{fmtTime(event.timestampMs)}</span>
                       </div>
                       <h3>{event.preview}</h3>
@@ -894,19 +864,6 @@ export function App(): JSX.Element {
                           {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
                         </div>
                       )}
-                      <p className="event-snippet">
-                        {snippetText}
-                        {snippet.isTruncated && (
-                          <button
-                            type="button"
-                            className="snippet-toggle mono"
-                            onClick={() => toggleSnippetExpanded(event.eventId)}
-                            aria-label={isSnippetExpanded ? "Show less text" : "Show full text"}
-                          >
-                            {isSnippetExpanded ? "show less" : "... more"}
-                          </button>
-                        )}
-                      </p>
                       {expandedEventIds.has(event.eventId) && (
                         <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
                       )}

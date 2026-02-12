@@ -29,6 +29,26 @@ interface ActivitySparklineModel {
   areaPath: string;
 }
 
+async function copyPathText(path: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(path);
+    return;
+  }
+
+  const hiddenField = document.createElement("textarea");
+  hiddenField.value = path;
+  hiddenField.setAttribute("readonly", "true");
+  hiddenField.style.position = "fixed";
+  hiddenField.style.opacity = "0";
+  hiddenField.style.pointerEvents = "none";
+  document.body.append(hiddenField);
+  hiddenField.select();
+  if (typeof document.execCommand === "function") {
+    document.execCommand("copy");
+  }
+  hiddenField.remove();
+}
+
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
@@ -141,10 +161,10 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
           </div>
         </div>
         <div className="trace-time-grid mono">
-          <span className="trace-time-label">start</span>
-          <span className="trace-time-value">{fmtTime(startMs)}</span>
           <span className="trace-time-label">updated</span>
           <span className="trace-time-value">{fmtTime(updatedMs)}</span>
+          <span className="trace-time-label">start</span>
+          <span className="trace-time-value">{fmtTime(startMs)}</span>
           <span className="trace-time-graph-wrap">
             <svg
               className={`trace-activity-sparkline ${statusClass} ${activitySparkline.isFlat ? "is-flat" : ""}`}
@@ -183,6 +203,23 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
             <span className={`trace-path-text mono ${isPathExpanded ? "expanded" : ""}`} title={trace.path}>
               {isPathExpanded ? trace.path : pathTail(trace.path)}
             </span>
+            {isPathExpanded && (
+              <button
+                type="button"
+                className="trace-path-copy"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void copyPathText(trace.path).catch(() => {});
+                }}
+                aria-label="Copy full log path"
+                title="Copy full log path"
+              >
+                <svg viewBox="0 0 14 14" aria-hidden="true">
+                  <rect x="4" y="1.5" width="8.5" height="9.5" rx="1.4" fill="none" stroke="currentColor" />
+                  <rect x="1.5" y="4" width="8.5" height="8.5" rx="1.4" fill="none" stroke="currentColor" />
+                </svg>
+              </button>
+            )}
           </div>
           <span className="trace-agent-icon-wrap">
             {traceIcon ? (

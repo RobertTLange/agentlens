@@ -21,6 +21,7 @@ describe("web view model", () => {
         eventKind: "tool_use",
         tocLabel: "Tool: Bash",
         preview: "Bash run",
+        toolType: "bash",
       },
       {
         eventId: "e2",
@@ -29,6 +30,7 @@ describe("web view model", () => {
         eventKind: "assistant",
         tocLabel: "",
         preview: "Done",
+        toolType: "",
       },
     ] as unknown as import("@agentlens/contracts").NormalizedEvent[]);
 
@@ -52,6 +54,7 @@ describe("web view model", () => {
         eventKind: "assistant",
         tocLabel: "Answer",
         preview: "Assistant response",
+        toolType: "",
       },
       {
         eventId: "e1",
@@ -60,6 +63,7 @@ describe("web view model", () => {
         eventKind: "user",
         tocLabel: "",
         preview: "User prompt",
+        toolType: "",
       },
       {
         eventId: "e2",
@@ -68,6 +72,7 @@ describe("web view model", () => {
         eventKind: "tool_use",
         tocLabel: "Tool: Bash",
         preview: "Run Bash",
+        toolType: "bash",
       },
     ] as unknown as import("@agentlens/contracts").NormalizedEvent[]);
 
@@ -92,7 +97,7 @@ describe("web view model", () => {
   });
 
   it("maps known agents to icon assets and unknown to fallback", () => {
-    expect(iconForAgent("codex")).toBe("/icons/codex.webp");
+    expect(iconForAgent("codex")).toBe("/icons/openai.svg");
     expect(iconForAgent("cursor")).toBe("/icons/cursor.png");
     expect(iconForAgent("claude")).toBe("/icons/claude.svg");
     expect(iconForAgent("opencode")).toBe("/icons/opencode.png");
@@ -100,7 +105,7 @@ describe("web view model", () => {
   });
 
   it("extracts a stable file/folder tail for collapsed path display", () => {
-    expect(pathTail("/Users/rob/.codex/sessions/2026/02/12/session.jsonl")).toBe("session.jsonl");
+    expect(pathTail("~/.codex/sessions/2026/02/12/session.jsonl")).toBe("session.jsonl");
     expect(pathTail("C:\\Users\\rob\\.cursor\\logs\\latest\\")).toBe("latest");
     expect(pathTail("trace.log")).toBe("trace.log");
     expect(pathTail("/")).toBe("/");

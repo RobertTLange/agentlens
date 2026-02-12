@@ -133,6 +133,7 @@ function makeTracePageWithEvents(summary: TraceSummary, events: NormalizedEvent[
       eventKind: event.eventKind,
       label: event.tocLabel || event.preview,
       colorKey: event.eventKind,
+      toolType: event.toolType,
     })),
     nextBefore: "",
     liveCursor: "",
@@ -155,6 +156,7 @@ function makeEvent(eventId: string, raw: Record<string, unknown>): NormalizedEve
     toolUseId: "",
     parentToolUseId: "",
     toolName: "",
+    toolType: "",
     toolCallId: "",
     functionName: "",
     toolArgsText: "",
@@ -236,6 +238,7 @@ let tracesById: Record<string, TraceSummary>;
 let tracePagesById: Record<string, TracePage>;
 let overview: OverviewStats;
 let rafQueue: FrameRequestCallback[];
+let requestedUrls: string[];
 
 beforeEach(() => {
   tracesById = {
@@ -248,6 +251,7 @@ beforeEach(() => {
     Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
   );
   rafQueue = [];
+  requestedUrls = [];
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
   vi.stubGlobal(
@@ -262,6 +266,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (input: string | URL | Request) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+      requestedUrls.push(url);
       if (url.includes("/api/overview")) {
         return new Response(JSON.stringify({ overview }), { status: 200 });
       }
@@ -289,6 +294,26 @@ afterEach(() => {
 });
 
 describe("App sessions list live motion", () => {
+  it("defaults include meta toggle to off in trace inspector", async () => {
+    render(<App />);
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/"))).toBe(true));
+
+    const includeMetaLabel = Array.from(document.querySelectorAll(".detail-controls .checkbox")).find((node) =>
+      node.textContent?.includes("include meta"),
+    );
+    if (!(includeMetaLabel instanceof HTMLLabelElement)) {
+      throw new Error("missing include meta checkbox label");
+    }
+    const includeMetaInput = includeMetaLabel.querySelector('input[type="checkbox"]');
+    if (!(includeMetaInput instanceof HTMLInputElement)) {
+      throw new Error("missing include meta checkbox input");
+    }
+
+    expect(includeMetaInput.checked).toBe(false);
+    const traceRequestUrl = requestedUrls.find((url) => url.includes("/api/trace/"));
+    expect(traceRequestUrl).toContain("include_meta=0");
+  });
+
   it("shows running and waiting indicators from backend activity status", async () => {
     tracesById = {
       "trace-a": makeTrace("trace-a", 10_000, "running"),
@@ -328,10 +353,44 @@ describe("App sessions list live motion", () => {
     expect(name?.getAttribute("title")).toBe("session-trace-c");
 
     const labels = Array.from(row.querySelectorAll(".trace-time-label")).map((node) => node.textContent?.trim());
-    expect(labels).toEqual(["start", "updated"]);
+    expect(labels).toEqual(["updated", "start"]);
 
     expect(row.querySelectorAll(".trace-time-value")).toHaveLength(2);
     expect(row.querySelector(".trace-meta")).toBeNull();
+  });
+
+  it("shows a copy icon in expanded path view and copies the full path", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const row = getTraceRow("trace-c");
+    expect(row.querySelector(".trace-path-copy")).toBeNull();
+
+    const pathToggle = row.querySelector(".trace-path-toggle");
+    if (!(pathToggle instanceof HTMLButtonElement)) {
+      throw new Error("missing path toggle button");
+    }
+
+    act(() => {
+      pathToggle.click();
+    });
+
+    const copyButton = row.querySelector(".trace-path-copy");
+    if (!(copyButton instanceof HTMLButtonElement)) {
+      throw new Error("missing path copy button");
+    }
+
+    act(() => {
+      copyButton.click();
+    });
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("/tmp/trace-c.jsonl"));
   });
 
   it("formats timeline TOC timestamps with threshold buckets", async () => {
@@ -382,6 +441,45 @@ describe("App sessions list live motion", () => {
     expect(getTocTimestampByIndex(8)).toBe("1d ago");
     expect(getTocTimestampByIndex(9)).toBe("now");
     expect(getTocTimestampByIndex(10)).toBe("-");
+  });
+
+  it("renders tool-type tags in TOC rows and trace inspector cards", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const taggedEvent: NormalizedEvent = {
+      ...makeEvent("event-tool-type-tag", { signature: "tool typed event" }),
+      eventKind: "tool_use",
+      toolType: "bash",
+      preview: "run command",
+      tocLabel: "Tool: exec_command",
+      searchText: "tool typed event bash",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [taggedEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+
+    const tocTag = document.querySelector(".toc-row .kind-tool-type");
+    expect(tocTag?.textContent?.trim()).toBe("bash");
+
+    const cardTag = document.querySelector(".event-card .event-top .kind-tool-type");
+    expect(cardTag?.textContent?.trim()).toBe("bash");
+  });
+
+  it("does not render snippet text under the event header preview", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const duplicateEvent = makeEvent("event-duplicate-snippet", { signature: "duplicate" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [duplicateEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+
+    expect(document.querySelector(".event-card h3")?.textContent).toBe("expanded json");
+    expect(document.querySelector(".event-card .event-snippet")).toBeNull();
   });
 
   it("renders activity sparkline with status tint and accessibility label", async () => {

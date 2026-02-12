@@ -14,7 +14,7 @@ export interface TruncatedText {
 
 const AGENT_ICON_BY_KIND: Record<AgentKind, string | null> = {
   claude: "/icons/claude.svg",
-  codex: "/icons/codex.webp",
+  codex: "/icons/openai.svg",
   cursor: "/icons/cursor.png",
   opencode: "/icons/opencode.png",
   unknown: null,
@@ -58,6 +58,7 @@ export interface TimelineTocRow {
   eventKind: string;
   label: string;
   colorKey: string;
+  toolType: string;
 }
 
 export interface TimelineStripSegment {
@@ -77,6 +78,7 @@ export function buildTimelineTocRows(events: NormalizedEvent[]): TimelineTocRow[
     eventKind: event.eventKind,
     label: event.tocLabel || event.preview,
     colorKey: event.eventKind,
+    toolType: event.toolType,
   }));
 }
 
