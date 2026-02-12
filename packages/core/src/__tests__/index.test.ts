@@ -293,10 +293,160 @@ describe("trace index", () => {
     expect(page.toc?.[2]?.eventKind).toBe("tool_result");
   });
 
+  it("parses unix epoch ts fields for trace start and updated timestamps", async () => {
+    const root = await createTempRoot();
+    const sessionRoot = path.join(root, "custom-session-root");
+    const sessionDir = path.join(sessionRoot, "sessions");
+    await mkdir(sessionDir, { recursive: true });
+
+    const historyPath = path.join(sessionDir, "history.jsonl");
+    await writeFile(
+      historyPath,
+      [
+        JSON.stringify({ session_id: "sess-ts", ts: 1_769_000_000, text: "first" }),
+        JSON.stringify({ session_id: "sess-ts", ts: "1769000120", text: "last" }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: sessionRoot, logType: "codex" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_home: {
+          name: "cursor_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_home: {
+          name: "opencode_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.firstEventTs).toBe(1_769_000_000_000);
+    expect(summary?.lastEventTs).toBe(1_769_000_120_000);
+  });
+
+  it("uses file order for first/last event timestamps", async () => {
+    const root = await createTempRoot();
+    const sessionRoot = path.join(root, "custom-session-root");
+    const sessionDir = path.join(sessionRoot, "sessions");
+    await mkdir(sessionDir, { recursive: true });
+
+    const historyPath = path.join(sessionDir, "history.jsonl");
+    await writeFile(
+      historyPath,
+      [
+        JSON.stringify({ session_id: "sess-order", ts: 1_769_000_200, text: "first row" }),
+        JSON.stringify({ session_id: "sess-order", ts: 1_769_000_100, text: "second row" }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: sessionRoot, logType: "codex" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_home: {
+          name: "cursor_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_home: {
+          name: "opencode_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.firstEventTs).toBe(1_769_000_200_000);
+    expect(summary?.lastEventTs).toBe(1_769_000_100_000);
+  });
+
   it("indexes JSONL sessions from configured sessionLogDirectories with explicit parser type", async () => {
     const root = await createTempRoot();
-    const sessionRoot = path.join(root, "custom-session-root", "logs");
-    const codexDir = path.join(sessionRoot, "2026", "02", "12");
+    const sessionRoot = path.join(root, "custom-session-root");
+    const codexDir = path.join(sessionRoot, "sessions", "2026", "02", "12");
     await mkdir(codexDir, { recursive: true });
 
     const codexPath = path.join(codexDir, "custom-session.jsonl");
@@ -318,6 +468,11 @@ describe("trace index", () => {
           },
         }),
       ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(sessionRoot, "history.jsonl"),
+      JSON.stringify({ session_id: "history-should-not-index", ts: 1_769_500_000, text: "do not include" }),
       "utf8",
     );
 
@@ -380,5 +535,6 @@ describe("trace index", () => {
     expect(summary?.agent).toBe("codex");
     expect(summary?.sourceProfile).toBe("session_log");
     expect(summary?.parser).toBe("codex");
+    expect(index.getSummaries().some((item) => item.path.endsWith("/history.jsonl"))).toBe(false);
   });
 });

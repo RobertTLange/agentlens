@@ -4,6 +4,7 @@ import type {
   EventKind,
   NormalizedEvent,
   OverviewStats,
+  SessionActivityStatus,
   SessionDetail,
   StreamEnvelope,
   TracePage,
@@ -25,6 +26,9 @@ const EVENT_KIND_KEYS: EventKind[] = [
   "meta",
 ];
 
+const WAITING_INPUT_PATTERN =
+  /\b(?:await(?:ing)?\s+(?:user|input)|waiting\s+for\s+(?:user|input|approval)|user\s+input\s+required|needs?\s+user\s+input|permission\s+required|approval\s+required|confirm(?:ation)?\s+(?:required|needed)|press\s+enter\s+to\s+continue)\b/i;
+
 interface TraceEntry {
   file: DiscoveredTraceFile;
   detail: SessionDetail;
@@ -40,6 +44,11 @@ export interface TraceIndexEvent {
   envelope: StreamEnvelope;
 }
 
+interface ActivityStatus {
+  status: SessionActivityStatus;
+  reason: string;
+}
+
 function emptyEventKindCounts(): Record<EventKind, number> {
   return {
     system: 0,
@@ -50,6 +59,22 @@ function emptyEventKindCounts(): Record<EventKind, number> {
     reasoning: 0,
     meta: 0,
   };
+}
+
+function deriveActivityStatus(events: NormalizedEvent[], unmatchedToolUses: number): ActivityStatus {
+  const latestEvent = events[events.length - 1];
+  if (latestEvent) {
+    const latestText = [latestEvent.rawType, latestEvent.preview, ...latestEvent.textBlocks].join(" ");
+    if (WAITING_INPUT_PATTERN.test(latestText)) {
+      return { status: "waiting_input", reason: "explicit_wait_marker" };
+    }
+  }
+
+  if (unmatchedToolUses > 0) {
+    return { status: "running", reason: "pending_tool_use" };
+  }
+
+  return { status: "idle", reason: "no_active_signal" };
 }
 
 function summarize(
@@ -64,6 +89,7 @@ function summarize(
   let errorCount = 0;
   let toolUseCount = 0;
   let toolResultCount = 0;
+  let firstEventTs: number | null = null;
   let lastEventTs: number | null = null;
 
   const toolUseIds = new Set<string>();
@@ -81,7 +107,9 @@ function summarize(
       if (event.toolUseId) toolResultIds.add(event.toolUseId);
     }
     if (event.timestampMs !== null) {
-      lastEventTs = Math.max(lastEventTs ?? event.timestampMs, event.timestampMs);
+      // Preserve file order semantics: start = first timestamped event in file, updated = last.
+      firstEventTs ??= event.timestampMs;
+      lastEventTs = event.timestampMs;
     }
   }
 
@@ -95,6 +123,8 @@ function summarize(
     if (!toolUseIds.has(id)) unmatchedToolResults += 1;
   }
 
+  const activityStatus = deriveActivityStatus(events, unmatchedToolUses);
+
   return {
     id: file.id,
     sourceProfile: file.sourceProfile,
@@ -104,6 +134,7 @@ function summarize(
     sessionId,
     sizeBytes: file.sizeBytes,
     mtimeMs: file.mtimeMs,
+    firstEventTs,
     lastEventTs,
     eventCount: events.length,
     parseable: parseError.length === 0,
@@ -113,6 +144,8 @@ function summarize(
     toolResultCount,
     unmatchedToolUses,
     unmatchedToolResults,
+    activityStatus: activityStatus.status,
+    activityReason: activityStatus.reason,
     eventKindCounts,
   };
 }

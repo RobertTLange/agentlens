@@ -9,6 +9,8 @@ export type EventKind =
   | "reasoning"
   | "meta";
 
+export type SessionActivityStatus = "running" | "waiting_input" | "idle";
+
 export interface SourceProfileConfig {
   name: string;
   enabled: boolean;
@@ -69,6 +71,7 @@ export interface TraceSummary {
   sessionId: string;
   sizeBytes: number;
   mtimeMs: number;
+  firstEventTs?: number | null;
   lastEventTs: number | null;
   eventCount: number;
   parseable: boolean;
@@ -78,6 +81,8 @@ export interface TraceSummary {
   toolResultCount: number;
   unmatchedToolUses: number;
   unmatchedToolResults: number;
+  activityStatus: SessionActivityStatus;
+  activityReason: string;
   eventKindCounts: Record<EventKind, number>;
 }
 

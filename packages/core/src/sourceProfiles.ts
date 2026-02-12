@@ -28,7 +28,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
   },
   claude_history: {
     name: "claude_history",
-    enabled: true,
+    enabled: false,
     roots: ["~/.claude"],
     includeGlobs: ["history.jsonl"],
     excludeGlobs: [],
