@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
+import type { NormalizedEvent, OverviewStats, SessionActivityStatus, TracePage, TraceSummary } from "@agentlens/contracts";
 import {
   buildTimelineStripSegments,
   classForKind,
@@ -11,10 +11,13 @@ import {
   type TimelineSortDirection,
 } from "./view-model.js";
 import { SessionTraceRow } from "./SessionTraceRow.js";
+import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
 const API = "";
 const EVENT_SNIPPET_CHAR_LIMIT = 320;
+const RUNNING_WINDOW_MS = 10_000;
+const WAITING_WINDOW_MS = 120_000;
 
 function fmtTime(ms: number | null): string {
   if (!ms) return "-";
@@ -23,6 +26,15 @@ function fmtTime(ms: number | null): string {
 
 function sortTraces(traces: TraceSummary[]): TraceSummary[] {
   return [...traces].sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
+}
+
+function deriveSessionActivityStatus(trace: TraceSummary, nowMs: number): SessionActivityStatus {
+  const updatedMs = Math.max(trace.lastEventTs ?? 0, trace.mtimeMs);
+  if (updatedMs <= 0) return "idle";
+  const ageMs = Math.max(0, nowMs - updatedMs);
+  if (ageMs < RUNNING_WINDOW_MS) return "running";
+  if (ageMs < WAITING_WINDOW_MS) return "waiting_input";
+  return "idle";
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -49,8 +61,14 @@ export function App(): JSX.Element {
   const [autoFollow, setAutoFollow] = useState(true);
   const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("first-latest");
   const [liveTick, setLiveTick] = useState(0);
+  const [enteringEventIds, setEnteringEventIds] = useState<Set<string>>(new Set());
   const [pulseSeqByTraceId, setPulseSeqByTraceId] = useState<Record<string, number>>({});
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const selectedIdRef = useRef("");
+  const previousSelectedTraceIdRef = useRef("");
+  const previousAnimatedTraceIdRef = useRef("");
+  const previousPageEventIdsRef = useRef<Set<string>>(new Set());
+  const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
 
   const filteredTraces = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -77,12 +95,47 @@ export function App(): JSX.Element {
     [page, timelineSortDirection],
   );
   const timelineStripEvents = useMemo(() => buildTimelineStripSegments(page?.events ?? []), [page]);
+  const tocRowIds = useMemo(() => tocRows.map((row) => row.eventId), [tocRows]);
+  const timelineEventIds = useMemo(() => timelineEvents.map((event) => event.eventId), [timelineEvents]);
   const filteredTraceIds = useMemo(() => filteredTraces.map((trace) => trace.id), [filteredTraces]);
+  const sessionStatusCounts = useMemo(() => {
+    const counts = {
+      running: 0,
+      waiting_input: 0,
+      idle: 0,
+    };
+    for (const trace of filteredTraces) {
+      const activityStatus = deriveSessionActivityStatus(trace, nowMs);
+      if (activityStatus === "running") counts.running += 1;
+      else if (activityStatus === "waiting_input") counts.waiting_input += 1;
+      else counts.idle += 1;
+    }
+    return counts;
+  }, [filteredTraces, nowMs]);
   const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(filteredTraceIds);
+  const { bindItemRef: bindTocRowRef } = useListReorderAnimation<HTMLButtonElement>(tocRowIds, { resetKey: selectedId });
+  const { bindItemRef: bindEventCardRef } = useListReorderAnimation<HTMLElement>(timelineEventIds, {
+    resetKey: selectedId,
+  });
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(
+    () => () => {
+      for (const timeoutId of enterAnimationTimerByEventIdRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      enterAnimationTimerByEventIdRef.current.clear();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const interval = setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const bumpPulse = (traceId: string): void => {
@@ -202,17 +255,45 @@ export function App(): JSX.Element {
   useEffect(() => {
     if (!selectedId) {
       setPage(null);
+      setExpandedEventIds(new Set());
+      setExpandedSnippetEventIds(new Set());
+      setEnteringEventIds(new Set());
+      previousAnimatedTraceIdRef.current = "";
+      previousPageEventIdsRef.current = new Set();
+      for (const timeoutId of enterAnimationTimerByEventIdRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      enterAnimationTimerByEventIdRef.current.clear();
+      previousSelectedTraceIdRef.current = "";
       return;
     }
+
+    const isTraceChanged = previousSelectedTraceIdRef.current !== selectedId;
+    previousSelectedTraceIdRef.current = selectedId;
 
     const loadTrace = async (): Promise<void> => {
       try {
         const detail = await fetchJson<TracePage>(
           `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=1200&include_meta=${includeMeta ? "1" : "0"}`,
         );
+        const eventIds = new Set(detail.events.map((event) => event.eventId));
         setPage(detail);
-        setExpandedEventIds(new Set());
-        setExpandedSnippetEventIds(new Set());
+        setExpandedEventIds((prev) => {
+          if (isTraceChanged) return new Set();
+          const next = new Set<string>();
+          for (const eventId of prev) {
+            if (eventIds.has(eventId)) next.add(eventId);
+          }
+          return next;
+        });
+        setExpandedSnippetEventIds((prev) => {
+          if (isTraceChanged) return new Set();
+          const next = new Set<string>();
+          for (const eventId of prev) {
+            if (eventIds.has(eventId)) next.add(eventId);
+          }
+          return next;
+        });
         setSelectedEventId((prev) => {
           if (prev && detail.events.some((event) => event.eventId === prev)) {
             return prev;
@@ -234,6 +315,60 @@ export function App(): JSX.Element {
     if (!last) return;
     setSelectedEventId(last.eventId);
   }, [autoFollow, page]);
+
+  useEffect(() => {
+    if (!selectedId || !page) {
+      previousAnimatedTraceIdRef.current = "";
+      previousPageEventIdsRef.current = new Set();
+      setEnteringEventIds(new Set());
+      return;
+    }
+
+    const currentEventIds = new Set(page.events.map((event) => event.eventId));
+    const isTraceChanged = previousAnimatedTraceIdRef.current !== selectedId;
+    previousAnimatedTraceIdRef.current = selectedId;
+
+    if (isTraceChanged) {
+      previousPageEventIdsRef.current = currentEventIds;
+      setEnteringEventIds(new Set());
+      for (const timeoutId of enterAnimationTimerByEventIdRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      enterAnimationTimerByEventIdRef.current.clear();
+      return;
+    }
+
+    const appendedEventIds: string[] = [];
+    for (const eventId of currentEventIds) {
+      if (!previousPageEventIdsRef.current.has(eventId)) appendedEventIds.push(eventId);
+    }
+    previousPageEventIdsRef.current = currentEventIds;
+    if (appendedEventIds.length === 0) return;
+
+    setEnteringEventIds((prev) => {
+      const next = new Set(prev);
+      for (const eventId of appendedEventIds) next.add(eventId);
+      return next;
+    });
+
+    for (const eventId of appendedEventIds) {
+      const existingTimer = enterAnimationTimerByEventIdRef.current.get(eventId);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+        enterAnimationTimerByEventIdRef.current.delete(eventId);
+      }
+      const timeoutId = window.setTimeout(() => {
+        setEnteringEventIds((prev) => {
+          if (!prev.has(eventId)) return prev;
+          const next = new Set(prev);
+          next.delete(eventId);
+          return next;
+        });
+        enterAnimationTimerByEventIdRef.current.delete(eventId);
+      }, 420);
+      enterAnimationTimerByEventIdRef.current.set(eventId, timeoutId);
+    }
+  }, [page, selectedId]);
 
   const jumpToEvent = (eventId: string): void => {
     setSelectedEventId(eventId);
@@ -325,7 +460,13 @@ export function App(): JSX.Element {
       <div className="grid">
         <section className="panel list-panel">
           <div className="panel-head">
-            <h2>Sessions</h2>
+            <div className="session-head-top">
+              <h2>Sessions</h2>
+              <div className="session-head-counters mono">
+                <span className="session-head-counter status-running">{`running ${sessionStatusCounts.running}`}</span>
+                <span className="session-head-counter status-waiting">{`waiting ${sessionStatusCounts.waiting_input}`}</span>
+              </div>
+            </div>
             <input
               className="search"
               placeholder="Search session/path"
@@ -338,10 +479,12 @@ export function App(): JSX.Element {
               const isActive = trace.id === selectedId;
               const isPathExpanded = expandedPathTraceIds.has(trace.id);
               const pulseSeq = pulseSeqByTraceId[trace.id] ?? 0;
+              const activityStatus = deriveSessionActivityStatus(trace, nowMs);
               return (
                 <SessionTraceRow
                   key={trace.id}
                   trace={trace}
+                  activityStatus={activityStatus}
                   isActive={isActive}
                   isPathExpanded={isPathExpanded}
                   pulseSeq={pulseSeq}
@@ -384,8 +527,9 @@ export function App(): JSX.Element {
               return (
                 <button
                   key={row.eventId}
-                  className={`toc-row ${isActive ? "active" : ""}`}
+                  className={`toc-row ${isActive ? "active" : ""} ${enteringEventIds.has(row.eventId) ? "toc-row-enter" : ""}`}
                   onClick={() => jumpToEvent(row.eventId)}
+                  ref={bindTocRowRef(row.eventId)}
                 >
                   <span className={`toc-dot kind-${kindClassSuffix(row.colorKey)}`} />
                   <span className="mono toc-index">{`#${row.index}`}</span>
@@ -437,7 +581,8 @@ export function App(): JSX.Element {
                     <article
                       key={event.eventId}
                       id={domIdForEvent(event.eventId)}
-                      className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""}`}
+                      className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
+                      ref={bindEventCardRef(event.eventId)}
                     >
                       <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
                         {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}

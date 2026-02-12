@@ -126,8 +126,8 @@ body {
 }
 
 .timeline-segment {
-  flex: 0 0 8px;
-  min-width: 8px;
+  flex: 0 0 7px;
+  min-width: 7px;
   height: 18px;
   border: 1px solid #94a3b8;
   border-radius: 4px;
@@ -207,6 +207,39 @@ body {
   align-items: stretch;
 }
 
+.session-head-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.session-head-counters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-head-counter {
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.session-head-counter.status-running {
+  border-color: #0e7490;
+  background: #ecfeff;
+  color: #0e7490;
+}
+
+.session-head-counter.status-waiting {
+  border-color: #d97706;
+  background: #fffbeb;
+  color: #92400e;
+}
+
 .list-panel {
   min-height: 0;
 }
@@ -229,10 +262,25 @@ body {
   padding: 9px;
   cursor: pointer;
   display: grid;
-  gap: 4px;
+  gap: 6px;
   white-space: normal;
   min-width: 0;
   position: relative;
+}
+
+.trace-row.status-running {
+  border-color: #7dd3fc;
+  background: #f0f9ff;
+}
+
+.trace-row.status-waiting {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.trace-row.status-idle {
+  border-color: #dbeafe;
+  background: #f8fafc;
 }
 
 .trace-row.active {
@@ -242,7 +290,7 @@ body {
 
 .trace-row-inner {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
   border-radius: inherit;
 }
@@ -275,28 +323,86 @@ body {
   outline-offset: 1px;
 }
 
-.trace-main {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  flex-wrap: wrap;
+.trace-topline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 8px;
   min-width: 0;
 }
 
-.trace-main strong,
-.trace-main span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+.trace-topline-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
-.trace-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.trace-session-name {
+  min-width: 0;
+  font-size: 0.76rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-agent-chip {
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 0.62rem;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.trace-status-chip {
+  border: 1px solid #94a3b8;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 0.62rem;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.trace-status-chip.status-running {
+  border-color: #0e7490;
+  background: #ecfeff;
+  color: #0e7490;
+}
+
+.trace-status-chip.status-waiting {
+  border-color: #d97706;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.trace-status-chip.status-idle {
+  border-color: #94a3b8;
+  background: #f8fafc;
+  color: #475569;
+}
+
+.trace-time-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  font-size: 0.68rem;
   color: var(--muted);
-  font-size: 0.72rem;
+}
+
+.trace-time-label {
+  color: #64748b;
+  text-transform: uppercase;
+}
+
+.trace-time-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .trace-footer {
@@ -463,6 +569,26 @@ body {
   grid-template-columns: auto auto auto minmax(0, 1fr);
   align-items: center;
   gap: 7px;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 220ms ease;
+}
+
+.toc-row.toc-row-enter {
+  animation: toc-row-enter 340ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes toc-row-enter {
+  0% {
+    opacity: 0;
+    filter: saturate(0.88) brightness(1.04);
+  }
+
+  100% {
+    opacity: 1;
+    filter: saturate(1) brightness(1);
+  }
 }
 
 .toc-row.active {
@@ -532,6 +658,26 @@ body {
   padding: 9px;
   background: #fff;
   position: relative;
+  transition:
+    border-color 180ms ease,
+    box-shadow 220ms ease,
+    background-color 180ms ease;
+}
+
+.event-card.event-card-enter {
+  animation: event-card-enter 360ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes event-card-enter {
+  0% {
+    opacity: 0;
+    filter: saturate(0.86) brightness(1.03);
+  }
+
+  100% {
+    opacity: 1;
+    filter: saturate(1) brightness(1);
+  }
 }
 
 .event-card.selected {
@@ -644,7 +790,9 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .trace-row-inner.pulse {
+  .trace-row-inner.pulse,
+  .toc-row.toc-row-enter,
+  .event-card.event-card-enter {
     animation: none;
   }
 }

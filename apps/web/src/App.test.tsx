@@ -54,7 +54,11 @@ class MockEventSource {
   }
 }
 
-function makeTrace(id: string, mtimeMs: number): TraceSummary {
+function makeTrace(
+  id: string,
+  mtimeMs: number,
+  activityStatus: TraceSummary["activityStatus"] = "idle",
+): TraceSummary {
   return {
     id,
     sourceProfile: "session_log",
@@ -64,6 +68,7 @@ function makeTrace(id: string, mtimeMs: number): TraceSummary {
     sessionId: `session-${id}`,
     sizeBytes: 100,
     mtimeMs,
+    firstEventTs: mtimeMs - 60_000,
     lastEventTs: mtimeMs,
     eventCount: 2,
     parseable: true,
@@ -73,6 +78,8 @@ function makeTrace(id: string, mtimeMs: number): TraceSummary {
     toolResultCount: 0,
     unmatchedToolUses: 0,
     unmatchedToolResults: 0,
+    activityStatus,
+    activityReason: `fixture_${activityStatus}`,
     eventKindCounts: {
       system: 0,
       assistant: 1,
@@ -224,6 +231,54 @@ afterEach(() => {
 });
 
 describe("App sessions list live motion", () => {
+  it("shows running and waiting indicators with recency heuristic", async () => {
+    const now = 2_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+
+    tracesById = {
+      "trace-a": makeTrace("trace-a", now - 5_000, "idle"),
+      "trace-b": makeTrace("trace-b", now - 45_000, "idle"),
+      "trace-c": makeTrace("trace-c", now - 300_000, "idle"),
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    expect(document.querySelector(".session-head-counter.status-running")?.textContent).toBe("running 1");
+    expect(document.querySelector(".session-head-counter.status-waiting")?.textContent).toBe("waiting 1");
+
+    const runningRow = getTraceRow("trace-a");
+    expect(runningRow.className).toContain("status-running");
+    expect(runningRow.querySelector(".trace-status-chip")?.textContent).toBe("Running");
+
+    const waitingRow = getTraceRow("trace-b");
+    expect(waitingRow.className).toContain("status-waiting");
+    expect(waitingRow.querySelector(".trace-status-chip")?.textContent).toBe("Waiting");
+
+    const idleRow = getTraceRow("trace-c");
+    expect(idleRow.className).toContain("status-idle");
+    expect(idleRow.querySelector(".trace-status-chip")?.textContent).toBe("Idle");
+  });
+
+  it("renders session rows with single-line name element and start/updated fields", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const row = getTraceRow("trace-c");
+    const name = row.querySelector(".trace-session-name");
+    expect(name?.textContent).toBe("session-trace-c");
+    expect(name?.getAttribute("title")).toBe("session-trace-c");
+
+    const labels = Array.from(row.querySelectorAll(".trace-time-label")).map((node) => node.textContent?.trim());
+    expect(labels).toEqual(["start", "updated"]);
+
+    expect(row.querySelectorAll(".trace-time-value")).toHaveLength(2);
+    expect(row.querySelector(".trace-meta")).toBeNull();
+  });
+
   it("pulses matching rows for trace updates and trace additions", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -342,5 +397,107 @@ describe("App sessions list live motion", () => {
     const rawBlock = document.querySelector(".event-raw-json");
     expect(rawBlock).toBeTruthy();
     expect(rawBlock?.textContent).toContain(longToken);
+  });
+
+  it("keeps expanded event JSON open when selected trace refreshes live", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) {
+      throw new Error("missing trace-c test fixture");
+    }
+    const firstEvent = makeEvent("event-expand-keep", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+
+    const expandButton = document.querySelector(".event-card .expand-btn");
+    if (!(expandButton instanceof HTMLButtonElement)) {
+      throw new Error("missing expand button");
+    }
+
+    act(() => {
+      expandButton.click();
+    });
+    await waitFor(() => expect(document.querySelectorAll(".event-raw-json").length).toBe(1));
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-expand-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, appendedEvent]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: 1 });
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    await waitFor(() => expect(document.querySelectorAll(".event-raw-json").length).toBe(1));
+
+    const firstButtonAfterRefresh = document.querySelector(".event-card .expand-btn");
+    if (!(firstButtonAfterRefresh instanceof HTMLButtonElement)) {
+      throw new Error("missing first expand button after refresh");
+    }
+    expect(firstButtonAfterRefresh.textContent).toBe("collapse");
+    expect(document.querySelector(".event-raw-json")?.textContent).toContain("first payload");
+  });
+
+  it("adds enter animation classes for newly appended timeline rows and event cards", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) {
+      throw new Error("missing trace-c test fixture");
+    }
+
+    const firstEvent = makeEvent("event-motion-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+
+    expect(document.querySelector(".toc-row")?.className).not.toContain("toc-row-enter");
+    expect(document.querySelector(".event-card")?.className).not.toContain("event-card-enter");
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-motion-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, appendedEvent]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: 1 });
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(2));
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+
+    const newTocRow = Array.from(document.querySelectorAll(".toc-row")).find((row) =>
+      row.textContent?.includes("new payload"),
+    );
+    expect(newTocRow?.className).toContain("toc-row-enter");
+
+    const newEventCard = Array.from(document.querySelectorAll(".event-card")).find(
+      (card) => card.querySelector("h3")?.textContent === "new payload",
+    );
+    expect(newEventCard?.className).toContain("event-card-enter");
   });
 });

@@ -1,8 +1,9 @@
-import type { TraceSummary } from "@agentlens/contracts";
+import type { SessionActivityStatus, TraceSummary } from "@agentlens/contracts";
 import { iconForAgent, pathTail } from "./view-model.js";
 
 interface SessionTraceRowProps {
   trace: TraceSummary;
+  activityStatus: SessionActivityStatus;
   isActive: boolean;
   isPathExpanded: boolean;
   pulseSeq: number;
@@ -13,12 +14,23 @@ interface SessionTraceRowProps {
 }
 
 export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
-  const { trace, isActive, isPathExpanded, pulseSeq, onSelect, onTogglePath, rowRef, fmtTime } = props;
+  const { trace, activityStatus, isActive, isPathExpanded, pulseSeq, onSelect, onTogglePath, rowRef, fmtTime } = props;
   const traceIcon = iconForAgent(trace.agent);
+  const sessionName = trace.sessionId || trace.id;
+  const startMs = trace.firstEventTs ?? null;
+  const updatedMs = Math.max(trace.lastEventTs ?? 0, trace.mtimeMs);
+  const statusClass =
+    activityStatus === "waiting_input"
+      ? "status-waiting"
+      : activityStatus === "running"
+        ? "status-running"
+        : "status-idle";
+  const statusLabel =
+    activityStatus === "waiting_input" ? "Waiting" : activityStatus === "running" ? "Running" : "Idle";
 
   return (
     <div
-      className={`trace-row ${isActive ? "active" : ""}`}
+      className={`trace-row ${statusClass} ${isActive ? "active" : ""}`}
       data-trace-id={trace.id}
       ref={rowRef}
       onClick={() => onSelect(trace.id)}
@@ -33,14 +45,20 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
       tabIndex={0}
     >
       <div key={`pulse-${pulseSeq}`} className={`trace-row-inner ${pulseSeq > 0 ? "pulse" : ""}`}>
-        <div className="trace-main">
-          <strong>{trace.agent}</strong>
-          <span className="mono">{trace.sessionId || trace.id}</span>
+        <div className="trace-topline">
+          <span className="trace-session-name mono" title={sessionName}>
+            {sessionName}
+          </span>
+          <div className="trace-topline-right">
+            <span className={`trace-status-chip mono ${statusClass}`}>{statusLabel}</span>
+            <span className="trace-agent-chip mono">{trace.agent}</span>
+          </div>
         </div>
-        <div className="trace-meta mono">
-          <span>{fmtTime(trace.lastEventTs ?? trace.mtimeMs)}</span>
-          <span>{`events ${trace.eventCount}`}</span>
-          <span>{`errors ${trace.errorCount}`}</span>
+        <div className="trace-time-grid mono">
+          <span className="trace-time-label">start</span>
+          <span className="trace-time-value">{fmtTime(startMs)}</span>
+          <span className="trace-time-label">updated</span>
+          <span className="trace-time-value">{fmtTime(updatedMs)}</span>
         </div>
         <div className="trace-footer">
           <div className={`trace-path-box ${isPathExpanded ? "expanded" : ""}`}>
