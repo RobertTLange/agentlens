@@ -676,7 +676,7 @@ export function App(): JSX.Element {
     <main className="shell">
       <header className="hero">
         <h1>AgentLens</h1>
-        <p>Live observability for Codex, Claude, Cursor, OpenCode traces.</p>
+        <p>Live observability for Codex and Claude traces.</p>
         <div className="hero-metrics">
           <span>{`traces ${overview?.traceCount ?? 0}`}</span>
           <span>{`events ${overview?.eventCount ?? 0}`}</span>

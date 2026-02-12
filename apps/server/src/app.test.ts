@@ -81,24 +81,6 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
         maxDepth: 8,
         agentHint: "claude",
       },
-      cursor_home: {
-        name: "cursor_home",
-        enabled: false,
-        roots: [],
-        includeGlobs: ["**/*.jsonl"],
-        excludeGlobs: [],
-        maxDepth: 8,
-        agentHint: "cursor",
-      },
-      opencode_home: {
-        name: "opencode_home",
-        enabled: false,
-        roots: [],
-        includeGlobs: ["**/*.jsonl"],
-        excludeGlobs: [],
-        maxDepth: 8,
-        agentHint: "opencode",
-      },
     },
   });
 

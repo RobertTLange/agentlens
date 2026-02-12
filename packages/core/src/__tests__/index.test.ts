@@ -15,8 +15,6 @@ describe("trace index", () => {
     expect(config.sessionLogDirectories).toEqual([
       { directory: "~/.codex", logType: "codex" },
       { directory: "~/.claude", logType: "claude" },
-      { directory: "~/.opencode", logType: "opencode" },
-      { directory: "~/.cursor", logType: "cursor" },
     ]);
   });
 
@@ -116,24 +114,6 @@ describe("trace index", () => {
           excludeGlobs: [],
           maxDepth: 8,
           agentHint: "claude",
-        },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
         },
       },
     });
@@ -241,24 +221,6 @@ describe("trace index", () => {
           maxDepth: 8,
           agentHint: "claude",
         },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
-        },
       },
     });
 
@@ -351,24 +313,6 @@ describe("trace index", () => {
           maxDepth: 8,
           agentHint: "claude",
         },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
-        },
       },
     });
 
@@ -454,24 +398,6 @@ describe("trace index", () => {
           maxDepth: 8,
           agentHint: "claude",
         },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
-        },
       },
     });
 
@@ -528,24 +454,6 @@ describe("trace index", () => {
           excludeGlobs: [],
           maxDepth: 8,
           agentHint: "claude",
-        },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
         },
       },
     });
@@ -620,24 +528,6 @@ describe("trace index", () => {
           excludeGlobs: [],
           maxDepth: 8,
           agentHint: "claude",
-        },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
         },
       },
     });

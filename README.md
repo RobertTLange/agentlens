@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Local observability for coding-agent sessions.</strong><br />
-  Inspect Codex, Claude, Cursor, and OpenCode traces in a live web UI, CLI, and HTTP API.
+  Inspect Codex and Claude traces in a live web UI, CLI, and HTTP API.
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@ It is designed for local analysis: no hosted backend required.
 
 ## Key Capabilities
 
-- Unified ingestion for Codex, Claude, Cursor, and OpenCode logs.
+- Unified ingestion for Codex and Claude logs.
 - Normalized event model across agents (`user`, `assistant`, `reasoning`, `tool_use`, `tool_result`, `meta`, `system`).
 - Real-time stream updates for newly discovered traces and appended events.
 - Deep tool-call visibility with argument/result text and unmatched tool I/O detection.
@@ -50,7 +50,7 @@ statusWaitingTtlMs = 900000
 ## Architecture
 
 ```text
-Local agent logs (~/.codex, ~/.claude, ~/.cursor, ~/.opencode)
+Local agent logs (~/.codex, ~/.claude)
   -> @agentlens/core (discovery + parsing + indexing)
   -> @agentlens/server (Fastify API + SSE + static web hosting)
   -> apps/web (React UI) and apps/cli (terminal workflows)
@@ -142,9 +142,7 @@ Default explicit log roots:
 ```toml
 sessionLogDirectories = [
   { directory = "~/.codex", logType = "codex" },
-  { directory = "~/.claude", logType = "claude" },
-  { directory = "~/.opencode", logType = "opencode" },
-  { directory = "~/.cursor", logType = "cursor" }
+  { directory = "~/.claude", logType = "claude" }
 ]
 ```
 

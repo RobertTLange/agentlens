@@ -3,8 +3,6 @@ import type { AppConfig, SessionLogDirectoryConfig, SourceProfileConfig } from "
 export const DEFAULT_SESSION_LOG_DIRECTORIES: SessionLogDirectoryConfig[] = [
   { directory: "~/.codex", logType: "codex" },
   { directory: "~/.claude", logType: "claude" },
-  { directory: "~/.opencode", logType: "opencode" },
-  { directory: "~/.cursor", logType: "cursor" },
 ];
 
 export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
@@ -34,31 +32,6 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
     excludeGlobs: [],
     maxDepth: 2,
     agentHint: "claude",
-  },
-  cursor_home: {
-    name: "cursor_home",
-    enabled: true,
-    roots: ["~/.cursor"],
-    includeGlobs: ["**/*.jsonl", "**/worker.log", "prompt_history.json"],
-    excludeGlobs: [
-      "**/extensions/**",
-      "**/Cache/**",
-      "**/CachedData/**",
-      "**/workspaceStorage/**",
-      "**/*.vscdb",
-      "**/*.vscdb-*",
-    ],
-    maxDepth: 8,
-    agentHint: "cursor",
-  },
-  opencode_home: {
-    name: "opencode_home",
-    enabled: true,
-    roots: ["~/.opencode"],
-    includeGlobs: ["**/*.jsonl", "**/*.log"],
-    excludeGlobs: [],
-    maxDepth: 8,
-    agentHint: "opencode",
   },
 };
 
