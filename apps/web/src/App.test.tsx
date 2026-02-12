@@ -80,6 +80,10 @@ function makeTrace(
     unmatchedToolResults: 0,
     activityStatus,
     activityReason: `fixture_${activityStatus}`,
+    activityBins: [0, 0, 0.25, 0.4, 0.6, 0.5, 0.35, 0.2, 0.15, 0.3, 0.5, 0.8],
+    activityWindowMinutes: 60,
+    activityBinMinutes: 5,
+    activityBinCount: 12,
     eventKindCounts: {
       system: 0,
       assistant: 1,
@@ -186,6 +190,19 @@ function getTimelineStripScroll(): HTMLDivElement {
     throw new Error("missing timeline strip scroller");
   }
   return scroller;
+}
+
+function getTocTimestampByIndex(index: number): string {
+  const tocRows = Array.from(document.querySelectorAll(".toc-row"));
+  const row = tocRows.find((candidate) => candidate.querySelector(".toc-index")?.textContent?.trim() === `#${index}`);
+  if (!(row instanceof HTMLButtonElement)) {
+    throw new Error(`missing toc row #${index}`);
+  }
+  const value = row.querySelector(".toc-timestamp")?.textContent?.trim();
+  if (!value) {
+    throw new Error(`missing toc timestamp for row #${index}`);
+  }
+  return value;
 }
 
 function setTimelineStripMetrics(
@@ -317,6 +334,112 @@ describe("App sessions list live motion", () => {
     expect(row.querySelector(".trace-meta")).toBeNull();
   });
 
+  it("formats timeline TOC timestamps with threshold buckets", async () => {
+    const anchorMs = 2_000_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(anchorMs);
+
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) {
+      throw new Error("missing trace-c test fixture");
+    }
+
+    const buildEvent = (eventId: string, index: number, timestampMs: number | null): NormalizedEvent => ({
+      ...makeEvent(eventId, { signature: eventId }),
+      index,
+      offset: index,
+      timestampMs,
+      preview: eventId,
+      textBlocks: [eventId],
+      tocLabel: eventId,
+      searchText: eventId,
+    });
+
+    const events: NormalizedEvent[] = [
+      buildEvent("under-ten-seconds", 1, anchorMs - 9_000),
+      buildEvent("ten-seconds", 2, anchorMs - 10_000),
+      buildEvent("fifty-nine-seconds", 3, anchorMs - 59_000),
+      buildEvent("sixty-seconds", 4, anchorMs - 60_000),
+      buildEvent("fifty-nine-minutes", 5, anchorMs - 3_599_000),
+      buildEvent("sixty-minutes", 6, anchorMs - 3_600_000),
+      buildEvent("twenty-three-hours", 7, anchorMs - 86_399_000),
+      buildEvent("twenty-four-hours", 8, anchorMs - 86_400_000),
+      buildEvent("future", 9, anchorMs + 5_000),
+      buildEvent("missing", 10, null),
+    ];
+
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, events);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(events.length));
+
+    expect(getTocTimestampByIndex(1)).toBe("now");
+    expect(getTocTimestampByIndex(2)).toBe("10s ago");
+    expect(getTocTimestampByIndex(3)).toBe("59s ago");
+    expect(getTocTimestampByIndex(4)).toBe("1m ago");
+    expect(getTocTimestampByIndex(5)).toBe("59m ago");
+    expect(getTocTimestampByIndex(6)).toBe("1h ago");
+    expect(getTocTimestampByIndex(7)).toBe("23h ago");
+    expect(getTocTimestampByIndex(8)).toBe("1d ago");
+    expect(getTocTimestampByIndex(9)).toBe("now");
+    expect(getTocTimestampByIndex(10)).toBe("-");
+  });
+
+  it("renders activity sparkline with status tint and accessibility label", async () => {
+    tracesById = {
+      "trace-a": makeTrace("trace-a", 10_000, "running"),
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const runningSparkline = getTraceRow("trace-a").querySelector(".trace-activity-sparkline");
+    expect(runningSparkline?.getAttribute("class")).toContain("status-running");
+    expect(runningSparkline?.getAttribute("data-point-count")).toBe("12");
+    expect(runningSparkline?.getAttribute("aria-label")).toContain("Activity trend:");
+
+    const waitingSparkline = getTraceRow("trace-b").querySelector(".trace-activity-sparkline");
+    expect(waitingSparkline?.getAttribute("class")).toContain("status-waiting");
+
+    const idleSparkline = getTraceRow("trace-c").querySelector(".trace-activity-sparkline");
+    expect(idleSparkline?.getAttribute("class")).toContain("status-idle");
+  });
+
+  it("falls back to flat sparkline when activity bins are missing or invalid", async () => {
+    const traceMissingBins = makeTrace("trace-a", 10_000, "idle");
+    delete traceMissingBins.activityBins;
+    delete traceMissingBins.activityWindowMinutes;
+    delete traceMissingBins.activityBinMinutes;
+    delete traceMissingBins.activityBinCount;
+
+    tracesById = {
+      "trace-a": traceMissingBins,
+      "trace-b": {
+        ...makeTrace("trace-b", 20_000, "idle"),
+        activityBins: [0.4, Number.NaN, 2],
+      },
+      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const missingSparkline = getTraceRow("trace-a").querySelector(".trace-activity-sparkline");
+    expect(missingSparkline?.getAttribute("data-flat")).toBe("true");
+    expect(missingSparkline?.getAttribute("class")).toContain("is-flat");
+
+    const invalidSparkline = getTraceRow("trace-b").querySelector(".trace-activity-sparkline");
+    expect(invalidSparkline?.getAttribute("data-flat")).toBe("false");
+    expect(invalidSparkline?.getAttribute("data-point-count")).toBe("12");
+  });
+
   it("pulses matching rows for trace updates and trace additions", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -376,6 +499,9 @@ describe("App sessions list live motion", () => {
 
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const source = MockEventSource.instances[0];
     expect(source).toBeTruthy();

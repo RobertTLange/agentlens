@@ -29,20 +29,12 @@ function fmtTime(ms: number | null): string {
 
 function fmtTimeAgo(ms: number | null, nowMs: number): string {
   if (!ms) return "-";
-  let remainingSeconds = Math.floor(Math.max(0, nowMs - ms) / 1000);
-  const days = Math.floor(remainingSeconds / 86_400);
-  remainingSeconds -= days * 86_400;
-  const hours = Math.floor(remainingSeconds / 3_600);
-  remainingSeconds -= hours * 3_600;
-  const minutes = Math.floor(remainingSeconds / 60);
-  const seconds = remainingSeconds - minutes * 60;
-
-  const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (days > 0 || hours > 0) parts.push(`${hours}h`);
-  if (days > 0 || hours > 0 || minutes > 0) parts.push(`${minutes}m`);
-  parts.push(`${seconds}s`);
-  return `${parts.join(" ")} ago`;
+  const deltaSeconds = Math.floor(Math.max(0, nowMs - ms) / 1000);
+  if (deltaSeconds < 10) return "now";
+  if (deltaSeconds < 60) return `${deltaSeconds}s ago`;
+  if (deltaSeconds < 3_600) return `${Math.floor(deltaSeconds / 60)}m ago`;
+  if (deltaSeconds < 86_400) return `${Math.floor(deltaSeconds / 3_600)}h ago`;
+  return `${Math.floor(deltaSeconds / 86_400)}d ago`;
 }
 
 function sortTraces(traces: TraceSummary[]): TraceSummary[] {

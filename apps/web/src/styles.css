@@ -456,9 +456,10 @@ body {
 
 .trace-time-grid {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   column-gap: 8px;
   row-gap: 2px;
+  align-items: center;
   font-size: 0.68rem;
   color: var(--muted);
 }
@@ -473,6 +474,72 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.trace-time-graph-wrap {
+  display: block;
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  justify-self: end;
+  align-self: center;
+  width: 56px;
+  height: 18px;
+}
+
+.trace-activity-sparkline {
+  display: block;
+  width: 56px;
+  height: 18px;
+}
+
+.trace-activity-baseline {
+  stroke: #cbd5e1;
+  stroke-width: 1;
+}
+
+.trace-activity-area {
+  fill: #cbd5e1;
+  opacity: 0.18;
+}
+
+.trace-activity-line {
+  fill: none;
+  stroke: #64748b;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trace-activity-sparkline.status-running .trace-activity-area {
+  fill: #06b6d4;
+}
+
+.trace-activity-sparkline.status-running .trace-activity-line {
+  stroke: #0e7490;
+}
+
+.trace-activity-sparkline.status-waiting .trace-activity-area {
+  fill: #f59e0b;
+}
+
+.trace-activity-sparkline.status-waiting .trace-activity-line {
+  stroke: #b45309;
+}
+
+.trace-activity-sparkline.status-idle .trace-activity-area {
+  fill: #94a3b8;
+}
+
+.trace-activity-sparkline.status-idle .trace-activity-line {
+  stroke: #64748b;
+}
+
+.trace-activity-sparkline.is-flat .trace-activity-area {
+  opacity: 0;
+}
+
+.trace-activity-sparkline.is-flat .trace-activity-line {
+  opacity: 0.45;
 }
 
 .trace-footer {
@@ -634,9 +701,9 @@ body {
   border: 1px solid #dbeafe;
   background: #f8fafc;
   border-radius: 10px;
-  padding: 7px;
-  height: 38px;
-  min-height: 38px;
+  padding: 4px 7px;
+  height: 27px;
+  min-height: 27px;
   cursor: pointer;
   display: grid;
   grid-template-columns: auto auto auto minmax(0, 1fr);
