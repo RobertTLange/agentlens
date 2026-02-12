@@ -69,7 +69,7 @@ describe("trace index", () => {
         payload: {
           type: "function_call",
           id: "fc_1",
-          name: "run_command",
+          name: "exec_command",
           call_id: "call_1",
           arguments: "{\"command\":\"echo hi\"}",
         },
@@ -154,12 +154,127 @@ describe("trace index", () => {
 
     const detail = index.getSessionDetail(summaries[0]!.id);
     const toolUseEvent = detail.events.find((event) => event.eventKind === "tool_use") as
-      | { toolName: string; functionName?: string; toolCallId?: string; toolArgsText?: string }
+      | { toolName: string; toolType?: string; functionName?: string; toolCallId?: string; toolArgsText?: string }
       | undefined;
-    expect(toolUseEvent?.toolName).toBe("run_command");
-    expect(toolUseEvent?.functionName).toBe("run_command");
+    expect(toolUseEvent?.toolName).toBe("exec_command");
+    expect(toolUseEvent?.functionName).toBe("exec_command");
+    expect(toolUseEvent?.toolType).toBe("bash");
     expect(toolUseEvent?.toolCallId).toBe("call_1");
     expect(toolUseEvent?.toolArgsText).toContain("echo hi");
+
+    const toolResultEvent = detail.events.find((event) => event.eventKind === "tool_result") as
+      | { toolCallId?: string; toolType?: string }
+      | undefined;
+    expect(toolResultEvent?.toolCallId).toBe("call_1");
+    expect(toolResultEvent?.toolType).toBe("bash");
+  });
+
+  it("normalizes web_search_call actions into toolType tags", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "11");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-web-search.jsonl");
+    const lines = [
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "sess-web", cwd: "/tmp/project", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "search", query: "agentlens parser" },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "open_page", url: "https://example.com" },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "find_in_page", query: "toolType" },
+        },
+      }),
+    ];
+    await writeFile(codexPath, lines.join("\n"), "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_home: {
+          name: "cursor_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_home: {
+          name: "opencode_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    const detail = index.getSessionDetail(summary!.id);
+    const webEvents = detail.events.filter((event) => event.rawType === "web_search_call");
+    expect(webEvents.map((event) => event.toolType)).toEqual(["web:search", "web:open", "web:find"]);
+
+    const page = index.getTracePage(summary!.id, { includeMeta: true, limit: 10 }) as unknown as {
+      toc?: Array<{ toolType: string }>;
+    };
+    const webTocTags = (page.toc ?? []).map((entry) => entry.toolType).filter((value) => value.startsWith("web"));
+    expect(webTocTags).toEqual(["web:search", "web:open", "web:find"]);
   });
 
   it("parses claude project logs with tool_use/tool_result typing", async () => {

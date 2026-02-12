@@ -16,6 +16,7 @@ export interface EventSeed {
   toolUseId?: string;
   parentToolUseId?: string;
   toolName?: string;
+  toolType?: string;
   toolCallId?: string;
   functionName?: string;
   toolArgsText?: string;
@@ -47,6 +48,7 @@ export function makeEvent(seed: EventSeed): NormalizedEvent {
     toolUseId: seed.toolUseId ?? "",
     parentToolUseId: seed.parentToolUseId ?? "",
     toolName: seed.toolName ?? "",
+    toolType: seed.toolType ?? "",
     toolCallId: seed.toolCallId ?? seed.toolUseId ?? "",
     functionName: seed.functionName ?? "",
     toolArgsText: seed.toolArgsText ?? "",

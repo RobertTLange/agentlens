@@ -3,6 +3,33 @@ import type { DiscoveredTraceFile } from "../discovery.js";
 import { asArray, asRecord, asString, compactText, normalizePreview } from "../utils.js";
 import { eventKindFromRole, extractTextBlocks, guessTimestamp, makeEvent, parseJsonLines } from "./common.js";
 
+function normalizeToolType(rawName: string): string {
+  const normalized = rawName.trim().toLowerCase();
+  if (!normalized) return "";
+  if (
+    normalized === "exec_command" ||
+    normalized === "shell_command" ||
+    normalized === "write_stdin" ||
+    normalized === "command_execution"
+  ) {
+    return "bash";
+  }
+  if (normalized === "apply_patch") return "patch";
+  if (normalized === "request_user_input") return "input";
+  if (normalized === "update_plan") return "plan";
+  if (normalized === "view_image") return "image";
+  return normalized;
+}
+
+function normalizeWebToolType(rawActionType: string): string {
+  const normalized = rawActionType.trim().toLowerCase();
+  if (!normalized) return "web";
+  if (normalized === "search") return "web:search";
+  if (normalized === "open_page") return "web:open";
+  if (normalized === "find_in_page") return "web:find";
+  return "web";
+}
+
 export class CodexParser implements TraceParser {
   name = "codex";
   agent = "codex" as const;
@@ -25,6 +52,7 @@ export class CodexParser implements TraceParser {
   parse(file: DiscoveredTraceFile, text: string): ParseOutput {
     const rows = parseJsonLines(text);
     const events: ParseOutput["events"] = [];
+    const toolTypeByCallId = new Map<string, string>();
     let sessionId = "";
     let eventIndex = 1;
 
@@ -36,6 +64,10 @@ export class CodexParser implements TraceParser {
       const rawType = asString(value.type);
       const timestampMs = guessTimestamp(value);
       const parentEventId = asString(value.parent_id || value.parentId || value.parent_event_id);
+      const rememberToolType = (toolCallId: string, toolType: string): void => {
+        if (!toolCallId || !toolType) return;
+        toolTypeByCallId.set(toolCallId, toolType);
+      };
       const pushEvent = (
         seed: Omit<Parameters<typeof makeEvent>[0], "traceId" | "index" | "offset">,
         offset: number,
@@ -111,8 +143,10 @@ export class CodexParser implements TraceParser {
             if (itemType === "tool_use" || itemType === "function_call") {
               const resolvedToolName = asString(item.name || item.function || toolName) || "tool";
               const toolCallId = asString(item.id || item.call_id || item.tool_use_id || callId);
+              const toolType = normalizeToolType(asString(item.name || item.function || toolName || resolvedToolName));
               const toolArgsText = compactText(item.arguments || item.input || item.params || payload.arguments || payload.input);
               const preview = normalizePreview(toolArgsText ? `${resolvedToolName}: ${toolArgsText}` : `tool ${resolvedToolName}`);
+              rememberToolType(toolCallId, toolType);
 
               pushEvent(
                 {
@@ -126,11 +160,12 @@ export class CodexParser implements TraceParser {
                   toolUseId: toolCallId,
                   toolCallId,
                   toolName: resolvedToolName,
+                  toolType,
                   functionName: resolvedToolName,
                   toolArgsText,
                   parentEventId,
                   tocLabel: `Tool: ${resolvedToolName}`,
-                  searchChunks: [rawType, payloadType, itemType, resolvedToolName, toolCallId, toolArgsText],
+                  searchChunks: [rawType, payloadType, itemType, resolvedToolName, toolCallId, toolType, toolArgsText],
                   raw: value,
                 },
                 itemOffset,
@@ -140,6 +175,8 @@ export class CodexParser implements TraceParser {
 
             if (itemType === "tool_result" || itemType === "function_call_output") {
               const toolCallId = asString(item.tool_use_id || item.call_id || item.id || callId);
+              const resolvedToolName = asString(item.name || toolName);
+              const toolType = normalizeToolType(resolvedToolName) || toolTypeByCallId.get(toolCallId) || "";
               const resultText = compactText(item.output || item.content || item.result || payload.output || payload.result);
               const hasError =
                 Boolean(item.is_error) ||
@@ -158,12 +195,13 @@ export class CodexParser implements TraceParser {
                   textBlocks: resultText ? [resultText] : [],
                   toolUseId: toolCallId,
                   toolCallId,
-                  toolName: asString(item.name || toolName),
+                  toolName: resolvedToolName,
+                  toolType,
                   toolResultText: resultText,
                   hasError,
                   parentEventId,
                   tocLabel: `Result: ${toolCallId || "tool"}`,
-                  searchChunks: [rawType, payloadType, itemType, role, toolCallId, resultText],
+                  searchChunks: [rawType, payloadType, itemType, role, toolCallId, toolType, resultText],
                   raw: value,
                 },
                 itemOffset,
@@ -218,8 +256,10 @@ export class CodexParser implements TraceParser {
         if (payloadType === "function_call" || payloadType === "tool_use") {
           const resolvedToolName = toolName || "tool";
           const toolCallId = callId || asString(payload.tool_use_id);
+          const toolType = normalizeToolType(resolvedToolName);
           const toolArgsText = compactText(payload.arguments || payload.input || payload.params);
           const preview = normalizePreview(toolArgsText ? `${resolvedToolName}: ${toolArgsText}` : `tool ${resolvedToolName}`);
+          rememberToolType(toolCallId, toolType);
           pushEvent(
             {
               timestampMs,
@@ -232,11 +272,12 @@ export class CodexParser implements TraceParser {
               toolUseId: toolCallId,
               toolCallId,
               toolName: resolvedToolName,
+              toolType,
               functionName: resolvedToolName,
               toolArgsText,
               parentEventId,
               tocLabel: `Tool: ${resolvedToolName}`,
-              searchChunks: [rawType, payloadType, resolvedToolName, toolCallId, toolArgsText],
+              searchChunks: [rawType, payloadType, resolvedToolName, toolCallId, toolType, toolArgsText],
               raw: value,
             },
             row.offset,
@@ -246,6 +287,7 @@ export class CodexParser implements TraceParser {
 
         if (payloadType === "function_call_output" || payloadType === "tool_result") {
           const toolCallId = callId || asString(payload.tool_use_id);
+          const toolType = normalizeToolType(toolName) || toolTypeByCallId.get(toolCallId) || "";
           const resultText = compactText(payload.output || payload.result || payload.content);
           const hasError = Boolean(payload.is_error) || Boolean(asRecord(payload.result).error);
           const preview = normalizePreview(resultText || `tool result ${toolCallId || ""}`.trim());
@@ -261,11 +303,104 @@ export class CodexParser implements TraceParser {
               toolUseId: toolCallId,
               toolCallId,
               toolName,
+              toolType,
               toolResultText: resultText,
               hasError,
               parentEventId,
               tocLabel: `Result: ${toolCallId || "tool"}`,
-              searchChunks: [rawType, payloadType, toolCallId, resultText],
+              searchChunks: [rawType, payloadType, toolCallId, toolType, resultText],
+              raw: value,
+            },
+            row.offset,
+          );
+          continue;
+        }
+
+        if (payloadType === "custom_tool_call") {
+          const resolvedToolName = toolName || asString(payload.tool) || "tool";
+          const toolCallId = asString(payload.call_id || payload.id);
+          const toolType = normalizeToolType(resolvedToolName);
+          const toolArgsText = compactText(payload.input || payload.arguments || payload.params);
+          const preview = normalizePreview(toolArgsText ? `${resolvedToolName}: ${toolArgsText}` : `tool ${resolvedToolName}`);
+          rememberToolType(toolCallId, toolType);
+          pushEvent(
+            {
+              timestampMs,
+              sessionId,
+              eventKind: "tool_use",
+              rawType: payloadType,
+              role: role || "assistant",
+              preview,
+              textBlocks: toolArgsText ? [toolArgsText] : [],
+              toolUseId: toolCallId,
+              toolCallId,
+              toolName: resolvedToolName,
+              toolType,
+              functionName: resolvedToolName,
+              toolArgsText,
+              parentEventId,
+              tocLabel: `Tool: ${resolvedToolName}`,
+              searchChunks: [rawType, payloadType, resolvedToolName, toolCallId, toolType, toolArgsText],
+              raw: value,
+            },
+            row.offset,
+          );
+          continue;
+        }
+
+        if (payloadType === "custom_tool_call_output") {
+          const toolCallId = asString(payload.call_id || payload.id);
+          const resolvedToolName = toolName || asString(payload.tool_name);
+          const toolType = normalizeToolType(resolvedToolName) || toolTypeByCallId.get(toolCallId) || "";
+          const resultText = compactText(payload.output || payload.result || payload.content);
+          const hasError = Boolean(payload.is_error) || Boolean(asRecord(payload.result).error);
+          const preview = normalizePreview(resultText || `tool result ${toolCallId || ""}`.trim());
+          pushEvent(
+            {
+              timestampMs,
+              sessionId,
+              eventKind: "tool_result",
+              rawType: payloadType,
+              role: role || "assistant",
+              preview,
+              textBlocks: resultText ? [resultText] : [],
+              toolUseId: toolCallId,
+              toolCallId,
+              toolName: resolvedToolName,
+              toolType,
+              toolResultText: resultText,
+              hasError,
+              parentEventId,
+              tocLabel: `Result: ${toolCallId || resolvedToolName || "tool"}`,
+              searchChunks: [rawType, payloadType, toolCallId, resolvedToolName, toolType, resultText],
+              raw: value,
+            },
+            row.offset,
+          );
+          continue;
+        }
+
+        if (payloadType === "web_search_call") {
+          const action = asRecord(payload.action);
+          const actionType = asString(action.type).toLowerCase();
+          const query = asString(action.query);
+          const url = asString(action.url);
+          const status = asString(payload.status);
+          const toolType = normalizeWebToolType(actionType);
+          const preview = normalizePreview(query || url || `${payloadType}: ${actionType || status || "event"}`);
+          pushEvent(
+            {
+              timestampMs,
+              sessionId,
+              eventKind: eventKindFromRole(role),
+              rawType: payloadType,
+              role: role || "assistant",
+              preview,
+              textBlocks: [query, url].filter(Boolean),
+              toolType,
+              parentEventId,
+              tocLabel: actionType ? `Web: ${actionType}` : "Web",
+              searchChunks: [rawType, payloadType, role, status, actionType, toolType, query, url],
               raw: value,
             },
             row.offset,
@@ -323,6 +458,7 @@ export class CodexParser implements TraceParser {
         const output = compactText(item.aggregated_output || item.output || item.result);
         const itemId = asString(item.id || item.call_id || item.callId);
         const toolName = itemType === "command_execution" ? "Bash" : asString(item.name) || "tool";
+        const toolType = normalizeToolType(itemType === "command_execution" ? itemType : asString(item.name || itemType));
         const isStart = rawType === "item.started";
         const isComplete = rawType === "item.completed" || rawType === "item.finished";
 
@@ -342,17 +478,19 @@ export class CodexParser implements TraceParser {
               toolUseId: itemId,
               toolCallId: itemId,
               toolName,
+              toolType,
               functionName: toolName,
               toolArgsText: isStart ? command : "",
               toolResultText: isComplete ? output : "",
               hasError,
               parentEventId,
               tocLabel: isStart ? `Tool: ${toolName}` : `Result: ${toolName}`,
-              searchChunks: [rawType, itemType, command, output, toolName, itemId],
+              searchChunks: [rawType, itemType, command, output, toolName, toolType, itemId],
               raw: value,
             },
             row.offset,
           );
+          if (isStart) rememberToolType(itemId, toolType);
           continue;
         }
 

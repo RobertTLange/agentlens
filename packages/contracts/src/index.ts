@@ -53,6 +53,7 @@ export interface NormalizedEvent {
   toolUseId: string;
   parentToolUseId: string;
   toolName: string;
+  toolType: string;
   toolCallId: string;
   functionName: string;
   toolArgsText: string;
@@ -104,6 +105,7 @@ export interface TraceTocItem {
   eventKind: EventKind;
   label: string;
   colorKey: string;
+  toolType: string;
 }
 
 export interface TracePage {

@@ -395,6 +395,7 @@ function buildToc(events: NormalizedEvent[]): TraceTocItem[] {
     eventKind: event.eventKind,
     label: event.tocLabel || event.preview,
     colorKey: event.eventKind,
+    toolType: event.toolType,
   }));
 }
 
