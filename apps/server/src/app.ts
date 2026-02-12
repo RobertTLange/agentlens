@@ -13,13 +13,23 @@ export interface CreateServerOptions {
   enableStatic?: boolean;
 }
 
+export function resolveDefaultWebDistPath(packagedWebDistPath: string, monorepoWebDistPath: string): string {
+  if (existsSync(monorepoWebDistPath)) {
+    return monorepoWebDistPath;
+  }
+  if (existsSync(packagedWebDistPath)) {
+    return packagedWebDistPath;
+  }
+  return monorepoWebDistPath;
+}
+
 export async function createServer(options: CreateServerOptions): Promise<FastifyInstance> {
   const server = Fastify({ logger: false });
   const traceIndex = options.traceIndex;
   const configPath = options.configPath ?? DEFAULT_CONFIG_PATH;
   const packagedWebDistPath = fileURLToPath(new URL("./web", import.meta.url));
   const monorepoWebDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
-  const defaultWebDistPath = existsSync(packagedWebDistPath) ? packagedWebDistPath : monorepoWebDistPath;
+  const defaultWebDistPath = resolveDefaultWebDistPath(packagedWebDistPath, monorepoWebDistPath);
   const webDistPath = options.webDistPath ?? defaultWebDistPath;
 
   if ((options.enableStatic ?? true) && existsSync(webDistPath)) {

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
-import { createServer } from "./app.js";
+import { createServer, resolveDefaultWebDistPath } from "./app.js";
 
 async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; sessionId: string }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-server-"));
@@ -110,6 +110,16 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
 }
 
 describe("server api", () => {
+  it("prefers monorepo web dist when both monorepo and packaged builds exist", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-web-dist-"));
+    const packagedWebDistPath = path.join(root, "packaged-web-dist");
+    const monorepoWebDistPath = path.join(root, "monorepo-web-dist");
+    await mkdir(packagedWebDistPath, { recursive: true });
+    await mkdir(monorepoWebDistPath, { recursive: true });
+
+    expect(resolveDefaultWebDistPath(packagedWebDistPath, monorepoWebDistPath)).toBe(monorepoWebDistPath);
+  });
+
   it("serves overview, trace listing, trace details, and config updates", async () => {
     const fixture = await buildFixture();
     const server = await createServer({
