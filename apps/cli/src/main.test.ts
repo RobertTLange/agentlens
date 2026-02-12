@@ -12,6 +12,64 @@ const repoRoot = path.resolve(__dirname, "../../..");
 const tsxBin = path.resolve(repoRoot, "node_modules/.bin/tsx");
 const cliMain = path.resolve(repoRoot, "apps/cli/src/main.ts");
 
+function buildFixtureConfig(codexSessionsRoot: string) {
+  return mergeConfig({
+    scan: {
+      intervalSeconds: 5,
+      recentEventWindow: 200,
+      includeMetaDefault: false,
+    },
+    sessionLogDirectories: [],
+    sources: {
+      codex_home: {
+        name: "codex_home",
+        enabled: true,
+        roots: [codexSessionsRoot],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "codex",
+      },
+      claude_projects: {
+        name: "claude_projects",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+      claude_history: {
+        name: "claude_history",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["history.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+      cursor_home: {
+        name: "cursor_home",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "cursor",
+      },
+      opencode_home: {
+        name: "opencode_home",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "opencode",
+      },
+    },
+  });
+}
+
 async function buildFixture(): Promise<{ configPath: string; sessionId: string }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-cli-"));
   const codexRoot = path.join(root, ".codex", "sessions", "2026", "02", "11");
@@ -60,65 +118,80 @@ async function buildFixture(): Promise<{ configPath: string; sessionId: string }
     "utf8",
   );
 
-  const config = mergeConfig({
-    scan: {
-      intervalSeconds: 5,
-      recentEventWindow: 200,
-      includeMetaDefault: false,
-    },
-    sessionLogDirectories: [],
-    sources: {
-      codex_home: {
-        name: "codex_home",
-        enabled: true,
-        roots: [path.join(root, ".codex", "sessions")],
-        includeGlobs: ["**/*.jsonl"],
-        excludeGlobs: [],
-        maxDepth: 8,
-        agentHint: "codex",
-      },
-      claude_projects: {
-        name: "claude_projects",
-        enabled: false,
-        roots: [],
-        includeGlobs: ["**/*.jsonl"],
-        excludeGlobs: [],
-        maxDepth: 8,
-        agentHint: "claude",
-      },
-      claude_history: {
-        name: "claude_history",
-        enabled: false,
-        roots: [],
-        includeGlobs: ["history.jsonl"],
-        excludeGlobs: [],
-        maxDepth: 8,
-        agentHint: "claude",
-      },
-      cursor_home: {
-        name: "cursor_home",
-        enabled: false,
-        roots: [],
-        includeGlobs: ["**/*.jsonl"],
-        excludeGlobs: [],
-        maxDepth: 8,
-        agentHint: "cursor",
-      },
-      opencode_home: {
-        name: "opencode_home",
-        enabled: false,
-        roots: [],
-        includeGlobs: ["**/*.jsonl"],
-        excludeGlobs: [],
-        maxDepth: 8,
-        agentHint: "opencode",
-      },
-    },
-  });
+  const config = buildFixtureConfig(path.join(root, ".codex", "sessions"));
 
   const configPath = path.join(root, "config.toml");
   await saveConfig(config, configPath);
   return { configPath, sessionId };
+}
+
+async function buildLatestFixture(): Promise<{ configPath: string; latestSessionId: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-cli-latest-"));
+  const codexRoot = path.join(root, ".codex", "sessions", "2026", "02", "11");
+  await mkdir(codexRoot, { recursive: true });
+
+  const oldSessionId = "cli-session-old";
+  const latestSessionId = "cli-session-new";
+
+  await writeFile(
+    path.join(codexRoot, "older.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-02-11T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: oldSessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T09:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "old hello" }],
+        },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  await writeFile(
+    path.join(codexRoot, "newer.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-02-11T11:00:00.000Z",
+        type: "session_meta",
+        payload: { id: latestSessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T11:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "new hello" }],
+        },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  const config = buildFixtureConfig(path.join(root, ".codex", "sessions"));
+
+  const configPath = path.join(root, "config.toml");
+  await saveConfig(config, configPath);
+  return { configPath, latestSessionId };
+}
+
+async function buildEmptyFixture(): Promise<{ configPath: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-cli-empty-"));
+  const codexRoot = path.join(root, ".codex", "sessions");
+  await mkdir(codexRoot, { recursive: true });
+
+  const config = buildFixtureConfig(codexRoot);
+
+  const configPath = path.join(root, "config.toml");
+  await saveConfig(config, configPath);
+  return { configPath };
 }
 
 function runCli(args: string[]): string {
@@ -152,6 +225,16 @@ async function runCliWithEnvAsync(args: string[], extraEnv: NodeJS.ProcessEnv = 
       },
     );
   });
+}
+
+function runCliFailure(args: string[]): string {
+  try {
+    runCli(args);
+    throw new Error("expected command to fail");
+  } catch (error) {
+    const failure = error as Error & { stderr?: string };
+    return String(failure.stderr ?? "");
+  }
 }
 
 async function getFreePort(): Promise<number> {
@@ -306,6 +389,36 @@ describe("cli", () => {
     expect(eventLines.length).toBe(2);
     const parsed = JSON.parse(eventLines[0] ?? "{}") as { index?: number };
     expect(parsed.index).toBeTypeOf("number");
+  });
+
+  it("supports latest alias for session/show/events commands", async () => {
+    const fixture = await buildLatestFixture();
+
+    const sessionLatest = JSON.parse(
+      runCli(["--config", fixture.configPath, "session", "latest", "--json"]),
+    ) as { summary: { sessionId: string } };
+    expect(sessionLatest.summary.sessionId).toBe(fixture.latestSessionId);
+
+    const showLatest = JSON.parse(
+      runCli(["--config", fixture.configPath, "sessions", "show", "latest", "--json"]),
+    ) as { summary: { sessionId: string } };
+    expect(showLatest.summary.sessionId).toBe(fixture.latestSessionId);
+
+    const eventsOutput = runCli(["--config", fixture.configPath, "sessions", "events", "latest", "--jsonl", "--limit", "5"]);
+    const eventLines = eventsOutput
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    expect(eventLines.length).toBeGreaterThan(0);
+    const parsed = eventLines.map((line) => JSON.parse(line) as { sessionId?: string; preview?: string });
+    expect(parsed.every((event) => event.sessionId === fixture.latestSessionId)).toBe(true);
+    expect(parsed.some((event) => String(event.preview ?? "").includes("new hello"))).toBe(true);
+  });
+
+  it("shows clear error when latest is requested with no sessions", async () => {
+    const fixture = await buildEmptyFixture();
+    const failureStderr = runCliFailure(["--config", fixture.configPath, "session", "latest"]);
+    expect(failureStderr).toContain('no sessions found (cannot resolve "latest")');
   });
 
   it("shows usage for --help and no-args", () => {

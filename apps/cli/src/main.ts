@@ -12,6 +12,8 @@ import {
 } from "@agentlens/core";
 import { launchBrowser } from "./browser.js";
 
+const LATEST_KEYWORD = "latest";
+
 function printTable(rows: string[][]): void {
   if (rows.length === 0) return;
   const header = rows[0];
@@ -68,7 +70,37 @@ async function summaries(configPath: string, agent?: string): Promise<TraceSumma
 }
 
 function sortByRecent(items: TraceSummary[]): TraceSummary[] {
-  return [...items].sort((a, b) => (b.lastEventTs ?? b.mtimeMs) - (a.lastEventTs ?? a.mtimeMs) || a.path.localeCompare(b.path));
+  return [...items].sort(
+    (a, b) =>
+      (b.lastEventTs ?? b.mtimeMs) - (a.lastEventTs ?? a.mtimeMs) ||
+      a.path.localeCompare(b.path) ||
+      a.id.localeCompare(b.id),
+  );
+}
+
+function isLatestToken(input: string): boolean {
+  return input.trim().toLowerCase() === LATEST_KEYWORD;
+}
+
+function resolveLatestTraceId(items: TraceSummary[]): string {
+  const latest = sortByRecent(items)[0];
+  if (!latest) {
+    throw new Error('no sessions found (cannot resolve "latest")');
+  }
+  return latest.id;
+}
+
+function resolveTraceIdOrLatest(
+  source: {
+    getSummaries(): TraceSummary[];
+    resolveId(candidate: string): string;
+  },
+  candidate: string,
+): string {
+  if (isLatestToken(candidate)) {
+    return resolveLatestTraceId(source.getSummaries());
+  }
+  return source.resolveId(candidate);
 }
 
 const program = new Command();
@@ -84,7 +116,8 @@ Examples:
   $ agentlens --browser
   $ agentlens summary --json
   $ agentlens sessions list --limit 20
-  $ agentlens session <id> --show-tools
+  $ agentlens session latest --show-tools
+  $ agentlens sessions events latest --follow
 `,
 );
 
@@ -208,7 +241,7 @@ async function renderSessionDetail(
 ): Promise<void> {
   const configPath = program.opts<{ config: string }>().config;
   const snapshot = await loadSnapshot(configPath);
-  const resolved = snapshot.resolveId(id);
+  const resolved = resolveTraceIdOrLatest(snapshot, id);
   const pageOptions: { limit: number; includeMeta?: boolean } = {
     limit: Math.max(1, Number(opts.events) || 20),
   };
@@ -271,8 +304,8 @@ sessions
   });
 
 program
-  .command("session <id>")
-  .description("Show session-specific info")
+  .command("session <id_or_latest>")
+  .description("Show session-specific info by id/session_id/latest")
   .option("--events <n>", "Include latest N events", "20")
   .option("--include-meta", "Include meta events")
   .option("--show-tools", "Show tool/function details")
@@ -282,7 +315,7 @@ program
   });
 
 sessions
-  .command("show <id>")
+  .command("show <id_or_latest>")
   .option("--events <n>", "Include latest N events", "20")
   .option("--include-meta", "Include meta events")
   .option("--show-tools", "Show tool/function details")
@@ -292,7 +325,7 @@ sessions
   });
 
 sessions
-  .command("events <id>")
+  .command("events <id_or_latest>")
   .option("--limit <n>", "Number of events", "50")
   .option("--before <cursor>", "Pagination cursor")
   .option("--include-meta", "Include meta events")
@@ -308,7 +341,7 @@ sessions
       if (opts.follow) {
         const index = await TraceIndex.fromConfigPath(configPath);
         await index.start();
-        const resolved = index.resolveId(id);
+        const resolved = resolveTraceIdOrLatest(index, id);
 
         const initialOptions: { limit: number; includeMeta?: boolean } = {
           limit: Math.max(1, Number(opts.limit) || 50),
@@ -348,7 +381,7 @@ sessions
       }
 
       const snapshot = await loadSnapshot(configPath);
-      const resolved = snapshot.resolveId(id);
+      const resolved = resolveTraceIdOrLatest(snapshot, id);
       const pageOptions: { limit?: number; before?: string; includeMeta?: boolean } = {};
       if (opts.includeMeta !== undefined) {
         pageOptions.includeMeta = opts.includeMeta;
