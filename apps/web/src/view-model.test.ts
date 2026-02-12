@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { buildTimelineTocRows, classForKind, eventCardClass, sortTimelineItems, truncateText } from "./view-model.js";
+import {
+  buildTimelineStripSegments,
+  buildTimelineTocRows,
+  classForKind,
+  eventCardClass,
+  iconForAgent,
+  kindClassSuffix,
+  pathTail,
+  sortTimelineItems,
+  truncateText,
+} from "./view-model.js";
 
 describe("web view model", () => {
   it("builds timeline TOC rows from events with labels and color keys", () => {
@@ -30,6 +40,40 @@ describe("web view model", () => {
   it("creates stable css classes for badges and event cards", () => {
     expect(classForKind("tool_use")).toBe("kind kind-tool_use");
     expect(eventCardClass("tool_result")).toBe("event-card event-kind-tool_result");
+    expect(kindClassSuffix("tool_use!!")).toBe("tool_use");
+  });
+
+  it("builds chronological strip segments with toc label fallback to preview", () => {
+    const segments = buildTimelineStripSegments([
+      {
+        eventId: "e3",
+        index: 3,
+        timestampMs: 200,
+        eventKind: "assistant",
+        tocLabel: "Answer",
+        preview: "Assistant response",
+      },
+      {
+        eventId: "e1",
+        index: 1,
+        timestampMs: 100,
+        eventKind: "user",
+        tocLabel: "",
+        preview: "User prompt",
+      },
+      {
+        eventId: "e2",
+        index: 2,
+        timestampMs: 100,
+        eventKind: "tool_use",
+        tocLabel: "Tool: Bash",
+        preview: "Run Bash",
+      },
+    ] as unknown as import("@agentlens/contracts").NormalizedEvent[]);
+
+    expect(segments.map((segment) => segment.eventId)).toEqual(["e1", "e2", "e3"]);
+    expect(segments[0]).toMatchObject({ label: "User prompt", colorKey: "user" });
+    expect(segments[1]).toMatchObject({ label: "Tool: Bash", colorKey: "tool_use" });
   });
 
   it("sorts timeline entries in both directions", () => {
@@ -45,5 +89,20 @@ describe("web view model", () => {
   it("truncates long text to a fixed character limit", () => {
     expect(truncateText("short", 10)).toEqual({ value: "short", isTruncated: false });
     expect(truncateText("123456789", 5)).toEqual({ value: "12345", isTruncated: true });
+  });
+
+  it("maps known agents to icon assets and unknown to fallback", () => {
+    expect(iconForAgent("codex")).toBe("/icons/codex.webp");
+    expect(iconForAgent("cursor")).toBe("/icons/cursor.png");
+    expect(iconForAgent("claude")).toBe("/icons/claude.svg");
+    expect(iconForAgent("opencode")).toBe("/icons/opencode.png");
+    expect(iconForAgent("unknown")).toBeNull();
+  });
+
+  it("extracts a stable file/folder tail for collapsed path display", () => {
+    expect(pathTail("/Users/rob/.codex/sessions/2026/02/12/session.jsonl")).toBe("session.jsonl");
+    expect(pathTail("C:\\Users\\rob\\.cursor\\logs\\latest\\")).toBe("latest");
+    expect(pathTail("trace.log")).toBe("trace.log");
+    expect(pathTail("/")).toBe("/");
   });
 });
