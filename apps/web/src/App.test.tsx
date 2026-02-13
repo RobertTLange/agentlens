@@ -190,10 +190,23 @@ function traceIdFromTraceUrl(url: string): string {
   return decodeURIComponent(match?.[1] ?? "");
 }
 
+function traceIdFromStopUrl(url: string): string {
+  const match = url.match(/\/api\/trace\/([^/]+)\/stop(?:\?|$)/);
+  return decodeURIComponent(match?.[1] ?? "");
+}
+
 function getTraceRow(id: string): HTMLDivElement {
   const row = document.querySelector(`[data-trace-id="${id}"]`);
   if (!row) throw new Error(`missing row for ${id}`);
   return row as HTMLDivElement;
+}
+
+function getTraceStopButton(id: string): HTMLButtonElement {
+  const button = getTraceRow(id).querySelector(".trace-stop-button");
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`missing stop button for ${id}`);
+  }
+  return button;
 }
 
 function getTimelineStripPanel(): HTMLElement {
@@ -255,6 +268,7 @@ let tracePagesById: Record<string, TracePage>;
 let overview: OverviewStats;
 let rafQueue: FrameRequestCallback[];
 let requestedUrls: string[];
+let stopResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 
 beforeEach(() => {
   tracesById = {
@@ -268,6 +282,7 @@ beforeEach(() => {
   );
   rafQueue = [];
   requestedUrls = [];
+  stopResponsesByTraceId = {};
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
   vi.stubGlobal(
@@ -280,14 +295,22 @@ beforeEach(() => {
   vi.stubGlobal("cancelAnimationFrame", vi.fn());
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: string | URL | Request) => {
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+      const method = String(init?.method ?? "GET").toUpperCase();
       requestedUrls.push(url);
       if (url.includes("/api/overview")) {
         return new Response(JSON.stringify({ overview }), { status: 200 });
       }
       if (url.includes("/api/traces")) {
         return new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 });
+      }
+      if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
+        const traceId = traceIdFromStopUrl(url);
+        const custom = stopResponsesByTraceId[traceId];
+        const status = custom?.status ?? 200;
+        const body = custom?.body ?? { ok: true, status: "terminated", signal: "SIGINT" };
+        return new Response(JSON.stringify(body), { status });
       }
       if (url.includes("/api/trace/")) {
         const traceId = traceIdFromTraceUrl(url);
@@ -460,6 +483,76 @@ describe("App sessions list live motion", () => {
     expect(idleRow.querySelector(".trace-status-chip")?.textContent).toBe("Idle");
   });
 
+  it("keeps stopped trace idle across stale snapshots and clears override on newer activity", async () => {
+    const runningTrace = makeTrace("trace-c", 3_000, "running");
+    tracesById["trace-c"] = runningTrace;
+    tracePagesById["trace-c"] = makeTracePage(runningTrace);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    await waitFor(() => expect(getTraceRow("trace-c").querySelector(".trace-status-chip")?.textContent).toBe("Running"));
+    await waitFor(() => expect(document.querySelector(".session-head-counter.status-running")?.textContent).toBe("running 1"));
+
+    const stopButton = getTraceStopButton("trace-c");
+    expect(stopButton.disabled).toBe(false);
+    expect(stopButton.getAttribute("aria-label")).toBe("Stop session process");
+    expect(stopButton.querySelector(".trace-stop-icon")).not.toBeNull();
+
+    act(() => {
+      stopButton.click();
+    });
+
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/trace-c/stop"))).toBe(true));
+    await waitFor(() => expect(stopButton.disabled).toBe(false));
+    await waitFor(() => expect(getTraceRow("trace-c").querySelector(".trace-status-chip")?.textContent).toBe("Idle"));
+    await waitFor(() => expect(document.querySelector(".session-head-counter.status-running")?.textContent).toBe("running 0"));
+    await waitFor(() =>
+      expect(document.querySelector("footer.status")?.textContent).toContain("Stop requested (SIGINT) for trace-c"),
+    );
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("snapshot", {
+        traces: [makeTrace("trace-a", 12_000, "running"), makeTrace("trace-b", 2_000, "idle"), makeTrace("trace-c", 3_000, "waiting_input")],
+        overview: makeOverview(3),
+      });
+    });
+
+    await waitFor(() => expect(getTraceRow("trace-c").querySelector(".trace-status-chip")?.textContent).toBe("Idle"));
+
+    const resumedTrace = makeTrace("trace-c", Date.now() + 10_000, "running");
+    act(() => {
+      source.emit("trace_updated", { summary: resumedTrace });
+    });
+
+    await waitFor(() => expect(getTraceRow("trace-c").querySelector(".trace-status-chip")?.textContent).toBe("Running"));
+  });
+
+  it("shows stop failure error in the session row when terminate endpoint rejects", async () => {
+    stopResponsesByTraceId["trace-c"] = {
+      status: 409,
+      body: { ok: false, error: "no active session process found" },
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const stopButton = getTraceStopButton("trace-c");
+    act(() => {
+      stopButton.click();
+    });
+
+    await waitFor(() =>
+      expect(getTraceRow("trace-c").querySelector(".trace-stop-error")?.textContent).toContain(
+        "no active session process found",
+      ),
+    );
+    await waitFor(() => expect(document.querySelector("footer.status")?.textContent).toContain("Stop failed"));
+  });
+
   it("renders session rows with single-line name element and start/updated fields", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -558,6 +651,44 @@ describe("App sessions list live motion", () => {
     expect(getTocTimestampByIndex(8)).toBe("1d ago");
     expect(getTocTimestampByIndex(9)).toBe("now");
     expect(getTocTimestampByIndex(10)).toBe("-");
+  });
+
+  it("renders compact last-event age chips beside the composition pie", async () => {
+    const anchorMs = 2_000_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(anchorMs);
+
+    tracesById = {
+      "trace-a": {
+        ...makeTrace("trace-a", anchorMs - 60_000, "running"),
+        lastEventTs: anchorMs - 60_000,
+      },
+      "trace-b": {
+        ...makeTrace("trace-b", anchorMs - 3_600_000, "waiting_input"),
+        lastEventTs: anchorMs - 3_600_000,
+      },
+      "trace-c": {
+        ...makeTrace("trace-c", anchorMs - 9_000, "idle"),
+        lastEventTs: anchorMs - 9_000,
+      },
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const minuteChip = getTraceRow("trace-a").querySelector(".trace-last-event-chip");
+    expect(minuteChip?.textContent?.trim()).toBe("1m");
+    expect(minuteChip?.getAttribute("title")).toContain("1 minute ago");
+
+    const hourChip = getTraceRow("trace-b").querySelector(".trace-last-event-chip");
+    expect(hourChip?.textContent?.trim()).toBe("1h");
+    expect(hourChip?.getAttribute("title")).toContain("1 hour ago");
+
+    const nowChip = getTraceRow("trace-c").querySelector(".trace-last-event-chip");
+    expect(nowChip?.textContent?.trim()).toBe("now");
+    expect(nowChip?.getAttribute("title")).toContain("just now");
   });
 
   it("renders tool-type tags in TOC rows and trace inspector cards", async () => {
@@ -733,8 +864,10 @@ describe("App sessions list live motion", () => {
     expect(slices).toHaveLength(4);
 
     const graphWrap = getTraceRow("trace-a").querySelector(".trace-time-graph-wrap");
-    expect(graphWrap?.firstElementChild?.classList.contains("trace-composition-wrap")).toBe(true);
-    expect(graphWrap?.lastElementChild?.classList.contains("trace-activity-sparkline")).toBe(true);
+    const graphChildren = graphWrap ? Array.from(graphWrap.children) : [];
+    expect(graphChildren[0]?.classList.contains("trace-last-event-chip")).toBe(true);
+    expect(graphChildren[1]?.classList.contains("trace-composition-wrap")).toBe(true);
+    expect(graphChildren[2]?.classList.contains("trace-activity-sparkline")).toBe(true);
   });
 
   it("renders empty composition pie state when no user/assistant/tool events are present", async () => {

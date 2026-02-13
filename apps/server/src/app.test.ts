@@ -1,9 +1,14 @@
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
-import { createServer, resolveDefaultWebDistPath } from "./app.js";
+import {
+  createServer,
+  matchesCurrentUser,
+  resolveDefaultWebDistPath,
+  selectClaudeProjectProcessPids,
+} from "./app.js";
 
 async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; sessionId: string }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-server-"));
@@ -109,6 +114,67 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
 }
 
 describe("server api", () => {
+  it("matches process owner by username and numeric uid", async () => {
+    expect(matchesCurrentUser("rob", { username: "rob", uid: "501" })).toBe(true);
+    expect(matchesCurrentUser("501", { username: "rob", uid: "501" })).toBe(true);
+    expect(matchesCurrentUser("other", { username: "rob", uid: "501" })).toBe(false);
+  });
+
+  it("selects claude fallback process by matching project cwd", async () => {
+    const selected = selectClaudeProjectProcessPids(
+      {
+        path: "/Users/rob/.claude/projects/-Users-rob-Dropbox-2026-sakana-agentlens/2356bd53-2142-4bad-a14f-a04e50069f51.jsonl",
+        sessionId: "2356bd53-2142-4bad-a14f-a04e50069f51",
+      },
+      [
+        {
+          pid: 81230,
+          user: "rob",
+          args: "claude --dangerously-skip-permissions",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 27376,
+          user: "rob",
+          args: "/Applications/Claude.app/Contents/MacOS/Claude",
+          cwd: "/Applications/Claude.app",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([81230]);
+  });
+
+  it("prefers claude fallback process whose args include the selected session id", async () => {
+    const sessionId = "2356bd53-2142-4bad-a14f-a04e50069f51";
+    const selected = selectClaudeProjectProcessPids(
+      {
+        path: `/Users/rob/.claude/projects/-Users-rob-Dropbox-2026-sakana-agentlens/${sessionId}.jsonl`,
+        sessionId,
+      },
+      [
+        {
+          pid: 7001,
+          user: "rob",
+          args: "claude --resume 2356bd53-2142-4bad-a14f-a04e50069f51",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 7002,
+          user: "rob",
+          args: "claude --dangerously-skip-permissions",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([7001]);
+  });
+
   it("prefers monorepo web dist when both monorepo and packaged builds exist", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-web-dist-"));
     const packagedWebDistPath = path.join(root, "packaged-web-dist");
@@ -121,10 +187,19 @@ describe("server api", () => {
 
   it("serves overview, trace listing, trace details, and config updates", async () => {
     const fixture = await buildFixture();
+    const stopTraceSession = vi.fn();
+    stopTraceSession.mockResolvedValue({
+      status: "terminated" as const,
+      reason: "session process terminated with SIGINT",
+      signal: "SIGINT" as const,
+      matchedPids: [4242],
+      alivePids: [],
+    });
     const server = await createServer({
       traceIndex: fixture.index,
       configPath: fixture.configPath,
       enableStatic: false,
+      stopTraceSession,
     });
 
     const health = await server.inject({ method: "GET", url: "/api/healthz" });
@@ -157,6 +232,37 @@ describe("server api", () => {
 
     const traceBySession = await server.inject({ method: "GET", url: `/api/trace/${fixture.sessionId}` });
     expect(traceBySession.statusCode).toBe(200);
+
+    const stopRes = await server.inject({ method: "POST", url: `/api/trace/${traceId}/stop` });
+    expect(stopRes.statusCode).toBe(200);
+    const stopPayload = stopRes.json() as {
+      ok: boolean;
+      status: string;
+      signal: string;
+      pids: number[];
+      alivePids: number[];
+    };
+    expect(stopPayload.ok).toBe(true);
+    expect(stopPayload.status).toBe("terminated");
+    expect(stopPayload.signal).toBe("SIGINT");
+    expect(stopPayload.pids).toEqual([4242]);
+    expect(stopPayload.alivePids).toEqual([]);
+    expect(stopTraceSession).toHaveBeenCalledTimes(1);
+
+    stopTraceSession.mockResolvedValueOnce({
+      status: "not_running",
+      reason: "no active session process found",
+      signal: null,
+      matchedPids: [],
+      alivePids: [],
+    });
+    const stopNotRunning = await server.inject({ method: "POST", url: `/api/trace/${traceId}/stop` });
+    expect(stopNotRunning.statusCode).toBe(409);
+    expect(stopNotRunning.json()).toMatchObject({
+      ok: false,
+      status: "not_running",
+      error: "no active session process found",
+    });
 
     const configPatch = await server.inject({
       method: "POST",

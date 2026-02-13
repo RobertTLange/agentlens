@@ -500,6 +500,50 @@ body {
   color: #475569;
 }
 
+.trace-stop-button {
+  border: 1px solid #b91c1c;
+  border-radius: 999px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: #7f1d1d;
+  background: #fee2e2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.trace-stop-icon {
+  width: 11px;
+  height: 11px;
+  display: block;
+}
+
+.trace-stop-button:hover:not(:disabled) {
+  border-color: #991b1b;
+  background: #fecaca;
+  color: #7f1d1d;
+}
+
+.trace-stop-button.pending,
+.trace-stop-button:disabled {
+  border-color: #94a3b8;
+  background: #e2e8f0;
+  color: #64748b;
+  cursor: default;
+}
+
+.trace-stop-button.pending .trace-stop-icon,
+.trace-stop-button:disabled .trace-stop-icon {
+  opacity: 0.8;
+}
+
 .trace-time-grid {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -532,6 +576,42 @@ body {
   align-self: center;
   width: auto;
   height: 18px;
+}
+
+.trace-last-event-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid #bfdbfe;
+  background: #dbeafe;
+  color: #1e3a8a;
+  font-size: 0.62rem;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.trace-last-event-chip.status-running {
+  border-color: #99f6e4;
+  background: #ccfbf1;
+  color: #0f766e;
+}
+
+.trace-last-event-chip.status-waiting {
+  border-color: #fde68a;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.trace-last-event-chip.status-idle {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #334155;
 }
 
 .trace-activity-sparkline {
@@ -674,6 +754,12 @@ body {
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+}
+
+.trace-stop-error {
+  font-size: 0.64rem;
+  color: #991b1b;
+  overflow-wrap: anywhere;
 }
 
 .trace-path-box {

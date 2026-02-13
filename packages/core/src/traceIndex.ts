@@ -250,15 +250,18 @@ function applyFreshnessTtl(
   updatedMs: number,
   nowMsValue: number,
   scanConfig: AppConfig["scan"],
+  ttlOverrideMs?: number,
 ): ActivityStatus {
   if (activity.status === "idle") return activity;
   if (updatedMs <= 0) return { status: "idle", reason: "stale_timeout" };
 
   const ageMs = Math.max(0, nowMsValue - updatedMs);
   const ttlMs =
-    activity.status === "running"
-      ? Math.max(0, scanConfig.statusRunningTtlMs)
-      : Math.max(0, scanConfig.statusWaitingTtlMs);
+    ttlOverrideMs !== undefined
+      ? Math.max(0, ttlOverrideMs)
+      : activity.status === "running"
+        ? Math.max(0, scanConfig.statusRunningTtlMs)
+        : Math.max(0, scanConfig.statusWaitingTtlMs);
   if (ageMs > ttlMs) {
     return { status: "idle", reason: "stale_timeout" };
   }
@@ -282,6 +285,7 @@ function deriveActivityStatus(options: ActivityStatusOptions): ActivityStatus {
       options.updatedMs,
       options.nowMs,
       options.scanConfig,
+      options.scanConfig.statusWaitingTtlMs,
     );
   }
 

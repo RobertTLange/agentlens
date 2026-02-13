@@ -15,9 +15,13 @@ interface SessionTraceRowProps {
   isActive: boolean;
   isPathExpanded: boolean;
   isEntering: boolean;
+  isStopping: boolean;
+  stopError: string;
   pulseSeq: number;
+  nowMs: number;
   onSelect: (traceId: string) => void;
   onTogglePath: (traceId: string) => void;
+  onStop: (traceId: string) => void;
   rowRef: (node: HTMLDivElement | null) => void;
   fmtTime: (ms: number | null) => string;
 }
@@ -56,6 +60,11 @@ interface CompositionPieModel {
   slices: CompositionSlice[];
 }
 
+interface CompactAgeLabel {
+  short: string;
+  long: string;
+}
+
 async function copyPathText(path: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(path);
@@ -82,6 +91,65 @@ function clamp01(value: number): number {
 
 function sanitizeCount(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function pluralize(value: number, unit: string): string {
+  return `${value} ${unit}${value === 1 ? "" : "s"}`;
+}
+
+function formatCompactAge(lastEventTs: number | null, nowMs: number): CompactAgeLabel | null {
+  if (typeof lastEventTs !== "number" || !Number.isFinite(lastEventTs)) return null;
+  const deltaSeconds = Math.floor(Math.max(0, nowMs - lastEventTs) / 1_000);
+
+  if (deltaSeconds < 10) {
+    return { short: "now", long: "Last event just now" };
+  }
+  if (deltaSeconds < 60) {
+    return {
+      short: `${deltaSeconds}s`,
+      long: `Last event ${pluralize(deltaSeconds, "second")} ago`,
+    };
+  }
+  if (deltaSeconds < 3_600) {
+    const minutes = Math.floor(deltaSeconds / 60);
+    return {
+      short: `${minutes}m`,
+      long: `Last event ${pluralize(minutes, "minute")} ago`,
+    };
+  }
+  if (deltaSeconds < 86_400) {
+    const hours = Math.floor(deltaSeconds / 3_600);
+    return {
+      short: `${hours}h`,
+      long: `Last event ${pluralize(hours, "hour")} ago`,
+    };
+  }
+  if (deltaSeconds < 604_800) {
+    const days = Math.floor(deltaSeconds / 86_400);
+    return {
+      short: `${days}d`,
+      long: `Last event ${pluralize(days, "day")} ago`,
+    };
+  }
+  if (deltaSeconds < 2_592_000) {
+    const weeks = Math.floor(deltaSeconds / 604_800);
+    return {
+      short: `${weeks}w`,
+      long: `Last event ${pluralize(weeks, "week")} ago`,
+    };
+  }
+  if (deltaSeconds < 31_536_000) {
+    const months = Math.floor(deltaSeconds / 2_592_000);
+    return {
+      short: `${months}mo`,
+      long: `Last event ${pluralize(months, "month")} ago`,
+    };
+  }
+  const years = Math.floor(deltaSeconds / 31_536_000);
+  return {
+    short: `${years}y`,
+    long: `Last event ${pluralize(years, "year")} ago`,
+  };
 }
 
 function sanitizeActivityBins(rawBins: number[] | undefined): number[] {
@@ -340,12 +408,27 @@ function describeCompositionTooltip(pie: CompositionPieModel): string {
 }
 
 export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
-  const { trace, activityStatus, isActive, isPathExpanded, isEntering, pulseSeq, onSelect, onTogglePath, rowRef, fmtTime } =
-    props;
+  const {
+    trace,
+    activityStatus,
+    isActive,
+    isPathExpanded,
+    isEntering,
+    isStopping,
+    stopError,
+    pulseSeq,
+    nowMs,
+    onSelect,
+    onTogglePath,
+    onStop,
+    rowRef,
+    fmtTime,
+  } = props;
   const traceIcon = iconForAgent(trace.agent);
   const sessionName = trace.sessionId || trace.id;
   const startMs = trace.firstEventTs ?? null;
   const updatedMs = Math.max(trace.lastEventTs ?? 0, trace.mtimeMs);
+  const lastEventAge = formatCompactAge(trace.lastEventTs ?? null, nowMs);
   const statusClass =
     activityStatus === "waiting_input"
       ? "status-waiting"
@@ -382,6 +465,22 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
           </span>
           <div className="trace-topline-right">
             <span className={`trace-status-chip mono ${statusClass}`}>{statusLabel}</span>
+            <button
+              type="button"
+              className={`trace-stop-button mono ${isStopping ? "pending" : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onStop(trace.id);
+              }}
+              aria-label={isStopping ? "Stopping session process" : "Stop session process"}
+              title={isStopping ? "Stopping session process…" : "Stop session process"}
+              disabled={isStopping}
+            >
+              <svg className="trace-stop-icon" viewBox="0 0 14 14" aria-hidden="true">
+                <circle cx="7" cy="7" r="5.2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                <rect x="5.1" y="5.1" width="3.8" height="3.8" rx="0.5" fill="currentColor" />
+              </svg>
+            </button>
             <span className="trace-agent-chip mono">{trace.agent}</span>
           </div>
         </div>
@@ -391,6 +490,15 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
           <span className="trace-time-label">start</span>
           <span className="trace-time-value">{fmtTime(startMs)}</span>
           <span className="trace-time-graph-wrap">
+            {lastEventAge && (
+              <span
+                className={`trace-last-event-chip mono ${statusClass}`}
+                title={lastEventAge.long}
+                aria-label={lastEventAge.long}
+              >
+                {lastEventAge.short}
+              </span>
+            )}
             <span className="trace-composition-wrap">
               <svg
                 className="trace-composition-pie"
@@ -504,6 +612,11 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
             )}
           </span>
         </div>
+        {stopError && (
+          <div className="trace-stop-error mono" role="status">
+            {stopError}
+          </div>
+        )}
       </div>
     </div>
   );
