@@ -125,6 +125,14 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   models: {
     defaultContextWindowTokens: 200_000,
-    contextWindows: [],
+    contextWindows: [
+      { model: "gpt-5.2-codex", contextWindowTokens: 400_000 },
+      { model: "gpt-5.3-codex", contextWindowTokens: 400_000 },
+      { model: "gpt-5.2", contextWindowTokens: 400_000 },
+      { model: "claude-opus-4-5-20251101", contextWindowTokens: 200_000 },
+      { model: "claude-opus-4-6", contextWindowTokens: 200_000 },
+      { model: "claude-sonnet-4-5-20250929", contextWindowTokens: 200_000 },
+      { model: "claude-haiku-4-5-20251001", contextWindowTokens: 200_000 },
+    ],
   },
 };

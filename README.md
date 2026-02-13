@@ -213,7 +213,16 @@ reasoningOutputPer1MUsd = 0
 
 [models]
 defaultContextWindowTokens = 200000
-contextWindows = []
+# Claude defaults use standard 200K window (1M is beta via context-1m header).
+contextWindows = [
+  { model = "gpt-5.2-codex", contextWindowTokens = 400000 },
+  { model = "gpt-5.3-codex", contextWindowTokens = 400000 }, # same as gpt-5.2-codex
+  { model = "gpt-5.2", contextWindowTokens = 400000 },
+  { model = "claude-opus-4-5-20251101", contextWindowTokens = 200000 },
+  { model = "claude-opus-4-6", contextWindowTokens = 200000 },
+  { model = "claude-sonnet-4-5-20250929", contextWindowTokens = 200000 },
+  { model = "claude-haiku-4-5-20251001", contextWindowTokens = 200000 }
+]
 ```
 
 ## Development

@@ -16,6 +16,17 @@ describe("config", () => {
     expect(config.cost.modelRates.some((rate) => rate.model === "gpt-5.3-codex")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "claude-opus-4-5-20251101")).toBe(true);
     expect(config.models.defaultContextWindowTokens).toBeGreaterThan(0);
+    expect(config.models.contextWindows.some((entry) => entry.model === "gpt-5.2-codex")).toBe(true);
+    expect(
+      config.models.contextWindows.some(
+        (entry) => entry.model === "gpt-5.2-codex" && entry.contextWindowTokens === 400_000,
+      ),
+    ).toBe(true);
+    expect(
+      config.models.contextWindows.some(
+        (entry) => entry.model === "claude-sonnet-4-5-20250929" && entry.contextWindowTokens === 200_000,
+      ),
+    ).toBe(true);
   });
 
   it("loads new nested sections from TOML", async () => {
