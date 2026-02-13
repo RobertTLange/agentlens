@@ -908,134 +908,152 @@ export function App(): JSX.Element {
         </section>
 
         <section className="panel detail-panel">
-          <div className="panel-head detail-head">
-            <div
-              key={`detail-head-pulse-${selectedTraceSummary?.id ?? "none"}-${selectedTracePulseSeq}`}
-              className={`detail-head-title-block ${selectedTracePulseSeq > 0 ? "pulse" : ""}`}
-            >
-              <h2>Trace Inspector</h2>
-              <div className="detail-head-meta mono" title={selectedTraceLabel || undefined}>
-                {selectedTraceSummary ? `${selectedTraceLabel} · ${selectedTraceMeta}` : selectedTraceMeta}
+            <div className="panel-head detail-head">
+              <div
+                key={`detail-head-pulse-${selectedTraceSummary?.id ?? "none"}-${selectedTracePulseSeq}`}
+                className={`detail-head-title-block ${selectedTracePulseSeq > 0 ? "pulse" : ""}`}
+              >
+                <h2>Trace Inspector</h2>
+                <div className="detail-head-meta mono" title={selectedTraceLabel || undefined}>
+                  {selectedTraceSummary ? `${selectedTraceLabel} · ${selectedTraceMeta}` : selectedTraceMeta}
+                </div>
+              </div>
+              <div className="detail-controls">
+                <label className="mono checkbox">
+                  <input
+                    type="checkbox"
+                    checked={includeMeta}
+                    onChange={(event) => setIncludeMeta(event.target.checked)}
+                  />
+                  include meta
+                </label>
+                <label className="mono checkbox">
+                  <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
+                  auto follow
+                </label>
               </div>
             </div>
-            <div className="detail-controls">
-              <label className="mono checkbox">
-                <input
-                  type="checkbox"
-                  checked={includeMeta}
-                  onChange={(event) => setIncludeMeta(event.target.checked)}
-                />
-                include meta
-              </label>
-              <label className="mono checkbox">
-                <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
-                auto follow
-              </label>
-            </div>
-          </div>
 
-          {page ? (
-            <>
-              <section className="detail-summary-cards" aria-label="trace inspector summary cards">
-                <article className="detail-summary-card">
-                  <div className="detail-summary-title mono">tokens</div>
-                  <div className="detail-summary-value mono">
-                    {formatCompactNumber(page.summary.tokenTotals?.totalTokens ?? null)}
-                  </div>
-                  <div className="detail-summary-sub mono">
-                    {`in ${formatCompactNumber(page.summary.tokenTotals?.inputTokens ?? null)} · out ${formatCompactNumber(page.summary.tokenTotals?.outputTokens ?? null)}`}
-                  </div>
-                  <div className="detail-summary-sub mono">
-                    {`cr ${formatCompactNumber(page.summary.tokenTotals?.cachedReadTokens ?? null)} · cc ${formatCompactNumber(page.summary.tokenTotals?.cachedCreateTokens ?? null)}`}
-                  </div>
-                  <div className="detail-summary-sub mono">
-                    {`ctx ${formatPercent(page.summary.contextWindowPct ?? null)} · cost ${formatUsd(page.summary.costEstimateUsd ?? null)}`}
-                  </div>
-                </article>
-                <article className="detail-summary-card">
-                  <div className="detail-summary-title mono">models</div>
-                  <div className="detail-summary-value mono">{`${page.summary.modelTokenSharesTop?.length ?? 0} shown`}</div>
-                  {(page.summary.modelTokenSharesTop ?? []).slice(0, 3).map((row) => (
-                    <div key={`${row.model}-${row.tokens}`} className="detail-summary-sub mono" title={row.model}>
-                      {`${row.model} ${formatPercent(row.percent, 1)}`}
+            {page ? (
+              <>
+                <section className="detail-summary-cards" aria-label="trace inspector summary cards">
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-title mono">tokens</div>
+                    <div className="detail-summary-value mono">
+                      {formatCompactNumber(page.summary.tokenTotals?.totalTokens ?? null)}
                     </div>
-                  ))}
-                  {page.summary.modelTokenSharesEstimated && <div className="detail-summary-note mono">estimated</div>}
-                </article>
-                <article className="detail-summary-card">
-                  <div className="detail-summary-title mono">tool calls</div>
-                  <div className="detail-summary-value mono">{formatCompactNumber(toolCallCountTotal)}</div>
-                  {toolCallTypeCountRows.length > 0 ? (
-                    toolCallTypeCountRows.map((row, rowIndex) => (
-                      <div
-                        key={`tool-count-row-${rowIndex}`}
-                        className="detail-summary-sub mono"
-                        title={row.map((entry) => entry.toolType).join(", ")}
-                      >
-                        {row.map((entry) => `${entry.toolType} ${formatCompactNumber(entry.count)}`).join(" · ")}
+                    <div className="detail-summary-sub mono">
+                      {`in ${formatCompactNumber(page.summary.tokenTotals?.inputTokens ?? null)} · out ${formatCompactNumber(page.summary.tokenTotals?.outputTokens ?? null)}`}
+                    </div>
+                    <div className="detail-summary-sub mono">
+                      {`cr ${formatCompactNumber(page.summary.tokenTotals?.cachedReadTokens ?? null)} · cc ${formatCompactNumber(page.summary.tokenTotals?.cachedCreateTokens ?? null)}`}
+                    </div>
+                    <div className="detail-summary-sub mono">
+                      {`ctx ${formatPercent(page.summary.contextWindowPct ?? null)} · cost ${formatUsd(page.summary.costEstimateUsd ?? null)}`}
+                    </div>
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-title mono">models</div>
+                    <div className="detail-summary-value mono">{`${page.summary.modelTokenSharesTop?.length ?? 0} shown`}</div>
+                    {(page.summary.modelTokenSharesTop ?? []).slice(0, 3).map((row) => (
+                      <div key={`${row.model}-${row.tokens}`} className="detail-summary-sub mono" title={row.model}>
+                        {`${row.model} ${formatPercent(row.percent, 1)}`}
                       </div>
-                    ))
-                  ) : (
-                    <div className="detail-summary-sub mono">types -</div>
-                  )}
-                  {hiddenToolCallTypeCount > 0 && (
-                    <div className="detail-summary-note mono">{`+${hiddenToolCallTypeCount} more types`}</div>
-                  )}
-                </article>
-              </section>
+                    ))}
+                    {page.summary.modelTokenSharesEstimated && <div className="detail-summary-note mono">estimated</div>}
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-title mono">tool calls</div>
+                    <div className="detail-summary-value mono">{formatCompactNumber(toolCallCountTotal)}</div>
+                    {toolCallTypeCountRows.length > 0 ? (
+                      toolCallTypeCountRows.map((row, rowIndex) => (
+                        <div
+                          key={`tool-count-row-${rowIndex}`}
+                          className="detail-summary-sub mono"
+                          title={row.map((entry) => entry.toolType).join(", ")}
+                        >
+                          {row.map((entry) => `${entry.toolType} ${formatCompactNumber(entry.count)}`).join(" · ")}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="detail-summary-sub mono">types -</div>
+                    )}
+                    {hiddenToolCallTypeCount > 0 && (
+                      <div className="detail-summary-note mono">{`+${hiddenToolCallTypeCount} more types`}</div>
+                    )}
+                  </article>
+                </section>
 
-              <div className="events-scroll">
-                {timelineEvents.map((event) => {
-                  const agentBadges = buildAgentBadges(event);
-                  return (
-                    <article
-                      key={event.eventId}
-                      id={domIdForEvent(event.eventId)}
-                      className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
-                      ref={bindEventCardRef(event.eventId)}
-                    >
-                      <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
-                        {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}
-                      </button>
-                      <div className="event-top mono">
-                        <span>{`#${event.index}`}</span>
-                        <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
-                        {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
-                        <span>{fmtTime(event.timestampMs)}</span>
-                      </div>
-                      <h3>{event.preview}</h3>
-                      {(event.toolName || event.functionName) && (
-                        <div className="mono subtle">
-                          {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
+                <div className="events-scroll">
+                  {timelineEvents.map((event) => {
+                    const agentBadges = buildAgentBadges(event);
+                    return (
+                      <article
+                        key={event.eventId}
+                        id={domIdForEvent(event.eventId)}
+                        className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
+                        ref={bindEventCardRef(event.eventId)}
+                      >
+                        <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
+                          {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}
+                        </button>
+                        <div className="event-top mono">
+                          <span>{`#${event.index}`}</span>
+                          <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
+                          {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
+                          <span>{fmtTime(event.timestampMs)}</span>
                         </div>
-                      )}
-                      {agentBadges.length > 0 && (
-                        <div className="event-agent-badges mono">
-                          {agentBadges.map((badge) => (
-                            <span key={`${event.eventId}-${badge}`} className="event-agent-badge">
-                              {badge}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {expandedEventIds.has(event.eventId) && (
-                        <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-            </>
-          ) : (
-            <div className="empty">Pick a session to inspect.</div>
-          )}
+                        <h3>{event.preview}</h3>
+                        {(event.toolName || event.functionName) && (
+                          <div className="mono subtle">
+                            {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
+                          </div>
+                        )}
+                        {agentBadges.length > 0 && (
+                          <div className="event-agent-badges mono">
+                            {agentBadges.map((badge) => (
+                              <span key={`${event.eventId}-${badge}`} className="event-agent-badge">
+                                {badge}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {expandedEventIds.has(event.eventId) && (
+                          <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <div className="empty">Pick a session to inspect.</div>
+            )}
         </section>
       </div>
 
-      <footer className="status mono">{footerStatus}</footer>
-      <a className="corner-handle mono" href="https://x.com/RobertTLange">
-        @RobertTLange
-      </a>
+      <footer className="status status-bar">
+        <span className="mono">{footerStatus}</span>
+        <div className="corner-links mono">
+          <a className="corner-handle" href="https://x.com/RobertTLange">
+            @RobertTLange
+          </a>
+          <a className="corner-handle corner-handle-icon-link" href="https://github.com/RobertTLange/agentlens">
+            <svg
+              className="corner-handle-icon"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                fill="currentColor"
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              />
+            </svg>
+            <span>agentlens</span>
+          </a>
+        </div>
+      </footer>
     </main>
   );
 }

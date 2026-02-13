@@ -64,24 +64,26 @@ body {
   background: rgba(255, 255, 255, 0.9);
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.75);
-  border-radius: 18px;
-  padding: 14px 16px;
+  border-radius: 16px;
+  padding: 9px 12px;
   box-shadow: 0 12px 32px rgba(2, 6, 23, 0.25);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .hero h1 {
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 1.2rem;
+  line-height: 1.1;
   white-space: nowrap;
 }
 
 .hero p {
   margin: 0;
   color: var(--muted);
+  font-size: 0.9rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -90,16 +92,16 @@ body {
 .hero-metrics {
   display: flex;
   flex-wrap: nowrap;
-  gap: 8px;
+  gap: 6px;
   justify-self: end;
 }
 
 .hero-metrics span {
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 3px 9px;
+  padding: 2px 8px;
   font-family: "IBM Plex Mono", monospace;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   background: #f8fafc;
 }
 
@@ -1139,11 +1141,28 @@ body {
   font-size: 0.76rem;
 }
 
+.status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.corner-links {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
 .corner-handle {
-  position: fixed;
-  right: 14px;
-  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 1px solid rgba(148, 163, 184, 0.75);
   border-radius: 999px;
   padding: 3px 9px;
@@ -1162,6 +1181,16 @@ body {
 .corner-handle:focus-visible {
   outline: 2px solid #f8fafc;
   outline-offset: 2px;
+}
+
+.corner-handle-icon-link {
+  padding-left: 8px;
+}
+
+.corner-handle-icon {
+  width: 12px;
+  height: 12px;
+  display: block;
 }
 
 .empty {
@@ -1199,7 +1228,7 @@ body {
 
   .hero {
     grid-template-columns: 1fr;
-    gap: 8px;
+    gap: 6px;
   }
 
   .hero p {
@@ -1221,8 +1250,7 @@ body {
     width: 26px;
   }
 
-  .corner-handle {
-    right: 10px;
-    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  .status-bar {
+    gap: 8px;
   }
 }
