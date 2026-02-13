@@ -29,6 +29,7 @@ It is designed for local analysis: no hosted backend required.
 - Normalized event model across agents (`user`, `assistant`, `reasoning`, `tool_use`, `tool_result`, `meta`, `system`).
 - Real-time stream updates for newly discovered traces and appended events.
 - Deep tool-call visibility with argument/result text and unmatched tool I/O detection.
+- Stop active Codex/Claude session processes from the web UI session row control.
 - Triage metrics out of the box: traces, sessions, events, errors, event-kind distribution, and top tools.
 - Three interfaces over one core index: browser UI, CLI, and HTTP API.
 
@@ -38,6 +39,7 @@ It is designed for local analysis: no hosted backend required.
 - `waiting_input` is detected from structured markers first (status/type/phase-style fields), with text-pattern fallback.
 - `running` is detected from unmatched `tool_use` events or very recent trace activity.
 - `running` and `waiting_input` auto-degrade to `idle` after freshness TTL expiration.
+- Successful stop actions in the web UI immediately set that trace status to `idle` (`activityReason: manually_stopped`) while live updates continue.
 - Session sparkline `activityBins` now represent full session-lifetime activity shape (first timestamped event -> latest timestamped event), not just a trailing recent window.
 - `activityBinsMode` indicates how bins were derived: `time` (timestamp span) or `event_index` (fallback when timestamp span is unavailable).
 
@@ -127,9 +129,22 @@ Useful patterns:
 | `GET /api/overview` | Aggregate counters and distributions. |
 | `GET /api/traces?agent=<name>` | List indexed trace summaries, optionally filtered by agent. |
 | `GET /api/trace/:id` | Paginated trace detail by trace id or session id. Supports `limit`, `before`, `include_meta`. |
+| `POST /api/trace/:id/stop` | Stop session process for trace/session id. Sends `SIGINT`, escalates to `SIGTERM`, and optionally `SIGKILL` with `?force=true`. |
 | `GET /api/config` | Current merged runtime config. |
 | `POST /api/config` | Update config, persist to disk, refresh index. |
 | `GET /api/stream` | SSE feed (`snapshot`, `trace_*`, `events_appended`, `overview_updated`, `heartbeat`). |
+
+Stopping sessions from UI/API:
+
+- In the web UI, click the stop icon button on a session row.
+- API equivalent:
+
+```bash
+curl -X POST "http://127.0.0.1:8787/api/trace/<trace_or_session_id>/stop"
+```
+
+- Success response includes termination signal and matched process ids.
+- Typical non-running response is HTTP `409` with `status: "not_running"`.
 
 ## Configuration
 
