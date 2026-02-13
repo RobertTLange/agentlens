@@ -26,7 +26,7 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
 type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
 
 function isAgentKind(value: string): value is AgentKind {
-  return value === "claude" || value === "codex" || value === "cursor" || value === "opencode" || value === "unknown";
+  return value === "claude" || value === "codex" || value === "unknown";
 }
 
 function cloneDefaultSessionLogDirectories(): SessionLogDirectoryConfig[] {
@@ -70,8 +70,6 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
         let logType: AgentKind = "unknown";
         if (normalized.includes(".codex")) logType = "codex";
         else if (normalized.includes(".claude")) logType = "claude";
-        else if (normalized.includes(".opencode")) logType = "opencode";
-        else if (normalized.includes(".cursor")) logType = "cursor";
         return { directory, logType };
       })
       .filter((entry) => {
@@ -116,6 +114,8 @@ export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
       intervalSeconds: input?.scan?.intervalSeconds ?? DEFAULT_CONFIG.scan.intervalSeconds,
       recentEventWindow: input?.scan?.recentEventWindow ?? DEFAULT_CONFIG.scan.recentEventWindow,
       includeMetaDefault: input?.scan?.includeMetaDefault ?? DEFAULT_CONFIG.scan.includeMetaDefault,
+      statusRunningTtlMs: input?.scan?.statusRunningTtlMs ?? DEFAULT_CONFIG.scan.statusRunningTtlMs,
+      statusWaitingTtlMs: input?.scan?.statusWaitingTtlMs ?? DEFAULT_CONFIG.scan.statusWaitingTtlMs,
     },
     sessionLogDirectories: mergeSessionLogDirectories(input?.sessionLogDirectories, input?.sessionJsonlDirectories),
     sources,

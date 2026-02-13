@@ -51,16 +51,30 @@ export function nowMs(): number {
 }
 
 export function parseEpochMs(value: unknown): number | null {
+  const parseNumericEpoch = (numeric: number): number | null => {
+    if (!Number.isFinite(numeric)) return null;
+    if (numeric > 1_000_000_000_000) {
+      return numeric;
+    }
+    if (numeric > 1_000_000_000) {
+      return Math.round(numeric * 1000);
+    }
+    return null;
+  };
+
   if (typeof value === "number" && Number.isFinite(value)) {
-    if (value > 1_000_000_000_000) {
-      return value;
-    }
-    if (value > 1_000_000_000) {
-      return Math.round(value * 1000);
-    }
+    return parseNumericEpoch(value);
   }
   if (typeof value === "string" && value.trim()) {
-    const parsed = Date.parse(value);
+    const trimmed = value.trim();
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      const numericParsed = parseNumericEpoch(numeric);
+      if (numericParsed !== null) {
+        return numericParsed;
+      }
+    }
+    const parsed = Date.parse(trimmed);
     if (!Number.isNaN(parsed)) {
       return parsed;
     }

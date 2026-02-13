@@ -3,15 +3,13 @@ import type { ParseOutput, TraceParser } from "./types.js";
 import type { DiscoveredTraceFile } from "../discovery.js";
 import { ClaudeParser } from "./claude.js";
 import { CodexParser } from "./codex.js";
-import { CursorParser } from "./cursor.js";
-import { OpenCodeParser } from "./opencode.js";
 import { GenericParser } from "./generic.js";
 
 export class ParserRegistry {
   private readonly parsers: TraceParser[];
 
   constructor(parsers?: TraceParser[]) {
-    this.parsers = parsers ?? [new ClaudeParser(), new CodexParser(), new CursorParser(), new OpenCodeParser(), new GenericParser()];
+    this.parsers = parsers ?? [new ClaudeParser(), new CodexParser(), new GenericParser()];
   }
 
   private choose(file: DiscoveredTraceFile, headText: string): TraceParser {

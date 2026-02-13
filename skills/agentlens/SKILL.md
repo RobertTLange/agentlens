@@ -4,7 +4,7 @@ description: Use the AgentLens CLI to inspect local coding-agent traces, drill i
 ---
 
 # What the skill is about
-Get reliable trace intelligence from local Codex/Claude/Cursor/OpenCode logs via `agentlens` CLI.
+Get reliable trace intelligence from local Codex/Claude logs via `agentlens` CLI.
 
 # When to use the skill
 - User asks for trace analysis, session debugging, tool-call inspection, or event timeline evidence.

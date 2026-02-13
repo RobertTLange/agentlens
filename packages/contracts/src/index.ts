@@ -1,4 +1,4 @@
-export type AgentKind = "claude" | "codex" | "cursor" | "opencode" | "unknown";
+export type AgentKind = "claude" | "codex" | "unknown";
 
 export type EventKind =
   | "system"
@@ -8,6 +8,8 @@ export type EventKind =
   | "tool_result"
   | "reasoning"
   | "meta";
+
+export type SessionActivityStatus = "running" | "waiting_input" | "idle";
 
 export interface SourceProfileConfig {
   name: string;
@@ -29,6 +31,8 @@ export interface AppConfig {
     intervalSeconds: number;
     recentEventWindow: number;
     includeMetaDefault: boolean;
+    statusRunningTtlMs: number;
+    statusWaitingTtlMs: number;
   };
   sessionLogDirectories: SessionLogDirectoryConfig[];
   sources: Record<string, SourceProfileConfig>;
@@ -49,6 +53,7 @@ export interface NormalizedEvent {
   toolUseId: string;
   parentToolUseId: string;
   toolName: string;
+  toolType: string;
   toolCallId: string;
   functionName: string;
   toolArgsText: string;
@@ -69,6 +74,7 @@ export interface TraceSummary {
   sessionId: string;
   sizeBytes: number;
   mtimeMs: number;
+  firstEventTs?: number | null;
   lastEventTs: number | null;
   eventCount: number;
   parseable: boolean;
@@ -78,6 +84,12 @@ export interface TraceSummary {
   toolResultCount: number;
   unmatchedToolUses: number;
   unmatchedToolResults: number;
+  activityStatus: SessionActivityStatus;
+  activityReason: string;
+  activityBins?: number[];
+  activityWindowMinutes?: number;
+  activityBinMinutes?: number;
+  activityBinCount?: number;
   eventKindCounts: Record<EventKind, number>;
 }
 
@@ -93,6 +105,7 @@ export interface TraceTocItem {
   eventKind: EventKind;
   label: string;
   colorKey: string;
+  toolType: string;
 }
 
 export interface TracePage {

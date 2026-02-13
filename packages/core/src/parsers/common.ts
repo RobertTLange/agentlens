@@ -16,6 +16,7 @@ export interface EventSeed {
   toolUseId?: string;
   parentToolUseId?: string;
   toolName?: string;
+  toolType?: string;
   toolCallId?: string;
   functionName?: string;
   toolArgsText?: string;
@@ -47,6 +48,7 @@ export function makeEvent(seed: EventSeed): NormalizedEvent {
     toolUseId: seed.toolUseId ?? "",
     parentToolUseId: seed.parentToolUseId ?? "",
     toolName: seed.toolName ?? "",
+    toolType: seed.toolType ?? "",
     toolCallId: seed.toolCallId ?? seed.toolUseId ?? "",
     functionName: seed.functionName ?? "",
     toolArgsText: seed.toolArgsText ?? "",
@@ -139,11 +141,32 @@ export function extractTextBlocks(value: unknown): string[] {
 }
 
 export function guessTimestamp(payload: Record<string, unknown>): number | null {
+  const fromRecord = (record: Record<string, unknown>): number | null =>
+    parseEpochMs(record.timestamp) ??
+    parseEpochMs(record.timestamp_ms) ??
+    parseEpochMs(record.timestampMs) ??
+    parseEpochMs(record.time) ??
+    parseEpochMs(record.ts) ??
+    parseEpochMs(record.updated_at) ??
+    parseEpochMs(record.updatedAt) ??
+    parseEpochMs(record.start_time) ??
+    parseEpochMs(record.startTime) ??
+    parseEpochMs(record.started_at) ??
+    parseEpochMs(record.startedAt) ??
+    parseEpochMs(record.created_at) ??
+    parseEpochMs(record.createdAt) ??
+    parseEpochMs(record.date) ??
+    null;
+
+  const payloadRecord = asRecord(payload.payload);
+  const eventRecord = asRecord(payload.event);
+  const messageRecord = asRecord(payload.message);
+
   return (
-    parseEpochMs(payload.timestamp) ??
-    parseEpochMs(payload.time) ??
-    parseEpochMs(payload.created_at) ??
-    parseEpochMs(payload.createdAt) ??
+    fromRecord(payload) ??
+    fromRecord(payloadRecord) ??
+    fromRecord(eventRecord) ??
+    fromRecord(messageRecord) ??
     null
   );
 }

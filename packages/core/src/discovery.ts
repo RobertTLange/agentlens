@@ -61,10 +61,26 @@ async function discoverProfile(config: AppConfig, profileName: string): Promise<
 }
 
 async function discoverSessionLogDirectories(config: AppConfig): Promise<DiscoveredTraceFile[]> {
+  const hasPathSegment = (input: string, segment: string): boolean =>
+    path
+      .normalize(input)
+      .split(path.sep)
+      .some((part) => part.toLowerCase() === segment.toLowerCase());
+
+  const includeGlobsForSessionDirectory = (root: string, logType: AgentKind): string[] => {
+    if (logType === "codex") {
+      return hasPathSegment(root, "sessions") ? ["**/*.jsonl"] : ["sessions/**/*.jsonl"];
+    }
+    if (logType === "claude") {
+      return hasPathSegment(root, "projects") ? ["**/*.jsonl"] : ["projects/**/*.jsonl"];
+    }
+    return ["**/*.jsonl"];
+  };
+
   const files: DiscoveredTraceFile[] = [];
   for (const entry of config.sessionLogDirectories) {
     const root = expandHome(entry.directory);
-    const matches = await fg(["**/*.jsonl"], {
+    const matches = await fg(includeGlobsForSessionDirectory(root, entry.logType), {
       cwd: root,
       absolute: true,
       onlyFiles: true,

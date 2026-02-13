@@ -15,8 +15,6 @@ describe("trace index", () => {
     expect(config.sessionLogDirectories).toEqual([
       { directory: "~/.codex", logType: "codex" },
       { directory: "~/.claude", logType: "claude" },
-      { directory: "~/.opencode", logType: "opencode" },
-      { directory: "~/.cursor", logType: "cursor" },
     ]);
   });
 
@@ -69,7 +67,7 @@ describe("trace index", () => {
         payload: {
           type: "function_call",
           id: "fc_1",
-          name: "run_command",
+          name: "exec_command",
           call_id: "call_1",
           arguments: "{\"command\":\"echo hi\"}",
         },
@@ -117,24 +115,6 @@ describe("trace index", () => {
           maxDepth: 8,
           agentHint: "claude",
         },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
-        },
       },
     });
 
@@ -154,12 +134,109 @@ describe("trace index", () => {
 
     const detail = index.getSessionDetail(summaries[0]!.id);
     const toolUseEvent = detail.events.find((event) => event.eventKind === "tool_use") as
-      | { toolName: string; functionName?: string; toolCallId?: string; toolArgsText?: string }
+      | { toolName: string; toolType?: string; functionName?: string; toolCallId?: string; toolArgsText?: string }
       | undefined;
-    expect(toolUseEvent?.toolName).toBe("run_command");
-    expect(toolUseEvent?.functionName).toBe("run_command");
+    expect(toolUseEvent?.toolName).toBe("exec_command");
+    expect(toolUseEvent?.functionName).toBe("exec_command");
+    expect(toolUseEvent?.toolType).toBe("bash");
     expect(toolUseEvent?.toolCallId).toBe("call_1");
     expect(toolUseEvent?.toolArgsText).toContain("echo hi");
+
+    const toolResultEvent = detail.events.find((event) => event.eventKind === "tool_result") as
+      | { toolCallId?: string; toolType?: string }
+      | undefined;
+    expect(toolResultEvent?.toolCallId).toBe("call_1");
+    expect(toolResultEvent?.toolType).toBe("bash");
+  });
+
+  it("normalizes web_search_call actions into toolType tags", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "11");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-web-search.jsonl");
+    const lines = [
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "sess-web", cwd: "/tmp/project", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "search", query: "agentlens parser" },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "open_page", url: "https://example.com" },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "find_in_page", query: "toolType" },
+        },
+      }),
+    ];
+    await writeFile(codexPath, lines.join("\n"), "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    const detail = index.getSessionDetail(summary!.id);
+    const webEvents = detail.events.filter((event) => event.rawType === "web_search_call");
+    expect(webEvents.map((event) => event.toolType)).toEqual(["web:search", "web:open", "web:find"]);
+
+    const page = index.getTracePage(summary!.id, { includeMeta: true, limit: 10 }) as unknown as {
+      toc?: Array<{ toolType: string }>;
+    };
+    const webTocTags = (page.toc ?? []).map((entry) => entry.toolType).filter((value) => value.startsWith("web"));
+    expect(webTocTags).toEqual(["web:search", "web:open", "web:find"]);
   });
 
   it("parses claude project logs with tool_use/tool_result typing", async () => {
@@ -236,24 +313,6 @@ describe("trace index", () => {
           maxDepth: 8,
           agentHint: "claude",
         },
-        cursor_home: {
-          name: "cursor_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "cursor",
-        },
-        opencode_home: {
-          name: "opencode_home",
-          enabled: false,
-          roots: [],
-          includeGlobs: ["**/*.jsonl"],
-          excludeGlobs: [],
-          maxDepth: 8,
-          agentHint: "opencode",
-        },
       },
     });
 
@@ -293,30 +352,18 @@ describe("trace index", () => {
     expect(page.toc?.[2]?.eventKind).toBe("tool_result");
   });
 
-  it("indexes JSONL sessions from configured sessionLogDirectories with explicit parser type", async () => {
+  it("parses unix epoch ts fields for trace start and updated timestamps", async () => {
     const root = await createTempRoot();
-    const sessionRoot = path.join(root, "custom-session-root", "logs");
-    const codexDir = path.join(sessionRoot, "2026", "02", "12");
-    await mkdir(codexDir, { recursive: true });
+    const sessionRoot = path.join(root, "custom-session-root");
+    const sessionDir = path.join(sessionRoot, "sessions");
+    await mkdir(sessionDir, { recursive: true });
 
-    const codexPath = path.join(codexDir, "custom-session.jsonl");
+    const historyPath = path.join(sessionDir, "history.jsonl");
     await writeFile(
-      codexPath,
+      historyPath,
       [
-        JSON.stringify({
-          timestamp: "2026-02-12T10:00:00.000Z",
-          type: "session_meta",
-          payload: { id: "custom-sess-1" },
-        }),
-        JSON.stringify({
-          timestamp: "2026-02-12T10:00:01.000Z",
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "hello from custom root" }],
-          },
-        }),
+        JSON.stringify({ session_id: "sess-ts", ts: 1_769_000_000, text: "first" }),
+        JSON.stringify({ session_id: "sess-ts", ts: "1769000120", text: "last" }),
       ].join("\n"),
       "utf8",
     );
@@ -351,23 +398,136 @@ describe("trace index", () => {
           maxDepth: 8,
           agentHint: "claude",
         },
-        cursor_home: {
-          name: "cursor_home",
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.firstEventTs).toBe(1_769_000_000_000);
+    expect(summary?.lastEventTs).toBe(1_769_000_120_000);
+  });
+
+  it("uses file order for first/last event timestamps", async () => {
+    const root = await createTempRoot();
+    const sessionRoot = path.join(root, "custom-session-root");
+    const sessionDir = path.join(sessionRoot, "sessions");
+    await mkdir(sessionDir, { recursive: true });
+
+    const historyPath = path.join(sessionDir, "history.jsonl");
+    await writeFile(
+      historyPath,
+      [
+        JSON.stringify({ session_id: "sess-order", ts: 1_769_000_200, text: "first row" }),
+        JSON.stringify({ session_id: "sess-order", ts: 1_769_000_100, text: "second row" }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: sessionRoot, logType: "codex" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
           enabled: false,
           roots: [],
           includeGlobs: ["**/*.jsonl"],
           excludeGlobs: [],
           maxDepth: 8,
-          agentHint: "cursor",
+          agentHint: "codex",
         },
-        opencode_home: {
-          name: "opencode_home",
+        claude_projects: {
+          name: "claude_projects",
           enabled: false,
           roots: [],
           includeGlobs: ["**/*.jsonl"],
           excludeGlobs: [],
           maxDepth: 8,
-          agentHint: "opencode",
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.firstEventTs).toBe(1_769_000_200_000);
+    expect(summary?.lastEventTs).toBe(1_769_000_100_000);
+  });
+
+  it("indexes JSONL sessions from configured sessionLogDirectories with explicit parser type", async () => {
+    const root = await createTempRoot();
+    const sessionRoot = path.join(root, "custom-session-root");
+    const codexDir = path.join(sessionRoot, "sessions", "2026", "02", "12");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "custom-session.jsonl");
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "custom-sess-1" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "hello from custom root" }],
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(sessionRoot, "history.jsonl"),
+      JSON.stringify({ session_id: "history-should-not-index", ts: 1_769_500_000, text: "do not include" }),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: sessionRoot, logType: "codex" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
         },
       },
     });
@@ -380,5 +540,6 @@ describe("trace index", () => {
     expect(summary?.agent).toBe("codex");
     expect(summary?.sourceProfile).toBe("session_log");
     expect(summary?.parser).toBe("codex");
+    expect(index.getSummaries().some((item) => item.path.endsWith("/history.jsonl"))).toBe(false);
   });
 });

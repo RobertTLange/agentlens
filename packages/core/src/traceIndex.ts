@@ -4,6 +4,7 @@ import type {
   EventKind,
   NormalizedEvent,
   OverviewStats,
+  SessionActivityStatus,
   SessionDetail,
   StreamEnvelope,
   TracePage,
@@ -13,7 +14,7 @@ import type {
 import { discoverTraceFiles, type DiscoveredTraceFile } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
-import { nowMs } from "./utils.js";
+import { asRecord, asString, nowMs } from "./utils.js";
 
 const EVENT_KIND_KEYS: EventKind[] = [
   "system",
@@ -24,6 +25,16 @@ const EVENT_KIND_KEYS: EventKind[] = [
   "reasoning",
   "meta",
 ];
+
+const WAITING_INPUT_PATTERN =
+  /\b(?:await(?:ing)?\s+(?:user|input)|waiting\s+for\s+(?:user|input|approval)|user\s+input\s+required|needs?\s+user\s+input|permission\s+required|approval\s+required|confirm(?:ation)?\s+(?:required|needed)|press\s+enter\s+to\s+continue)\b/i;
+const WAITING_PROMPT_PATTERN =
+  /\b(?:do\s+you\s+want(?:\s+me)?|would\s+you\s+like(?:\s+me)?|should\s+i\b|can\s+you\s+confirm|please\s+confirm|let\s+me\s+know\s+if\s+you(?:'d)?\s+like|which\s+(?:option|approach)|choose\s+(?:one|an?\s+option)|pick\s+(?:one|an?\s+option)|approve(?:\s+this)?|permission\s+to)\b/i;
+const ACTIVITY_BIN_COUNT = 12;
+const ACTIVITY_WINDOW_MINUTES = 60;
+const ACTIVITY_BIN_MINUTES = ACTIVITY_WINDOW_MINUTES / ACTIVITY_BIN_COUNT;
+const ACTIVITY_WINDOW_MS = ACTIVITY_WINDOW_MINUTES * 60_000;
+const ACTIVITY_BIN_MS = ACTIVITY_BIN_MINUTES * 60_000;
 
 interface TraceEntry {
   file: DiscoveredTraceFile;
@@ -40,6 +51,19 @@ export interface TraceIndexEvent {
   envelope: StreamEnvelope;
 }
 
+interface ActivityStatus {
+  status: SessionActivityStatus;
+  reason: string;
+}
+
+interface ActivityStatusOptions {
+  events: NormalizedEvent[];
+  unmatchedToolUses: number;
+  updatedMs: number;
+  nowMs: number;
+  scanConfig: AppConfig["scan"];
+}
+
 function emptyEventKindCounts(): Record<EventKind, number> {
   return {
     system: 0,
@@ -52,6 +76,226 @@ function emptyEventKindCounts(): Record<EventKind, number> {
   };
 }
 
+function buildActivityBins(events: NormalizedEvent[], anchorMs: number): number[] {
+  const bins = Array.from({ length: ACTIVITY_BIN_COUNT }, () => 0);
+  if (anchorMs <= 0) return bins;
+
+  const windowStartMs = anchorMs - ACTIVITY_WINDOW_MS;
+  for (const event of events) {
+    const timestampMs = event.timestampMs;
+    if (timestampMs === null || timestampMs <= 0) continue;
+    if (timestampMs < windowStartMs || timestampMs > anchorMs) continue;
+
+    const elapsedMs = timestampMs - windowStartMs;
+    const rawBinIndex = Math.floor(elapsedMs / ACTIVITY_BIN_MS);
+    const binIndex = Math.max(0, Math.min(ACTIVITY_BIN_COUNT - 1, rawBinIndex));
+    bins[binIndex] = (bins[binIndex] ?? 0) + 1;
+  }
+
+  let maxCount = 0;
+  for (const count of bins) {
+    if (count > maxCount) maxCount = count;
+  }
+  if (maxCount <= 0) return bins;
+
+  return bins.map((count) => count / maxCount);
+}
+
+function quantizeActivityAnchorMs(nowMsValue: number): number {
+  if (nowMsValue <= 0) return 0;
+  return Math.floor(nowMsValue / ACTIVITY_BIN_MS) * ACTIVITY_BIN_MS;
+}
+
+function activityBinsEqual(left: number[] | undefined, right: number[]): boolean {
+  if (!left || left.length !== right.length) return false;
+  for (let idx = 0; idx < right.length; idx += 1) {
+    const lhs = left[idx];
+    const rhs = right[idx] ?? 0;
+    if (lhs === undefined || Math.abs(lhs - rhs) > 1e-9) return false;
+  }
+  return true;
+}
+
+function normalizeMarkerText(value: unknown): string {
+  return asString(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ");
+}
+
+function isStructuredWaitingValue(value: unknown): boolean {
+  const normalized = normalizeMarkerText(value);
+  if (!normalized) return false;
+
+  if (normalized === "waiting") return true;
+  if (normalized.includes("awaiting") && (normalized.includes("user") || normalized.includes("input"))) return true;
+  if (normalized.includes("waiting for") && (normalized.includes("user") || normalized.includes("input"))) return true;
+  if ((normalized.includes("needs") || normalized.includes("requires")) && normalized.includes("input")) return true;
+  if (normalized.includes("approval required") || normalized.includes("permission required")) return true;
+  if (normalized.includes("confirmation required") || normalized.includes("confirmation needed")) return true;
+  if (normalized.includes("press enter to continue")) return true;
+  return false;
+}
+
+function hasStructuredWaitingSignal(event: NormalizedEvent): boolean {
+  const raw = asRecord(event.raw);
+  const payload = asRecord(raw.payload);
+  const part = asRecord(raw.part);
+  const partState = asRecord(part.state);
+  const message = asRecord(raw.message);
+
+  const candidates: unknown[] = [
+    event.rawType,
+    raw.type,
+    raw.subtype,
+    raw.status,
+    raw.state,
+    raw.phase,
+    raw.reason,
+    payload.type,
+    payload.subtype,
+    payload.status,
+    payload.state,
+    payload.phase,
+    payload.reason,
+    part.type,
+    part.status,
+    part.state,
+    part.phase,
+    part.reason,
+    partState.status,
+    partState.state,
+    partState.phase,
+    partState.reason,
+    message.status,
+    message.state,
+    message.phase,
+  ];
+
+  return candidates.some((value) => isStructuredWaitingValue(value));
+}
+
+function hasTextWaitingSignal(event: NormalizedEvent): boolean {
+  const latestText = [
+    event.rawType,
+    event.preview,
+    ...event.textBlocks,
+    event.toolArgsText,
+    event.toolResultText,
+  ].join(" ");
+  return WAITING_INPUT_PATTERN.test(latestText) || WAITING_PROMPT_PATTERN.test(latestText);
+}
+
+function isWaitResolutionEvent(event: NormalizedEvent): boolean {
+  return event.eventKind === "user" || event.eventKind === "tool_use" || event.eventKind === "tool_result";
+}
+
+function findPendingWaitSignalEvent(events: NormalizedEvent[]): NormalizedEvent | undefined {
+  for (let idx = events.length - 1; idx >= 0; idx -= 1) {
+    const event = events[idx];
+    if (!event) continue;
+    if (isWaitResolutionEvent(event)) return undefined;
+    if (hasStructuredWaitingSignal(event) || hasTextWaitingSignal(event)) return event;
+  }
+  return undefined;
+}
+
+function applyFreshnessTtl(
+  activity: ActivityStatus,
+  updatedMs: number,
+  nowMsValue: number,
+  scanConfig: AppConfig["scan"],
+): ActivityStatus {
+  if (activity.status === "idle") return activity;
+  if (updatedMs <= 0) return { status: "idle", reason: "stale_timeout" };
+
+  const ageMs = Math.max(0, nowMsValue - updatedMs);
+  const ttlMs =
+    activity.status === "running"
+      ? Math.max(0, scanConfig.statusRunningTtlMs)
+      : Math.max(0, scanConfig.statusWaitingTtlMs);
+  if (ageMs > ttlMs) {
+    return { status: "idle", reason: "stale_timeout" };
+  }
+  return activity;
+}
+
+function deriveActivityStatus(options: ActivityStatusOptions): ActivityStatus {
+  const pendingWaitSignalEvent = findPendingWaitSignalEvent(options.events);
+  if (pendingWaitSignalEvent) {
+    return applyFreshnessTtl(
+      { status: "waiting_input", reason: "explicit_wait_marker_fresh" },
+      options.updatedMs,
+      options.nowMs,
+      options.scanConfig,
+    );
+  }
+
+  if (options.unmatchedToolUses > 0) {
+    return applyFreshnessTtl(
+      { status: "running", reason: "pending_tool_use_fresh" },
+      options.updatedMs,
+      options.nowMs,
+      options.scanConfig,
+    );
+  }
+
+  if (options.updatedMs > 0) {
+    const runningAgeMs = Math.max(0, options.nowMs - options.updatedMs);
+    const runningTtlMs = Math.max(0, options.scanConfig.statusRunningTtlMs);
+    if (runningAgeMs <= runningTtlMs) {
+      return { status: "running", reason: "recent_activity_fresh" };
+    }
+
+    const waitingTtlMs = Math.max(0, options.scanConfig.statusWaitingTtlMs);
+    if (runningAgeMs > runningTtlMs && runningAgeMs <= waitingTtlMs) {
+      return { status: "waiting_input", reason: "recent_activity_cooling" };
+    }
+  }
+
+  return { status: "idle", reason: "no_active_signal" };
+}
+
+function withDerivedActivityStatus(
+  summary: TraceSummary,
+  events: NormalizedEvent[],
+  fileMtimeMs: number,
+  scanConfig: AppConfig["scan"],
+  nowMsValue: number,
+): TraceSummary {
+  const activityAnchorMs = quantizeActivityAnchorMs(nowMsValue);
+  const nextActivityBins = buildActivityBins(events, activityAnchorMs);
+  const activityStatus = deriveActivityStatus({
+    events,
+    unmatchedToolUses: summary.unmatchedToolUses,
+    updatedMs: Math.max(summary.lastEventTs ?? 0, fileMtimeMs),
+    nowMs: nowMsValue,
+    scanConfig,
+  });
+  const activityMetaUnchanged =
+    summary.activityWindowMinutes === ACTIVITY_WINDOW_MINUTES &&
+    summary.activityBinMinutes === ACTIVITY_BIN_MINUTES &&
+    summary.activityBinCount === ACTIVITY_BIN_COUNT;
+  const binsUnchanged = activityBinsEqual(summary.activityBins, nextActivityBins);
+  if (
+    summary.activityStatus === activityStatus.status &&
+    summary.activityReason === activityStatus.reason &&
+    binsUnchanged &&
+    activityMetaUnchanged
+  ) {
+    return summary;
+  }
+  return {
+    ...summary,
+    activityStatus: activityStatus.status,
+    activityReason: activityStatus.reason,
+    activityBins: nextActivityBins,
+    activityWindowMinutes: ACTIVITY_WINDOW_MINUTES,
+    activityBinMinutes: ACTIVITY_BIN_MINUTES,
+    activityBinCount: ACTIVITY_BIN_COUNT,
+  };
+}
+
 function summarize(
   file: DiscoveredTraceFile,
   agent: TraceSummary["agent"],
@@ -59,11 +303,14 @@ function summarize(
   sessionId: string,
   events: NormalizedEvent[],
   parseError: string,
+  scanConfig: AppConfig["scan"],
+  nowMsValue: number,
 ): TraceSummary {
   const eventKindCounts = emptyEventKindCounts();
   let errorCount = 0;
   let toolUseCount = 0;
   let toolResultCount = 0;
+  let firstEventTs: number | null = null;
   let lastEventTs: number | null = null;
 
   const toolUseIds = new Set<string>();
@@ -81,7 +328,9 @@ function summarize(
       if (event.toolUseId) toolResultIds.add(event.toolUseId);
     }
     if (event.timestampMs !== null) {
-      lastEventTs = Math.max(lastEventTs ?? event.timestampMs, event.timestampMs);
+      // Preserve file order semantics: start = first timestamped event in file, updated = last.
+      firstEventTs ??= event.timestampMs;
+      lastEventTs = event.timestampMs;
     }
   }
 
@@ -95,6 +344,16 @@ function summarize(
     if (!toolUseIds.has(id)) unmatchedToolResults += 1;
   }
 
+  const updatedMs = Math.max(lastEventTs ?? 0, file.mtimeMs);
+  const activityStatus = deriveActivityStatus({
+    events,
+    unmatchedToolUses,
+    updatedMs,
+    nowMs: nowMsValue,
+    scanConfig,
+  });
+  const activityBins = buildActivityBins(events, quantizeActivityAnchorMs(nowMsValue));
+
   return {
     id: file.id,
     sourceProfile: file.sourceProfile,
@@ -104,6 +363,7 @@ function summarize(
     sessionId,
     sizeBytes: file.sizeBytes,
     mtimeMs: file.mtimeMs,
+    firstEventTs,
     lastEventTs,
     eventCount: events.length,
     parseable: parseError.length === 0,
@@ -113,6 +373,12 @@ function summarize(
     toolResultCount,
     unmatchedToolUses,
     unmatchedToolResults,
+    activityStatus: activityStatus.status,
+    activityReason: activityStatus.reason,
+    activityBins,
+    activityWindowMinutes: ACTIVITY_WINDOW_MINUTES,
+    activityBinMinutes: ACTIVITY_BIN_MINUTES,
+    activityBinCount: ACTIVITY_BIN_COUNT,
     eventKindCounts,
   };
 }
@@ -129,6 +395,7 @@ function buildToc(events: NormalizedEvent[]): TraceTocItem[] {
     eventKind: event.eventKind,
     label: event.tocLabel || event.preview,
     colorKey: event.eventKind,
+    toolType: event.toolType,
   }));
 }
 
@@ -173,6 +440,7 @@ export class TraceIndex extends EventEmitter {
   }
 
   async refresh(): Promise<void> {
+    const refreshNowMs = nowMs();
     const files = await discoverTraceFiles(this.config);
     const nextIds = new Set(files.map((file) => file.id));
 
@@ -190,7 +458,16 @@ export class TraceIndex extends EventEmitter {
 
       try {
         const parsed = await this.parserRegistry.parseFile(file);
-        const summary = summarize(file, parsed.agent, parsed.parser, parsed.sessionId, parsed.events, parsed.parseError);
+        const summary = summarize(
+          file,
+          parsed.agent,
+          parsed.parser,
+          parsed.sessionId,
+          parsed.events,
+          parsed.parseError,
+          this.config.scan,
+          refreshNowMs,
+        );
         const detail: SessionDetail = { summary, events: parsed.events };
 
         const previousCount = current?.detail.events.length ?? 0;
@@ -208,10 +485,31 @@ export class TraceIndex extends EventEmitter {
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const summary = summarize(file, file.agentHint, "unknown", "", [], message);
+        const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config.scan, refreshNowMs);
         this.entries.set(file.id, { file, detail: { summary, events: [] } });
         this.emitStream(current ? "trace_updated" : "trace_added", { summary });
       }
+    }
+
+    for (const [id, entry] of this.entries) {
+      const nextSummary = withDerivedActivityStatus(
+        entry.detail.summary,
+        entry.detail.events,
+        entry.file.mtimeMs,
+        this.config.scan,
+        refreshNowMs,
+      );
+      if (nextSummary === entry.detail.summary) continue;
+
+      const detail: SessionDetail = {
+        ...entry.detail,
+        summary: nextSummary,
+      };
+      this.entries.set(id, {
+        ...entry,
+        detail,
+      });
+      this.emitStream("trace_updated", { summary: nextSummary });
     }
 
     this.emitStream("overview_updated", { overview: this.getOverview() });
