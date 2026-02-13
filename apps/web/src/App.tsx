@@ -831,47 +831,37 @@ export function App(): JSX.Element {
           </div>
 
           {page ? (
-            <>
-              <div className="summary-grid mono">
-                <span>{`agent ${page.summary.agent}`}</span>
-                <span>{`parser ${page.summary.parser}`}</span>
-                <span>{`session ${page.summary.sessionId || "-"}`}</span>
-                <span>{`events ${page.summary.eventCount}`}</span>
-                <span>{`errors ${page.summary.errorCount}`}</span>
-                <span>{`unmatched ${page.summary.unmatchedToolUses + page.summary.unmatchedToolResults}`}</span>
-              </div>
-              <div className="events-scroll">
-                {timelineEvents.map((event) => {
-                  return (
-                    <article
-                      key={event.eventId}
-                      id={domIdForEvent(event.eventId)}
-                      className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
-                      ref={bindEventCardRef(event.eventId)}
-                    >
-                      <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
-                        {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}
-                      </button>
-                      <div className="event-top mono">
-                        <span>{`#${event.index}`}</span>
-                        <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
-                        {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
-                        <span>{fmtTime(event.timestampMs)}</span>
+            <div className="events-scroll">
+              {timelineEvents.map((event) => {
+                return (
+                  <article
+                    key={event.eventId}
+                    id={domIdForEvent(event.eventId)}
+                    className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
+                    ref={bindEventCardRef(event.eventId)}
+                  >
+                    <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
+                      {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}
+                    </button>
+                    <div className="event-top mono">
+                      <span>{`#${event.index}`}</span>
+                      <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
+                      {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
+                      <span>{fmtTime(event.timestampMs)}</span>
+                    </div>
+                    <h3>{event.preview}</h3>
+                    {(event.toolName || event.functionName) && (
+                      <div className="mono subtle">
+                        {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
                       </div>
-                      <h3>{event.preview}</h3>
-                      {(event.toolName || event.functionName) && (
-                        <div className="mono subtle">
-                          {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
-                        </div>
-                      )}
-                      {expandedEventIds.has(event.eventId) && (
-                        <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-            </>
+                    )}
+                    {expandedEventIds.has(event.eventId) && (
+                      <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
           ) : (
             <div className="empty">Pick a session to inspect.</div>
           )}

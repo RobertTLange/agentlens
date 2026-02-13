@@ -81,6 +81,7 @@ function makeTrace(
     activityStatus,
     activityReason: `fixture_${activityStatus}`,
     activityBins: [0, 0, 0.25, 0.4, 0.6, 0.5, 0.35, 0.2, 0.15, 0.3, 0.5, 0.8],
+    activityBinsMode: "time",
     activityWindowMinutes: 60,
     activityBinMinutes: 5,
     activityBinCount: 12,
@@ -486,7 +487,10 @@ describe("App sessions list live motion", () => {
     tracesById = {
       "trace-a": makeTrace("trace-a", 10_000, "running"),
       "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
-      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+      "trace-c": {
+        ...makeTrace("trace-c", 30_000, "idle"),
+        activityBinsMode: "event_index",
+      },
     };
     tracePagesById = Object.fromEntries(
       Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
@@ -498,18 +502,107 @@ describe("App sessions list live motion", () => {
     const runningSparkline = getTraceRow("trace-a").querySelector(".trace-activity-sparkline");
     expect(runningSparkline?.getAttribute("class")).toContain("status-running");
     expect(runningSparkline?.getAttribute("data-point-count")).toBe("12");
-    expect(runningSparkline?.getAttribute("aria-label")).toContain("Activity trend:");
+    expect(runningSparkline?.getAttribute("data-mode")).toBe("time");
+    expect(runningSparkline?.getAttribute("aria-label")).toContain("session lifetime");
 
     const waitingSparkline = getTraceRow("trace-b").querySelector(".trace-activity-sparkline");
     expect(waitingSparkline?.getAttribute("class")).toContain("status-waiting");
 
     const idleSparkline = getTraceRow("trace-c").querySelector(".trace-activity-sparkline");
     expect(idleSparkline?.getAttribute("class")).toContain("status-idle");
+    expect(idleSparkline?.getAttribute("data-mode")).toBe("event_index");
+    expect(idleSparkline?.getAttribute("aria-label")).toContain("event-order density fallback");
+  });
+
+  it("renders composition pie with assistant/user/tool proportions and combined tool counts", async () => {
+    tracesById = {
+      "trace-a": {
+        ...makeTrace("trace-a", 10_000, "running"),
+        eventKindCounts: {
+          system: 0,
+          assistant: 6,
+          user: 3,
+          tool_use: 1,
+          tool_result: 2,
+          reasoning: 0,
+          meta: 0,
+        },
+      },
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const pie = getTraceRow("trace-a").querySelector(".trace-composition-pie");
+    expect(pie).toBeTruthy();
+    expect(pie?.getAttribute("data-assistant-count")).toBe("6");
+    expect(pie?.getAttribute("data-user-count")).toBe("3");
+    expect(pie?.getAttribute("data-tool-use-count")).toBe("1");
+    expect(pie?.getAttribute("data-tool-result-count")).toBe("2");
+    expect(pie?.getAttribute("aria-label")).toContain("assistant 50%");
+    expect(pie?.getAttribute("aria-label")).toContain("user 25%");
+    expect(pie?.getAttribute("aria-label")).toContain("tool use 8%");
+    expect(pie?.getAttribute("aria-label")).toContain("tool result 17%");
+
+    const tooltip = getTraceRow("trace-a").querySelector(".trace-composition-tooltip");
+    expect(tooltip?.textContent).toContain("Assistant: 6 (50%)");
+    expect(tooltip?.textContent).toContain("User: 3 (25%)");
+    expect(tooltip?.textContent).toContain("Tool use: 1 (8%)");
+    expect(tooltip?.textContent).toContain("Tool result: 2 (17%)");
+    expect(tooltip?.textContent).toContain("Total: 12");
+
+    const slices = getTraceRow("trace-a").querySelectorAll(".trace-composition-slice");
+    expect(slices).toHaveLength(4);
+
+    const graphWrap = getTraceRow("trace-a").querySelector(".trace-time-graph-wrap");
+    expect(graphWrap?.firstElementChild?.classList.contains("trace-composition-wrap")).toBe(true);
+    expect(graphWrap?.lastElementChild?.classList.contains("trace-activity-sparkline")).toBe(true);
+  });
+
+  it("renders empty composition pie state when no user/assistant/tool events are present", async () => {
+    tracesById = {
+      "trace-a": makeTrace("trace-a", 10_000, "running"),
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": {
+        ...makeTrace("trace-c", 30_000, "idle"),
+        eventKindCounts: {
+          system: 1,
+          assistant: 0,
+          user: 0,
+          tool_use: 0,
+          tool_result: 0,
+          reasoning: 2,
+          meta: 1,
+        },
+      },
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const row = getTraceRow("trace-c");
+    const pie = row.querySelector(".trace-composition-pie");
+    expect(pie?.getAttribute("data-total")).toBe("0");
+    expect(pie?.getAttribute("aria-label")).toContain("no user, assistant, tool use, or tool result events yet");
+    expect(row.querySelector(".trace-composition-tooltip")?.textContent).toContain(
+      "No user, assistant, tool use, or tool result events yet.",
+    );
+    expect(row.querySelector(".trace-composition-empty")).toBeTruthy();
+    expect(row.querySelectorAll(".trace-composition-slice")).toHaveLength(0);
   });
 
   it("falls back to flat sparkline when activity bins are missing or invalid", async () => {
     const traceMissingBins = makeTrace("trace-a", 10_000, "idle");
     delete traceMissingBins.activityBins;
+    delete traceMissingBins.activityBinsMode;
     delete traceMissingBins.activityWindowMinutes;
     delete traceMissingBins.activityBinMinutes;
     delete traceMissingBins.activityBinCount;
@@ -535,7 +628,28 @@ describe("App sessions list live motion", () => {
 
     const invalidSparkline = getTraceRow("trace-b").querySelector(".trace-activity-sparkline");
     expect(invalidSparkline?.getAttribute("data-flat")).toBe("false");
-    expect(invalidSparkline?.getAttribute("data-point-count")).toBe("12");
+    expect(invalidSparkline?.getAttribute("data-point-count")).toBe("2");
+  });
+
+  it("adds hover section tooltips on activity sparkline bins", async () => {
+    tracesById = {
+      "trace-a": makeTrace("trace-a", 10_000, "running"),
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const sparkline = getTraceRow("trace-a").querySelector(".trace-activity-sparkline");
+    const hoverZones = sparkline?.querySelectorAll(".trace-activity-hover-zone");
+    expect(hoverZones?.length).toBe(12);
+    const firstTooltip = hoverZones?.[0]?.querySelector("title")?.textContent ?? "";
+    expect(firstTooltip).toContain("Activity");
+    expect(firstTooltip).toContain("to");
   });
 
   it("pulses matching rows for trace updates and trace additions", async () => {

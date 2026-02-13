@@ -491,12 +491,14 @@ body {
 }
 
 .trace-time-graph-wrap {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   grid-column: 3;
   grid-row: 1 / span 2;
   justify-self: end;
   align-self: center;
-  width: 56px;
+  width: auto;
   height: 18px;
 }
 
@@ -504,6 +506,80 @@ body {
   display: block;
   width: 56px;
   height: 18px;
+}
+
+.trace-composition-pie {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.trace-composition-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.trace-composition-slice {
+  stroke: var(--ink);
+  stroke-width: 1.05;
+  stroke-linejoin: round;
+}
+
+.trace-composition-slice.assistant {
+  fill: var(--event-assistant-bg);
+}
+
+.trace-composition-slice.user {
+  fill: var(--event-user-bg);
+}
+
+.trace-composition-slice.tool_use {
+  fill: var(--event-tool-use-bg);
+}
+
+.trace-composition-slice.tool_result {
+  fill: var(--event-tool-result-bg);
+}
+
+.trace-composition-empty {
+  fill: #e2e8f0;
+  opacity: 0.85;
+}
+
+.trace-composition-outline {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+
+.trace-composition-tooltip {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 176px;
+  padding: 6px 8px;
+  border: 1px solid #0f172a;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.96);
+  color: #f8fafc;
+  font-size: 0.64rem;
+  line-height: 1.35;
+  white-space: pre-line;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.35);
+  opacity: 0;
+  transform: translateY(-2px);
+  pointer-events: none;
+  transition:
+    opacity 70ms ease,
+    transform 70ms ease;
+  z-index: 5;
+}
+
+.trace-composition-wrap:hover .trace-composition-tooltip,
+.trace-composition-wrap:focus-within .trace-composition-tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .trace-activity-baseline {
@@ -522,6 +598,10 @@ body {
   stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.trace-activity-hover-zone {
+  fill: transparent;
 }
 
 .trace-activity-sparkline.status-running .trace-activity-area {
@@ -815,23 +895,15 @@ body {
 }
 
 .toc-row .toc-timestamp {
+  grid-column: 5;
   min-width: 0;
   font-size: 65%;
   color: #64748b;
   text-align: right;
+  justify-self: end;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.summary-grid {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  font-size: 0.74rem;
-  color: #0f172a;
 }
 
 .events-scroll {
@@ -1002,10 +1074,6 @@ body {
     grid-template-columns: 1fr;
     grid-template-rows: repeat(3, minmax(0, 1fr));
     height: 100%;
-  }
-
-  .summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .timeline-strip-panel.timeline-strip-has-right-glow::after {
