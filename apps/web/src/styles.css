@@ -369,13 +369,32 @@ body {
 }
 
 .trace-row.status-waiting {
-  border-color: #fcd34d;
-  background: #fffbeb;
+  border-color: #f5b7b1;
+  background: #fef2f2;
 }
 
 .trace-row.status-idle {
-  border-color: #dbeafe;
-  background: #f8fafc;
+  border-color: #cbd5e1;
+  background: #e5e7eb;
+}
+
+.trace-row.status-waiting:not(.active) {
+  animation: waiting-row-pulse 3.1s ease-in-out infinite;
+}
+
+@keyframes waiting-row-pulse {
+  0%,
+  100% {
+    border-color: #f5b7b1;
+    background: #fef2f2;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.06);
+  }
+
+  50% {
+    border-color: #ef9a9a;
+    background: #fee2e2;
+    box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.12);
+  }
 }
 
 .trace-row.active {
@@ -1120,6 +1139,31 @@ body {
   font-size: 0.76rem;
 }
 
+.corner-handle {
+  position: fixed;
+  right: 14px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  z-index: 12;
+  border: 1px solid rgba(148, 163, 184, 0.75);
+  border-radius: 999px;
+  padding: 3px 9px;
+  color: #e2e8f0;
+  text-decoration: none;
+  font-size: 0.75rem;
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.corner-handle:hover {
+  background: rgba(15, 23, 42, 0.9);
+  color: #f8fafc;
+}
+
+.corner-handle:focus-visible {
+  outline: 2px solid #f8fafc;
+  outline-offset: 2px;
+}
+
 .empty {
   padding: 20px;
   color: var(--muted);
@@ -1175,5 +1219,10 @@ body {
 
   .timeline-strip-panel.timeline-strip-has-right-glow::after {
     width: 26px;
+  }
+
+  .corner-handle {
+    right: 10px;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
   }
 }

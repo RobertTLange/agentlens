@@ -1033,6 +1033,9 @@ export function App(): JSX.Element {
       </div>
 
       <footer className="status mono">{footerStatus}</footer>
+      <a className="corner-handle mono" href="https://x.com/RobertTLange">
+        @RobertTLange
+      </a>
     </main>
   );
 }
