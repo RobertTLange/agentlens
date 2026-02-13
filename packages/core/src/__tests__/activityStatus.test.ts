@@ -103,7 +103,7 @@ describe("trace activity status", () => {
     expect(summary.activityReason).toBe("pending_tool_use_fresh");
   });
 
-  it("downgrades running to idle when running ttl expires", async () => {
+  it("keeps unmatched tool call running when waiting ttl is still fresh", async () => {
     const summary = await loadSummaryForCodexLines(
       [
         JSON.stringify({
@@ -126,6 +126,38 @@ describe("trace activity status", () => {
       {
         mtimeMs: Date.now() - 120_000,
         statusRunningTtlMs: 10_000,
+        statusWaitingTtlMs: 300_000,
+      },
+    );
+
+    expect(summary.activityStatus).toBe("running");
+    expect(summary.activityReason).toBe("pending_tool_use_fresh");
+  });
+
+  it("downgrades unmatched tool call to idle when waiting ttl expires", async () => {
+    const summary = await loadSummaryForCodexLines(
+      [
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "running-stale-status" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-12T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            id: "fc_1",
+            name: "run_command",
+            call_id: "call_1",
+            arguments: "{\"command\":\"echo hi\"}",
+          },
+        }),
+      ],
+      {
+        mtimeMs: Date.now() - 120_000,
+        statusRunningTtlMs: 10_000,
+        statusWaitingTtlMs: 5_000,
       },
     );
 
@@ -353,7 +385,7 @@ describe("trace activity status", () => {
         recentEventWindow: 400,
         includeMetaDefault: true,
         statusRunningTtlMs: 50,
-        statusWaitingTtlMs: 300_000,
+        statusWaitingTtlMs: 50,
       },
       sessionLogDirectories: [],
       sources: {
