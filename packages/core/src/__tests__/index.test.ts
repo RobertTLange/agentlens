@@ -239,6 +239,83 @@ describe("trace index", () => {
     expect(webTocTags).toEqual(["web:search", "web:open", "web:find"]);
   });
 
+  it("formats codex reasoning summary_text previews", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "11");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-reasoning-summary.jsonl");
+    const lines = [
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "sess-reasoning", cwd: "/tmp/project", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "reasoning",
+          content: [{ type: "summary_text", text: "**Summarizing cost calculation details**" }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T10:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "reasoning", content: [{ type: "summary_text", text: "**Second reasoning summary**" }] }],
+        },
+      }),
+    ];
+    await writeFile(codexPath, lines.join("\n"), "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    const detail = index.getSessionDetail(summary!.id);
+    const reasoningEvents = detail.events.filter((event) => event.eventKind === "reasoning");
+    expect(reasoningEvents.map((event) => event.preview)).toEqual([
+      "Summary: **Summarizing cost calculation details**",
+      "Summary: **Second reasoning summary**",
+    ]);
+  });
+
   it("parses claude project logs with tool_use/tool_result typing", async () => {
     const root = await createTempRoot();
     const claudeDir = path.join(root, ".claude", "projects", "proj");
@@ -541,5 +618,479 @@ describe("trace index", () => {
     expect(summary?.sourceProfile).toBe("session_log");
     expect(summary?.parser).toBe("codex");
     expect(index.getSummaries().some((item) => item.path.endsWith("/history.jsonl"))).toBe(false);
+  });
+
+  it("computes codex token totals, top model shares, context ratio, and session cost estimate", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-metrics.jsonl");
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-metrics", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.3-codex" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 100,
+                cached_input_tokens: 20,
+                output_tokens: 10,
+                reasoning_output_tokens: 5,
+                total_tokens: 135,
+              },
+              last_token_usage: {
+                input_tokens: 120,
+                cached_input_tokens: 20,
+                output_tokens: 10,
+                reasoning_output_tokens: 5,
+                total_tokens: 155,
+              },
+              model_context_window: 1000,
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:03.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.2-codex" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:04.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 200,
+                cached_input_tokens: 40,
+                output_tokens: 20,
+                reasoning_output_tokens: 10,
+                total_tokens: 270,
+              },
+              last_token_usage: {
+                input_tokens: 180,
+                cached_input_tokens: 30,
+                output_tokens: 10,
+                reasoning_output_tokens: 4,
+                total_tokens: 224,
+              },
+              model_context_window: 1000,
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.3-codex",
+            inputPer1MUsd: 1,
+            outputPer1MUsd: 1,
+            cachedReadPer1MUsd: 1,
+            cachedCreatePer1MUsd: 1,
+            reasoningOutputPer1MUsd: 1,
+          },
+          {
+            model: "gpt-5.2-codex",
+            inputPer1MUsd: 1,
+            outputPer1MUsd: 1,
+            cachedReadPer1MUsd: 1,
+            cachedCreatePer1MUsd: 1,
+            reasoningOutputPer1MUsd: 1,
+          },
+        ],
+      },
+      models: {
+        defaultContextWindowTokens: 500,
+        contextWindows: [
+          { model: "gpt-5.3-codex", contextWindowTokens: 1000 },
+          { model: "gpt-5.2-codex", contextWindowTokens: 1000 },
+        ],
+      },
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.tokenTotals?.totalTokens).toBe(270);
+    expect(summary?.tokenTotals?.inputTokens).toBe(200);
+    expect(summary?.modelTokenSharesTop?.length).toBeGreaterThan(0);
+    expect((summary?.modelTokenSharesTop ?? []).map((row) => row.model)).toEqual(
+      expect.arrayContaining(["gpt-5.3-codex", "gpt-5.2-codex"]),
+    );
+    expect(summary?.modelTokenSharesEstimated).toBe(true);
+    expect(summary?.contextWindowPct).not.toBeNull();
+    expect((summary?.contextWindowPct ?? 0) > 0).toBe(true);
+    expect(summary?.costEstimateUsd).not.toBeNull();
+    expect((summary?.costEstimateUsd ?? 0) > 0).toBe(true);
+  });
+
+  it("does not double bill codex cached input tokens in cost estimate", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-cost-cached.jsonl");
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T11:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-cost-cached", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T11:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.3-codex" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T11:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 1000,
+                cached_input_tokens: 900,
+                output_tokens: 0,
+                reasoning_output_tokens: 0,
+                total_tokens: 1000,
+              },
+              last_token_usage: {
+                input_tokens: 1000,
+                cached_input_tokens: 900,
+                output_tokens: 0,
+                reasoning_output_tokens: 0,
+                total_tokens: 1000,
+              },
+              model_context_window: 10000,
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.3-codex",
+            inputPer1MUsd: 1,
+            outputPer1MUsd: 0,
+            cachedReadPer1MUsd: 0,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+          },
+        ],
+      },
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.costEstimateUsd).toBe(0.0001);
+  });
+
+  it("deduplicates repeated claude usage rows by request id for cost estimation", async () => {
+    const root = await createTempRoot();
+    const claudeDir = path.join(root, ".claude", "projects", "proj");
+    await mkdir(claudeDir, { recursive: true });
+
+    const claudePath = path.join(claudeDir, "session-cost.jsonl");
+    await writeFile(
+      claudePath,
+      [
+        JSON.stringify({
+          type: "assistant",
+          sessionId: "claude-cost-sess",
+          uuid: "u1",
+          requestId: "req_1",
+          message: {
+            model: "claude-sonnet-4-5-20250929",
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "first" }],
+            usage: {
+              input_tokens: 100,
+              cache_creation_input_tokens: 600,
+              cache_read_input_tokens: 300,
+              cache_creation: { ephemeral_5m_input_tokens: 600, ephemeral_1h_input_tokens: 0 },
+              output_tokens: 50,
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          sessionId: "claude-cost-sess",
+          uuid: "u2",
+          requestId: "req_1",
+          message: {
+            model: "claude-sonnet-4-5-20250929",
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "echo hi" } }],
+            usage: {
+              input_tokens: 100,
+              cache_creation_input_tokens: 600,
+              cache_read_input_tokens: 300,
+              cache_creation: { ephemeral_5m_input_tokens: 600, ephemeral_1h_input_tokens: 0 },
+              output_tokens: 50,
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          sessionId: "claude-cost-sess",
+          uuid: "u3",
+          requestId: "req_2",
+          message: {
+            model: "claude-sonnet-4-5-20250929",
+            id: "msg_2",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "second" }],
+            usage: {
+              input_tokens: 10,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+              output_tokens: 5,
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "claude-sonnet-4-5-20250929",
+            inputPer1MUsd: 1,
+            outputPer1MUsd: 1,
+            cachedReadPer1MUsd: 1,
+            cachedCreatePer1MUsd: 1,
+            reasoningOutputPer1MUsd: 0,
+          },
+        ],
+      },
+      sources: {
+        claude_projects: {
+          name: "claude_projects",
+          enabled: true,
+          roots: [path.join(root, ".claude", "projects")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.costEstimateUsd).toBe(0.001065);
+  });
+
+  it("redacts secret-like values from event previews and raw payloads", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-redaction.jsonl");
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-redact", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            id: "fc_1",
+            name: "exec_command",
+            call_id: "call_1",
+            arguments: "{\"token\":\"sk-secret-123\"}",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:02.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call_1",
+            result: {
+              OPENAI_API_KEY: "sk-secret-456",
+              ok: true,
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    const detail = index.getSessionDetail(summary!.id);
+    const toolUse = detail.events.find((event) => event.eventKind === "tool_use");
+    const toolResult = detail.events.find((event) => event.eventKind === "tool_result");
+
+    expect(toolUse?.toolArgsText.includes("sk-secret")).toBe(false);
+    expect(toolUse?.toolArgsText.includes("[REDACTED]")).toBe(true);
+    expect(JSON.stringify(toolResult?.raw).includes("sk-secret")).toBe(false);
+    expect(JSON.stringify(toolResult?.raw).includes("[REDACTED]")).toBe(true);
   });
 });

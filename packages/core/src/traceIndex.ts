@@ -15,6 +15,8 @@ import type {
 import { discoverTraceFiles, type DiscoveredTraceFile } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
+import { deriveSessionMetrics } from "./metrics.js";
+import { redactEvents } from "./redaction.js";
 import { asRecord, asString, nowMs } from "./utils.js";
 
 const EVENT_KIND_KEYS: EventKind[] = [
@@ -348,7 +350,7 @@ function summarize(
   sessionId: string,
   events: NormalizedEvent[],
   parseError: string,
-  scanConfig: AppConfig["scan"],
+  config: AppConfig,
   nowMsValue: number,
 ): TraceSummary {
   const eventKindCounts = emptyEventKindCounts();
@@ -395,9 +397,10 @@ function summarize(
     unmatchedToolUses,
     updatedMs,
     nowMs: nowMsValue,
-    scanConfig,
+    scanConfig: config.scan,
   });
   const activityBinsMeta = buildActivityBins(events);
+  const sessionMetrics = deriveSessionMetrics(events, agent, config);
 
   return {
     id: file.id,
@@ -425,6 +428,11 @@ function summarize(
     activityBinCount: activityBinsMeta.binCount,
     ...(activityBinsMeta.windowMinutes !== undefined ? { activityWindowMinutes: activityBinsMeta.windowMinutes } : {}),
     ...(activityBinsMeta.binMinutes !== undefined ? { activityBinMinutes: activityBinsMeta.binMinutes } : {}),
+    tokenTotals: sessionMetrics.tokenTotals,
+    modelTokenSharesTop: sessionMetrics.modelTokenSharesTop,
+    modelTokenSharesEstimated: sessionMetrics.modelTokenSharesEstimated,
+    contextWindowPct: sessionMetrics.contextWindowPct,
+    costEstimateUsd: sessionMetrics.costEstimateUsd,
     eventKindCounts,
   };
 }
@@ -504,17 +512,19 @@ export class TraceIndex extends EventEmitter {
 
       try {
         const parsed = await this.parserRegistry.parseFile(file);
+        const parsedEvents = parsed.events;
         const summary = summarize(
           file,
           parsed.agent,
           parsed.parser,
           parsed.sessionId,
-          parsed.events,
+          parsedEvents,
           parsed.parseError,
-          this.config.scan,
+          this.config,
           refreshNowMs,
         );
-        const detail: SessionDetail = { summary, events: parsed.events };
+        const redactedEvents = redactEvents(parsedEvents, this.config.redaction);
+        const detail: SessionDetail = { summary, events: redactedEvents };
 
         const previousCount = current?.detail.events.length ?? 0;
         this.entries.set(file.id, { file, detail });
@@ -526,12 +536,12 @@ export class TraceIndex extends EventEmitter {
           this.emitStream("events_appended", {
             id: file.id,
             appended,
-            latestEvents: parsed.events.slice(-Math.min(40, appended)),
+            latestEvents: redactedEvents.slice(-Math.min(40, appended)),
           });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config.scan, refreshNowMs);
+        const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config, refreshNowMs);
         this.entries.set(file.id, { file, detail: { summary, events: [] } });
         this.emitStream(current ? "trace_updated" : "trace_added", { summary });
       }

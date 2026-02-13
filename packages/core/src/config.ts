@@ -2,7 +2,17 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import TOML, { type JsonMap } from "@iarna/toml";
-import type { AppConfig, AgentKind, SessionLogDirectoryConfig, SourceProfileConfig } from "@agentlens/contracts";
+import type {
+  AppConfig,
+  AgentKind,
+  CostConfig,
+  CostModelRate,
+  ModelsConfig,
+  RedactionConfig,
+  SessionLogDirectoryConfig,
+  SourceProfileConfig,
+  TraceInspectorConfig,
+} from "@agentlens/contracts";
 import { DEFAULT_CONFIG, DEFAULT_SOURCE_PROFILES } from "./sourceProfiles.js";
 
 export const DEFAULT_CONFIG_PATH = path.join(os.homedir(), ".agentlens", "config.toml");
@@ -84,6 +94,81 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
   return cloneDefaultSessionLogDirectories();
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function mergeTraceInspector(input?: Partial<TraceInspectorConfig>): TraceInspectorConfig {
+  const defaults = DEFAULT_CONFIG.traceInspector;
+  const topModelCountInput = toFiniteNumber(input?.topModelCount);
+  return {
+    includeMetaDefault: input?.includeMetaDefault ?? defaults.includeMetaDefault,
+    topModelCount: topModelCountInput !== null && topModelCountInput > 0 ? Math.round(topModelCountInput) : defaults.topModelCount,
+    showAgentBadges: input?.showAgentBadges ?? defaults.showAgentBadges,
+    showHealthDiagnostics: input?.showHealthDiagnostics ?? defaults.showHealthDiagnostics,
+  };
+}
+
+function mergeRedaction(input?: Partial<RedactionConfig>): RedactionConfig {
+  const defaults = DEFAULT_CONFIG.redaction;
+  return {
+    mode: input?.mode === "off" || input?.mode === "strict" ? input.mode : defaults.mode,
+    alwaysOn: input?.alwaysOn ?? defaults.alwaysOn,
+    replacement: typeof input?.replacement === "string" && input.replacement.trim() ? input.replacement : defaults.replacement,
+    keyPattern: typeof input?.keyPattern === "string" && input.keyPattern.trim() ? input.keyPattern : defaults.keyPattern,
+    valuePattern: typeof input?.valuePattern === "string" && input.valuePattern.trim() ? input.valuePattern : defaults.valuePattern,
+  };
+}
+
+function normalizeCostModelRate(value: unknown): CostModelRate | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<CostModelRate>;
+  const model = String(candidate.model ?? "").trim();
+  if (!model) return null;
+  return {
+    model,
+    inputPer1MUsd: toFiniteNumber(candidate.inputPer1MUsd) ?? 0,
+    outputPer1MUsd: toFiniteNumber(candidate.outputPer1MUsd) ?? 0,
+    cachedReadPer1MUsd: toFiniteNumber(candidate.cachedReadPer1MUsd) ?? 0,
+    cachedCreatePer1MUsd: toFiniteNumber(candidate.cachedCreatePer1MUsd) ?? 0,
+    reasoningOutputPer1MUsd: toFiniteNumber(candidate.reasoningOutputPer1MUsd) ?? 0,
+  };
+}
+
+function mergeCost(input?: Partial<CostConfig>): CostConfig {
+  const defaults = DEFAULT_CONFIG.cost;
+  const ratesInput = Array.isArray(input?.modelRates) ? input.modelRates : defaults.modelRates;
+  const rates = ratesInput.map(normalizeCostModelRate).filter((value): value is CostModelRate => value !== null);
+  return {
+    enabled: input?.enabled ?? defaults.enabled,
+    currency: typeof input?.currency === "string" && input.currency.trim() ? input.currency : defaults.currency,
+    unknownModelPolicy: input?.unknownModelPolicy === "zero" ? "zero" : defaults.unknownModelPolicy,
+    modelRates: rates,
+  };
+}
+
+function mergeModels(input?: Partial<ModelsConfig>): ModelsConfig {
+  const defaults = DEFAULT_CONFIG.models;
+  const defaultWindow = toFiniteNumber(input?.defaultContextWindowTokens);
+  const contextWindows =
+    Array.isArray(input?.contextWindows) && input.contextWindows.length > 0
+      ? input.contextWindows
+          .map((entry) => {
+            const model = String(entry?.model ?? "").trim();
+            const contextWindowTokens = toFiniteNumber(entry?.contextWindowTokens);
+            if (!model || contextWindowTokens === null || contextWindowTokens <= 0) return null;
+            return { model, contextWindowTokens: Math.round(contextWindowTokens) };
+          })
+          .filter((entry): entry is { model: string; contextWindowTokens: number } => entry !== null)
+      : defaults.contextWindows;
+
+  return {
+    defaultContextWindowTokens:
+      defaultWindow !== null && defaultWindow > 0 ? Math.round(defaultWindow) : defaults.defaultContextWindowTokens,
+    contextWindows,
+  };
+}
+
 export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
   const sources: Record<string, SourceProfileConfig> = {};
   const inputSources = input?.sources ?? {};
@@ -119,6 +204,10 @@ export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
     },
     sessionLogDirectories: mergeSessionLogDirectories(input?.sessionLogDirectories, input?.sessionJsonlDirectories),
     sources,
+    traceInspector: mergeTraceInspector(input?.traceInspector),
+    redaction: mergeRedaction(input?.redaction),
+    cost: mergeCost(input?.cost),
+    models: mergeModels(input?.models),
   };
 }
 

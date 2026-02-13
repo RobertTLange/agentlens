@@ -30,6 +30,60 @@ function normalizeWebToolType(rawActionType: string): string {
   return "web";
 }
 
+function collectSummaryTextEntries(value: unknown): string[] {
+  const entries: string[] = [];
+  const collectFromItems = (items: unknown[]): void => {
+    for (const item of items) {
+      const record = asRecord(item);
+      const itemType = asString(record.type).toLowerCase();
+      if (itemType === "summary_text") {
+        const text = asString(record.text).trim();
+        if (text) entries.push(text);
+      }
+    }
+  };
+
+  collectFromItems(asArray(value));
+  const record = asRecord(value);
+  const recordType = asString(record.type).toLowerCase();
+  if (recordType === "summary_text") {
+    const text = asString(record.text).trim();
+    if (text) entries.push(text);
+  }
+  collectFromItems(asArray(record.content));
+  return entries;
+}
+
+function formatReasoningText(...candidates: unknown[]): string {
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined) continue;
+
+    const summaryEntries = collectSummaryTextEntries(candidate);
+    if (summaryEntries.length > 0) {
+      return `Summary: ${summaryEntries.join(" ")}`;
+    }
+
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if ((trimmed.startsWith("[") || trimmed.startsWith("{")) && trimmed.length > 1) {
+        try {
+          const parsed = JSON.parse(trimmed) as unknown;
+          const parsedSummaryEntries = collectSummaryTextEntries(parsed);
+          if (parsedSummaryEntries.length > 0) {
+            return `Summary: ${parsedSummaryEntries.join(" ")}`;
+          }
+        } catch {
+          // fall back to compact text
+        }
+      }
+    }
+
+    const compact = compactText(candidate);
+    if (compact) return compact;
+  }
+  return "";
+}
+
 export class CodexParser implements TraceParser {
   name = "codex";
   agent = "codex" as const;
@@ -210,7 +264,7 @@ export class CodexParser implements TraceParser {
             }
 
             if (itemType === "thinking" || itemType === "reasoning") {
-              const reasoningText = compactText(item.text || item.content || payload.summary);
+              const reasoningText = formatReasoningText(item.text, item.content, payload.summary);
               const preview = normalizePreview(reasoningText || itemType);
               pushEvent(
                 {
@@ -409,7 +463,7 @@ export class CodexParser implements TraceParser {
         }
 
         if (payloadType === "reasoning" || payloadType === "thinking") {
-          const reasoningText = compactText(payload.summary || payload.text || payload.content);
+          const reasoningText = formatReasoningText(payload.summary, payload.text, payload.content);
           const preview = normalizePreview(reasoningText || payloadType);
           pushEvent(
             {
