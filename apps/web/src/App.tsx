@@ -23,6 +23,12 @@ const EVENT_APPEND_QUEUE_DELAY_MS = 36;
 const TRACE_ENTER_ANIMATION_MS = 620;
 const TIMELINE_LATEST_EPSILON_PX = 12;
 
+interface StopTraceResponse {
+  ok?: boolean;
+  error?: string;
+  signal?: string | null;
+}
+
 function fmtTime(ms: number | null): string {
   if (!ms) return "-";
   return new Date(ms).toLocaleString();
@@ -117,6 +123,8 @@ export function App(): JSX.Element {
   const [enteringEventIds, setEnteringEventIds] = useState<Set<string>>(new Set());
   const [visibleEventIds, setVisibleEventIds] = useState<Set<string>>(new Set());
   const [pulseSeqByTraceId, setPulseSeqByTraceId] = useState<Record<string, number>>({});
+  const [stoppingTraceIds, setStoppingTraceIds] = useState<Set<string>>(new Set());
+  const [stopErrorByTraceId, setStopErrorByTraceId] = useState<Record<string, string>>({});
   const [timelineStripHasOverflow, setTimelineStripHasOverflow] = useState(false);
   const [timelineStripPinnedToLatest, setTimelineStripPinnedToLatest] = useState(true);
   const [timelineOffscreenAppendCount, setTimelineOffscreenAppendCount] = useState(0);
@@ -135,6 +143,25 @@ export function App(): JSX.Element {
   const queuedEventTimerRef = useRef<number | null>(null);
   const enterAnimationTimerByTraceIdRef = useRef<Map<string, number>>(new Map());
   const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
+  const manualStopAtByTraceIdRef = useRef<Record<string, number>>({});
+
+  const applyManualStopOverride = useCallback((trace: TraceSummary): TraceSummary => {
+    const manualStopAtMs = manualStopAtByTraceIdRef.current[trace.id];
+    if (!manualStopAtMs) return trace;
+    const latestActivityMs = Math.max(trace.lastEventTs ?? 0, trace.mtimeMs);
+    if (latestActivityMs > manualStopAtMs) {
+      delete manualStopAtByTraceIdRef.current[trace.id];
+      return trace;
+    }
+    if (trace.activityStatus === "idle" && trace.activityReason === "manually_stopped") {
+      return trace;
+    }
+    return {
+      ...trace,
+      activityStatus: "idle",
+      activityReason: "manually_stopped",
+    };
+  }, []);
 
   const filteredTraces = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -435,7 +462,7 @@ export function App(): JSX.Element {
           fetchJson<{ overview: OverviewStats }>(`${API}/api/overview`),
           fetchJson<{ traces: TraceSummary[] }>(`${API}/api/traces`),
         ]);
-        const sorted = sortTraces(tracesResp.traces);
+        const sorted = sortTraces(tracesResp.traces.map(applyManualStopOverride));
         setOverview(overviewResp.overview);
         setTraces(sorted);
         setSelectedId((prev) => prev || sorted[0]?.id || "");
@@ -454,7 +481,7 @@ export function App(): JSX.Element {
         const data = JSON.parse((event as MessageEvent).data) as {
           payload?: { traces?: TraceSummary[]; overview?: OverviewStats };
         };
-        const nextTraces = sortTraces(data.payload?.traces ?? []);
+        const nextTraces = sortTraces((data.payload?.traces ?? []).map(applyManualStopOverride));
         if (nextTraces.length > 0) {
           setTraces(nextTraces);
           setSelectedId((prev) => prev || nextTraces[0]?.id || "");
@@ -468,17 +495,18 @@ export function App(): JSX.Element {
     });
 
     const upsert = (summary: TraceSummary): void => {
+      const patchedSummary = applyManualStopOverride(summary);
       setTraces((prev) => {
         const next = [...prev];
-        const index = next.findIndex((item) => item.id === summary.id);
+        const index = next.findIndex((item) => item.id === patchedSummary.id);
         if (index >= 0) {
-          next[index] = summary;
+          next[index] = patchedSummary;
         } else {
-          next.push(summary);
+          next.push(patchedSummary);
         }
         return sortTraces(next);
       });
-      setSelectedId((prev) => prev || summary.id);
+      setSelectedId((prev) => prev || patchedSummary.id);
     };
 
     source.addEventListener("trace_added", (event) => {
@@ -503,6 +531,7 @@ export function App(): JSX.Element {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { id?: string } };
       const id = data.payload?.id;
       if (!id) return;
+      delete manualStopAtByTraceIdRef.current[id];
       setTraces((prev) => prev.filter((trace) => trace.id !== id));
       setSelectedId((prev) => (prev === id ? "" : prev));
       removeTraceRow(id);
@@ -518,6 +547,18 @@ export function App(): JSX.Element {
         enterAnimationTimerByTraceIdRef.current.delete(id);
       }
       setPulseSeqByTraceId((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setStoppingTraceIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      setStopErrorByTraceId((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
         delete next[id];
@@ -551,7 +592,7 @@ export function App(): JSX.Element {
     return () => {
       source.close();
     };
-  }, [removeTraceRow]);
+  }, [applyManualStopOverride, removeTraceRow]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -768,6 +809,64 @@ export function App(): JSX.Element {
     });
   };
 
+  const stopTraceSession = useCallback(async (traceId: string): Promise<void> => {
+    setStoppingTraceIds((prev) => {
+      if (prev.has(traceId)) return prev;
+      const next = new Set(prev);
+      next.add(traceId);
+      return next;
+    });
+    setStopErrorByTraceId((prev) => {
+      if (!(traceId in prev)) return prev;
+      const next = { ...prev };
+      delete next[traceId];
+      return next;
+    });
+
+    try {
+      const response = await fetch(`${API}/api/trace/${encodeURIComponent(traceId)}/stop`, {
+        method: "POST",
+        cache: "no-store",
+      });
+      const payload = (await response.json().catch(() => ({}))) as StopTraceResponse;
+      if (!response.ok || payload.ok !== true) {
+        const errorMessage = payload.error?.trim() ? payload.error : `HTTP ${response.status}`;
+        setStopErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
+        setStatus(`Stop failed: ${errorMessage}`);
+        return;
+      }
+      const stoppedAtMs = Date.now();
+      manualStopAtByTraceIdRef.current[traceId] = stoppedAtMs;
+      setTraces((prev) => {
+        const index = prev.findIndex((trace) => trace.id === traceId);
+        if (index < 0) return prev;
+        const current = prev[index];
+        if (!current) return prev;
+        const next = [...prev];
+        next[index] = {
+          ...current,
+          activityStatus: "idle",
+          activityReason: "manually_stopped",
+        };
+        return sortTraces(next);
+      });
+      const signalLabel = payload.signal?.trim() ? payload.signal : "signal";
+      setStatus(`Stop requested (${signalLabel}) for ${traceId}`);
+      setLastLiveUpdateMs(stoppedAtMs);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      setStopErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
+      setStatus(`Stop failed: ${errorMessage}`);
+    } finally {
+      setStoppingTraceIds((prev) => {
+        if (!prev.has(traceId)) return prev;
+        const next = new Set(prev);
+        next.delete(traceId);
+        return next;
+      });
+    }
+  }, []);
+
   return (
     <main className="shell">
       <header className="hero">
@@ -851,10 +950,13 @@ export function App(): JSX.Element {
                   isActive={isActive}
                   isPathExpanded={isPathExpanded}
                   isEntering={enteringTraceIds.has(trace.id)}
+                  isStopping={stoppingTraceIds.has(trace.id)}
+                  stopError={stopErrorByTraceId[trace.id] ?? ""}
                   pulseSeq={pulseSeq}
                   nowMs={clockNowMs}
                   onSelect={setSelectedId}
                   onTogglePath={toggleTracePathExpanded}
+                  onStop={stopTraceSession}
                   rowRef={bindTraceRowRef(trace.id)}
                   fmtTime={fmtTime}
                 />

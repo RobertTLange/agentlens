@@ -15,10 +15,13 @@ interface SessionTraceRowProps {
   isActive: boolean;
   isPathExpanded: boolean;
   isEntering: boolean;
+  isStopping: boolean;
+  stopError: string;
   pulseSeq: number;
   nowMs: number;
   onSelect: (traceId: string) => void;
   onTogglePath: (traceId: string) => void;
+  onStop: (traceId: string) => void;
   rowRef: (node: HTMLDivElement | null) => void;
   fmtTime: (ms: number | null) => string;
 }
@@ -411,10 +414,13 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
     isActive,
     isPathExpanded,
     isEntering,
+    isStopping,
+    stopError,
     pulseSeq,
     nowMs,
     onSelect,
     onTogglePath,
+    onStop,
     rowRef,
     fmtTime,
   } = props;
@@ -459,6 +465,22 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
           </span>
           <div className="trace-topline-right">
             <span className={`trace-status-chip mono ${statusClass}`}>{statusLabel}</span>
+            <button
+              type="button"
+              className={`trace-stop-button mono ${isStopping ? "pending" : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onStop(trace.id);
+              }}
+              aria-label={isStopping ? "Stopping session process" : "Stop session process"}
+              title={isStopping ? "Stopping session process…" : "Stop session process"}
+              disabled={isStopping}
+            >
+              <svg className="trace-stop-icon" viewBox="0 0 14 14" aria-hidden="true">
+                <circle cx="7" cy="7" r="5.2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                <rect x="5.1" y="5.1" width="3.8" height="3.8" rx="0.5" fill="currentColor" />
+              </svg>
+            </button>
             <span className="trace-agent-chip mono">{trace.agent}</span>
           </div>
         </div>
@@ -590,6 +612,11 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
             )}
           </span>
         </div>
+        {stopError && (
+          <div className="trace-stop-error mono" role="status">
+            {stopError}
+          </div>
+        )}
       </div>
     </div>
   );
