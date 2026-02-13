@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import type {
+  ActivityBinsMode,
   AppConfig,
   EventKind,
   NormalizedEvent,
@@ -14,6 +15,8 @@ import type {
 import { discoverTraceFiles, type DiscoveredTraceFile } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
+import { deriveSessionMetrics } from "./metrics.js";
+import { redactEvents } from "./redaction.js";
 import { asRecord, asString, nowMs } from "./utils.js";
 
 const EVENT_KIND_KEYS: EventKind[] = [
@@ -31,10 +34,6 @@ const WAITING_INPUT_PATTERN =
 const WAITING_PROMPT_PATTERN =
   /\b(?:do\s+you\s+want(?:\s+me)?|would\s+you\s+like(?:\s+me)?|should\s+i\b|can\s+you\s+confirm|please\s+confirm|let\s+me\s+know\s+if\s+you(?:'d)?\s+like|which\s+(?:option|approach)|choose\s+(?:one|an?\s+option)|pick\s+(?:one|an?\s+option)|approve(?:\s+this)?|permission\s+to)\b/i;
 const ACTIVITY_BIN_COUNT = 12;
-const ACTIVITY_WINDOW_MINUTES = 60;
-const ACTIVITY_BIN_MINUTES = ACTIVITY_WINDOW_MINUTES / ACTIVITY_BIN_COUNT;
-const ACTIVITY_WINDOW_MS = ACTIVITY_WINDOW_MINUTES * 60_000;
-const ACTIVITY_BIN_MS = ACTIVITY_BIN_MINUTES * 60_000;
 
 interface TraceEntry {
   file: DiscoveredTraceFile;
@@ -64,6 +63,14 @@ interface ActivityStatusOptions {
   scanConfig: AppConfig["scan"];
 }
 
+interface ActivityBinsMeta {
+  bins: number[];
+  mode: ActivityBinsMode;
+  binCount: number;
+  windowMinutes?: number;
+  binMinutes?: number;
+}
+
 function emptyEventKindCounts(): Record<EventKind, number> {
   return {
     system: 0,
@@ -76,34 +83,72 @@ function emptyEventKindCounts(): Record<EventKind, number> {
   };
 }
 
-function buildActivityBins(events: NormalizedEvent[], anchorMs: number): number[] {
+function normalizeActivityCounts(counts: number[]): number[] {
+  let maxCount = 0;
+  for (const count of counts) {
+    if (count > maxCount) maxCount = count;
+  }
+  if (maxCount <= 0) return counts.map(() => 0);
+  return counts.map((count) => count / maxCount);
+}
+
+function buildTimeActivityBins(timestampMsValues: number[]): ActivityBinsMeta | undefined {
+  if (timestampMsValues.length < 2) return undefined;
+  const firstTimestampMs = timestampMsValues[0] ?? 0;
+  const lastTimestampMs = timestampMsValues[timestampMsValues.length - 1] ?? 0;
+  const spanMs = lastTimestampMs - firstTimestampMs;
+  if (spanMs <= 0) return undefined;
+
   const bins = Array.from({ length: ACTIVITY_BIN_COUNT }, () => 0);
-  if (anchorMs <= 0) return bins;
-
-  const windowStartMs = anchorMs - ACTIVITY_WINDOW_MS;
-  for (const event of events) {
-    const timestampMs = event.timestampMs;
-    if (timestampMs === null || timestampMs <= 0) continue;
-    if (timestampMs < windowStartMs || timestampMs > anchorMs) continue;
-
-    const elapsedMs = timestampMs - windowStartMs;
-    const rawBinIndex = Math.floor(elapsedMs / ACTIVITY_BIN_MS);
+  for (const timestampMs of timestampMsValues) {
+    const elapsedMs = timestampMs - firstTimestampMs;
+    const rawBinIndex = Math.floor((elapsedMs / spanMs) * ACTIVITY_BIN_COUNT);
     const binIndex = Math.max(0, Math.min(ACTIVITY_BIN_COUNT - 1, rawBinIndex));
     bins[binIndex] = (bins[binIndex] ?? 0) + 1;
   }
 
-  let maxCount = 0;
-  for (const count of bins) {
-    if (count > maxCount) maxCount = count;
-  }
-  if (maxCount <= 0) return bins;
-
-  return bins.map((count) => count / maxCount);
+  const windowMinutes = spanMs / 60_000;
+  return {
+    bins: normalizeActivityCounts(bins),
+    mode: "time",
+    binCount: ACTIVITY_BIN_COUNT,
+    windowMinutes,
+    binMinutes: windowMinutes / ACTIVITY_BIN_COUNT,
+  };
 }
 
-function quantizeActivityAnchorMs(nowMsValue: number): number {
-  if (nowMsValue <= 0) return 0;
-  return Math.floor(nowMsValue / ACTIVITY_BIN_MS) * ACTIVITY_BIN_MS;
+function buildEventIndexActivityBins(events: NormalizedEvent[]): ActivityBinsMeta {
+  const bins = Array.from({ length: ACTIVITY_BIN_COUNT }, () => 0);
+  const totalEvents = events.length;
+
+  for (let index = 0; index < totalEvents; index += 1) {
+    const rawBinIndex = Math.floor((index / totalEvents) * ACTIVITY_BIN_COUNT);
+    const binIndex = Math.max(0, Math.min(ACTIVITY_BIN_COUNT - 1, rawBinIndex));
+    bins[binIndex] = (bins[binIndex] ?? 0) + 1;
+  }
+
+  return {
+    bins: normalizeActivityCounts(bins),
+    mode: "event_index",
+    binCount: ACTIVITY_BIN_COUNT,
+  };
+}
+
+function buildActivityBins(events: NormalizedEvent[]): ActivityBinsMeta {
+  const timestampMsValues: number[] = [];
+  for (const event of events) {
+    const timestampMs = event.timestampMs;
+    if (timestampMs === null || timestampMs <= 0) continue;
+    timestampMsValues.push(timestampMs);
+  }
+  return buildTimeActivityBins(timestampMsValues) ?? buildEventIndexActivityBins(events);
+}
+
+function numericMetaEqual(left: number | undefined, right: number | undefined): boolean {
+  if (left === undefined || right === undefined) {
+    return left === right;
+  }
+  return Math.abs(left - right) <= 1e-9;
 }
 
 function activityBinsEqual(left: number[] | undefined, right: number[]): boolean {
@@ -263,8 +308,7 @@ function withDerivedActivityStatus(
   scanConfig: AppConfig["scan"],
   nowMsValue: number,
 ): TraceSummary {
-  const activityAnchorMs = quantizeActivityAnchorMs(nowMsValue);
-  const nextActivityBins = buildActivityBins(events, activityAnchorMs);
+  const activityBinsMeta = buildActivityBins(events);
   const activityStatus = deriveActivityStatus({
     events,
     unmatchedToolUses: summary.unmatchedToolUses,
@@ -273,10 +317,11 @@ function withDerivedActivityStatus(
     scanConfig,
   });
   const activityMetaUnchanged =
-    summary.activityWindowMinutes === ACTIVITY_WINDOW_MINUTES &&
-    summary.activityBinMinutes === ACTIVITY_BIN_MINUTES &&
-    summary.activityBinCount === ACTIVITY_BIN_COUNT;
-  const binsUnchanged = activityBinsEqual(summary.activityBins, nextActivityBins);
+    summary.activityBinsMode === activityBinsMeta.mode &&
+    summary.activityBinCount === activityBinsMeta.binCount &&
+    numericMetaEqual(summary.activityWindowMinutes, activityBinsMeta.windowMinutes) &&
+    numericMetaEqual(summary.activityBinMinutes, activityBinsMeta.binMinutes);
+  const binsUnchanged = activityBinsEqual(summary.activityBins, activityBinsMeta.bins);
   if (
     summary.activityStatus === activityStatus.status &&
     summary.activityReason === activityStatus.reason &&
@@ -285,14 +330,16 @@ function withDerivedActivityStatus(
   ) {
     return summary;
   }
+  const { activityWindowMinutes: _prevWindowMinutes, activityBinMinutes: _prevBinMinutes, ...rest } = summary;
   return {
-    ...summary,
+    ...rest,
     activityStatus: activityStatus.status,
     activityReason: activityStatus.reason,
-    activityBins: nextActivityBins,
-    activityWindowMinutes: ACTIVITY_WINDOW_MINUTES,
-    activityBinMinutes: ACTIVITY_BIN_MINUTES,
-    activityBinCount: ACTIVITY_BIN_COUNT,
+    activityBins: activityBinsMeta.bins,
+    activityBinsMode: activityBinsMeta.mode,
+    activityBinCount: activityBinsMeta.binCount,
+    ...(activityBinsMeta.windowMinutes !== undefined ? { activityWindowMinutes: activityBinsMeta.windowMinutes } : {}),
+    ...(activityBinsMeta.binMinutes !== undefined ? { activityBinMinutes: activityBinsMeta.binMinutes } : {}),
   };
 }
 
@@ -303,7 +350,7 @@ function summarize(
   sessionId: string,
   events: NormalizedEvent[],
   parseError: string,
-  scanConfig: AppConfig["scan"],
+  config: AppConfig,
   nowMsValue: number,
 ): TraceSummary {
   const eventKindCounts = emptyEventKindCounts();
@@ -350,9 +397,10 @@ function summarize(
     unmatchedToolUses,
     updatedMs,
     nowMs: nowMsValue,
-    scanConfig,
+    scanConfig: config.scan,
   });
-  const activityBins = buildActivityBins(events, quantizeActivityAnchorMs(nowMsValue));
+  const activityBinsMeta = buildActivityBins(events);
+  const sessionMetrics = deriveSessionMetrics(events, agent, config);
 
   return {
     id: file.id,
@@ -375,10 +423,16 @@ function summarize(
     unmatchedToolResults,
     activityStatus: activityStatus.status,
     activityReason: activityStatus.reason,
-    activityBins,
-    activityWindowMinutes: ACTIVITY_WINDOW_MINUTES,
-    activityBinMinutes: ACTIVITY_BIN_MINUTES,
-    activityBinCount: ACTIVITY_BIN_COUNT,
+    activityBins: activityBinsMeta.bins,
+    activityBinsMode: activityBinsMeta.mode,
+    activityBinCount: activityBinsMeta.binCount,
+    ...(activityBinsMeta.windowMinutes !== undefined ? { activityWindowMinutes: activityBinsMeta.windowMinutes } : {}),
+    ...(activityBinsMeta.binMinutes !== undefined ? { activityBinMinutes: activityBinsMeta.binMinutes } : {}),
+    tokenTotals: sessionMetrics.tokenTotals,
+    modelTokenSharesTop: sessionMetrics.modelTokenSharesTop,
+    modelTokenSharesEstimated: sessionMetrics.modelTokenSharesEstimated,
+    contextWindowPct: sessionMetrics.contextWindowPct,
+    costEstimateUsd: sessionMetrics.costEstimateUsd,
     eventKindCounts,
   };
 }
@@ -458,17 +512,19 @@ export class TraceIndex extends EventEmitter {
 
       try {
         const parsed = await this.parserRegistry.parseFile(file);
+        const parsedEvents = parsed.events;
         const summary = summarize(
           file,
           parsed.agent,
           parsed.parser,
           parsed.sessionId,
-          parsed.events,
+          parsedEvents,
           parsed.parseError,
-          this.config.scan,
+          this.config,
           refreshNowMs,
         );
-        const detail: SessionDetail = { summary, events: parsed.events };
+        const redactedEvents = redactEvents(parsedEvents, this.config.redaction);
+        const detail: SessionDetail = { summary, events: redactedEvents };
 
         const previousCount = current?.detail.events.length ?? 0;
         this.entries.set(file.id, { file, detail });
@@ -480,12 +536,12 @@ export class TraceIndex extends EventEmitter {
           this.emitStream("events_appended", {
             id: file.id,
             appended,
-            latestEvents: parsed.events.slice(-Math.min(40, appended)),
+            latestEvents: redactedEvents.slice(-Math.min(40, appended)),
           });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config.scan, refreshNowMs);
+        const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config, refreshNowMs);
         this.entries.set(file.id, { file, detail: { summary, events: [] } });
         this.emitStream(current ? "trace_updated" : "trace_added", { summary });
       }

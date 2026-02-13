@@ -5,6 +5,9 @@ import {
   classForKind,
   domIdForEvent,
   eventCardClass,
+  formatCompactNumber,
+  formatPercent,
+  formatUsd,
   kindClassSuffix,
   sortTimelineItems,
   type TimelineSortDirection,
@@ -25,6 +28,11 @@ function fmtTime(ms: number | null): string {
   return new Date(ms).toLocaleString();
 }
 
+function fmtClockTime(ms: number | null): string {
+  if (!ms) return "-";
+  return new Date(ms).toLocaleTimeString();
+}
+
 function fmtTimeAgo(ms: number | null, nowMs: number): string {
   if (!ms) return "-";
   const deltaSeconds = Math.floor(Math.max(0, nowMs - ms) / 1000);
@@ -33,6 +41,33 @@ function fmtTimeAgo(ms: number | null, nowMs: number): string {
   if (deltaSeconds < 3_600) return `${Math.floor(deltaSeconds / 60)}m ago`;
   if (deltaSeconds < 86_400) return `${Math.floor(deltaSeconds / 3_600)}h ago`;
   return `${Math.floor(deltaSeconds / 86_400)}d ago`;
+}
+
+function buildAgentBadges(event: TracePage["events"][number]): string[] {
+  const badges: string[] = [];
+  const raw = event.raw;
+  const rawType = typeof raw.type === "string" ? raw.type : "";
+
+  if (rawType === "turn_context") {
+    const payload = raw.payload as Record<string, unknown> | undefined;
+    const model = typeof payload?.model === "string" ? payload.model : "";
+    const approval = typeof payload?.approval_policy === "string" ? payload.approval_policy : "";
+    if (model) badges.push(`model:${model}`);
+    if (approval) badges.push(`approval:${approval}`);
+  }
+
+  if (rawType === "progress") {
+    const data = raw.data as Record<string, unknown> | undefined;
+    const hookEvent = typeof data?.hookEvent === "string" ? data.hookEvent : "";
+    if (hookEvent) badges.push(`hook:${hookEvent}`);
+  }
+
+  if (rawType === "system") {
+    const subtype = typeof raw.subtype === "string" ? raw.subtype : "";
+    if (subtype) badges.push(`system:${subtype}`);
+  }
+
+  return badges.slice(0, 3);
 }
 
 function sortTraces(traces: TraceSummary[]): TraceSummary[] {
@@ -67,6 +102,7 @@ export function App(): JSX.Element {
   const [selectedId, setSelectedId] = useState("");
   const [page, setPage] = useState<TracePage | null>(null);
   const [status, setStatus] = useState("Loading...");
+  const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [includeMeta, setIncludeMeta] = useState(false);
   const [tocQuery, setTocQuery] = useState("");
@@ -138,6 +174,19 @@ export function App(): JSX.Element {
   const filteredTraceIds = useMemo(() => filteredTraces.map((trace) => trace.id), [filteredTraces]);
   const timelineStripShowsRightGlow =
     timelineStripHasOverflow && timelineOffscreenAppendCount > 0 && !timelineStripPinnedToLatest;
+  const selectedTraceSummary = useMemo(() => {
+    if (!selectedId) return null;
+    return traces.find((trace) => trace.id === selectedId) ?? null;
+  }, [selectedId, traces]);
+  const selectedTracePulseSeq = selectedTraceSummary ? (pulseSeqByTraceId[selectedTraceSummary.id] ?? 0) : 0;
+  const selectedTraceLabel = selectedTraceSummary?.sessionId || selectedTraceSummary?.id || "";
+  const selectedTraceEventCount = selectedTraceSummary?.eventCount ?? 0;
+  const selectedTraceUpdatedMs = selectedTraceSummary
+    ? Math.max(selectedTraceSummary.lastEventTs ?? 0, selectedTraceSummary.mtimeMs)
+    : null;
+  const selectedTraceMeta = selectedTraceSummary
+    ? `${selectedTraceSummary.agent} · ${selectedTraceEventCount} ${selectedTraceEventCount === 1 ? "event" : "events"} · updated ${fmtTimeAgo(selectedTraceUpdatedMs, clockNowMs)}`
+    : "Pick a session to inspect.";
   const sessionStatusCounts = useMemo(() => {
     const counts = {
       running: 0,
@@ -152,6 +201,46 @@ export function App(): JSX.Element {
     }
     return counts;
   }, [filteredTraces]);
+  const toolCallTypeCounts = useMemo(() => {
+    if (!page) return [];
+    const countedCallKeys = new Set<string>();
+    const counts = new Map<string, number>();
+    for (const event of page.events) {
+      const normalizedToolType = event.toolType.trim();
+      if (!normalizedToolType) continue;
+      const normalizedToolCallId = event.toolCallId.trim();
+      const callKey = normalizedToolCallId ? `${normalizedToolType}:${normalizedToolCallId}` : event.eventId;
+      if (countedCallKeys.has(callKey)) continue;
+      countedCallKeys.add(callKey);
+      counts.set(normalizedToolType, (counts.get(normalizedToolType) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([toolType, count]) => ({ toolType, count }));
+  }, [page]);
+  const toolCallTypeCountsPreview = toolCallTypeCounts.slice(0, 4);
+  const hiddenToolCallTypeCount = Math.max(0, toolCallTypeCounts.length - toolCallTypeCountsPreview.length);
+  const toolCallCountTotal = toolCallTypeCounts.reduce((sum, row) => sum + row.count, 0);
+  const newestEventTsMs = useMemo(() => {
+    let newest = 0;
+    for (const trace of traces) {
+      const traceNewest = trace.lastEventTs ?? 0;
+      if (traceNewest > newest) newest = traceNewest;
+    }
+    return newest > 0 ? newest : null;
+  }, [traces]);
+  const footerStatus = useMemo(() => {
+    if (!status.startsWith("Live:") || !lastLiveUpdateMs) return status;
+    if (!newestEventTsMs) return `${status} · updated ${fmtClockTime(lastLiveUpdateMs)}`;
+    return `${status} · updated ${fmtClockTime(lastLiveUpdateMs)} · newest event ${fmtClockTime(newestEventTsMs)}`;
+  }, [lastLiveUpdateMs, newestEventTsMs, status]);
+  const toolCallTypeCountRows = useMemo(() => {
+    const rows: Array<Array<{ toolType: string; count: number }>> = [];
+    for (let index = 0; index < toolCallTypeCountsPreview.length; index += 2) {
+      rows.push(toolCallTypeCountsPreview.slice(index, index + 2));
+    }
+    return rows;
+  }, [toolCallTypeCountsPreview]);
   const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(filteredTraceIds);
   const { bindItemRef: bindTocRowRef } = useListReorderAnimation<HTMLButtonElement>(tocRowIds, { resetKey: selectedId });
   const { bindItemRef: bindEventCardRef } = useListReorderAnimation<HTMLElement>(timelineEventIds, {
@@ -372,6 +461,7 @@ export function App(): JSX.Element {
         }
         if (data.payload?.overview) setOverview(data.payload.overview);
         setStatus(`Live: ${nextTraces.length} traces`);
+        setLastLiveUpdateMs(Date.now());
       } catch {
         setStatus("Live update parse error");
       }
@@ -395,6 +485,7 @@ export function App(): JSX.Element {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { summary?: TraceSummary } };
       if (data.payload?.summary) {
         upsert(data.payload.summary);
+        setLastLiveUpdateMs(Date.now());
         bumpPulse(data.payload.summary.id);
       }
     });
@@ -403,6 +494,7 @@ export function App(): JSX.Element {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { summary?: TraceSummary } };
       if (data.payload?.summary) {
         upsert(data.payload.summary);
+        setLastLiveUpdateMs(Date.now());
         bumpPulse(data.payload.summary.id);
       }
     });
@@ -431,17 +523,21 @@ export function App(): JSX.Element {
         delete next[id];
         return next;
       });
+      setLastLiveUpdateMs(Date.now());
     });
 
     source.addEventListener("overview_updated", (event) => {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { overview?: OverviewStats } };
-      if (data.payload?.overview) setOverview(data.payload.overview);
+      if (data.payload?.overview) {
+        setOverview(data.payload.overview);
+        setLastLiveUpdateMs(Date.now());
+      }
     });
 
     source.addEventListener("events_appended", (event) => {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { id?: string; appended?: number } };
       if (data.payload?.id && data.payload.id === selectedIdRef.current) {
-        setStatus("Live update received");
+        setLastLiveUpdateMs(Date.now());
         if ((data.payload.appended ?? 0) > 0) {
           setLiveTick((value) => value + 1);
         }
@@ -675,10 +771,10 @@ export function App(): JSX.Element {
   return (
     <main className="shell">
       <header className="hero">
-        <h1>AgentLens</h1>
+        <h1>🔍 AgentLens</h1>
         <p>Live observability for Codex and Claude traces.</p>
         <div className="hero-metrics">
-          <span>{`traces ${overview?.traceCount ?? 0}`}</span>
+          <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
           <span>{`events ${overview?.eventCount ?? 0}`}</span>
           <span>{`errors ${overview?.errorCount ?? 0}`}</span>
           <span>{`tool io ${(overview?.toolUseCount ?? 0) + (overview?.toolResultCount ?? 0)}`}</span>
@@ -812,73 +908,158 @@ export function App(): JSX.Element {
         </section>
 
         <section className="panel detail-panel">
-          <div className="panel-head detail-head">
-            <h2>Trace Inspector</h2>
-            <div className="detail-controls">
-              <label className="mono checkbox">
-                <input
-                  type="checkbox"
-                  checked={includeMeta}
-                  onChange={(event) => setIncludeMeta(event.target.checked)}
-                />
-                include meta
-              </label>
-              <label className="mono checkbox">
-                <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
-                auto follow
-              </label>
+            <div className="panel-head detail-head">
+              <div
+                key={`detail-head-pulse-${selectedTraceSummary?.id ?? "none"}-${selectedTracePulseSeq}`}
+                className={`detail-head-title-block ${selectedTracePulseSeq > 0 ? "pulse" : ""}`}
+              >
+                <h2>Trace Inspector</h2>
+                <div className="detail-head-meta mono" title={selectedTraceLabel || undefined}>
+                  {selectedTraceSummary ? `${selectedTraceLabel} · ${selectedTraceMeta}` : selectedTraceMeta}
+                </div>
+              </div>
+              <div className="detail-controls">
+                <label className="mono checkbox">
+                  <input
+                    type="checkbox"
+                    checked={includeMeta}
+                    onChange={(event) => setIncludeMeta(event.target.checked)}
+                  />
+                  include meta
+                </label>
+                <label className="mono checkbox">
+                  <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
+                  auto follow
+                </label>
+              </div>
             </div>
-          </div>
 
-          {page ? (
-            <>
-              <div className="summary-grid mono">
-                <span>{`agent ${page.summary.agent}`}</span>
-                <span>{`parser ${page.summary.parser}`}</span>
-                <span>{`session ${page.summary.sessionId || "-"}`}</span>
-                <span>{`events ${page.summary.eventCount}`}</span>
-                <span>{`errors ${page.summary.errorCount}`}</span>
-                <span>{`unmatched ${page.summary.unmatchedToolUses + page.summary.unmatchedToolResults}`}</span>
-              </div>
-              <div className="events-scroll">
-                {timelineEvents.map((event) => {
-                  return (
-                    <article
-                      key={event.eventId}
-                      id={domIdForEvent(event.eventId)}
-                      className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
-                      ref={bindEventCardRef(event.eventId)}
-                    >
-                      <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
-                        {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}
-                      </button>
-                      <div className="event-top mono">
-                        <span>{`#${event.index}`}</span>
-                        <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
-                        {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
-                        <span>{fmtTime(event.timestampMs)}</span>
+            {page ? (
+              <>
+                <section className="detail-summary-cards" aria-label="trace inspector summary cards">
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-head mono">
+                      <div className="detail-summary-title">tokens</div>
+                      <div className="detail-summary-value">
+                        {formatCompactNumber(page.summary.tokenTotals?.totalTokens ?? null)}
                       </div>
-                      <h3>{event.preview}</h3>
-                      {(event.toolName || event.functionName) && (
-                        <div className="mono subtle">
-                          {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
+                    </div>
+                    <div className="detail-summary-sub mono">
+                      {`in ${formatCompactNumber(page.summary.tokenTotals?.inputTokens ?? null)} · out ${formatCompactNumber(page.summary.tokenTotals?.outputTokens ?? null)}`}
+                    </div>
+                    <div className="detail-summary-sub mono">
+                      {`cr ${formatCompactNumber(page.summary.tokenTotals?.cachedReadTokens ?? null)} · cc ${formatCompactNumber(page.summary.tokenTotals?.cachedCreateTokens ?? null)}`}
+                    </div>
+                    <div className="detail-summary-sub mono">
+                      {`ctx ${formatPercent(page.summary.contextWindowPct ?? null)} · cost ${formatUsd(page.summary.costEstimateUsd ?? null)}`}
+                    </div>
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-head mono">
+                      <div className="detail-summary-title">models</div>
+                      <div className="detail-summary-value">{`${page.summary.modelTokenSharesTop?.length ?? 0} shown`}</div>
+                    </div>
+                    {(page.summary.modelTokenSharesTop ?? []).slice(0, 3).map((row) => (
+                      <div key={`${row.model}-${row.tokens}`} className="detail-summary-sub mono" title={row.model}>
+                        {`${row.model} ${formatPercent(row.percent, 1)}`}
+                      </div>
+                    ))}
+                    {page.summary.modelTokenSharesEstimated && <div className="detail-summary-note mono">estimated</div>}
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-head mono">
+                      <div className="detail-summary-title">tool calls</div>
+                      <div className="detail-summary-value">{formatCompactNumber(toolCallCountTotal)}</div>
+                    </div>
+                    {toolCallTypeCountRows.length > 0 ? (
+                      toolCallTypeCountRows.map((row, rowIndex) => (
+                        <div
+                          key={`tool-count-row-${rowIndex}`}
+                          className="detail-summary-sub mono"
+                          title={row.map((entry) => entry.toolType).join(", ")}
+                        >
+                          {row.map((entry) => `${entry.toolType} ${formatCompactNumber(entry.count)}`).join(" · ")}
                         </div>
-                      )}
-                      {expandedEventIds.has(event.eventId) && (
-                        <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-            </>
-          ) : (
-            <div className="empty">Pick a session to inspect.</div>
-          )}
+                      ))
+                    ) : (
+                      <div className="detail-summary-sub mono">types -</div>
+                    )}
+                    {hiddenToolCallTypeCount > 0 && (
+                      <div className="detail-summary-note mono">{`+${hiddenToolCallTypeCount} more types`}</div>
+                    )}
+                  </article>
+                </section>
+
+                <div className="events-scroll">
+                  {timelineEvents.map((event) => {
+                    const agentBadges = buildAgentBadges(event);
+                    return (
+                      <article
+                        key={event.eventId}
+                        id={domIdForEvent(event.eventId)}
+                        className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
+                        ref={bindEventCardRef(event.eventId)}
+                      >
+                        <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
+                          {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}
+                        </button>
+                        <div className="event-top mono">
+                          <span>{`#${event.index}`}</span>
+                          <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
+                          {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
+                          <span>{fmtTime(event.timestampMs)}</span>
+                        </div>
+                        <h3>{event.preview}</h3>
+                        {(event.toolName || event.functionName) && (
+                          <div className="mono subtle">
+                            {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
+                          </div>
+                        )}
+                        {agentBadges.length > 0 && (
+                          <div className="event-agent-badges mono">
+                            {agentBadges.map((badge) => (
+                              <span key={`${event.eventId}-${badge}`} className="event-agent-badge">
+                                {badge}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {expandedEventIds.has(event.eventId) && (
+                          <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <div className="empty">Pick a session to inspect.</div>
+            )}
         </section>
       </div>
 
-      <footer className="status mono">{status}</footer>
+      <footer className="status status-bar">
+        <span className="mono">{footerStatus}</span>
+        <div className="corner-links mono">
+          <a className="corner-handle" href="https://x.com/RobertTLange">
+            @RobertTLange
+          </a>
+          <a className="corner-handle corner-handle-icon-link" href="https://github.com/RobertTLange/agentlens">
+            <svg
+              className="corner-handle-icon"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                fill="currentColor"
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              />
+            </svg>
+            <span>agentlens</span>
+          </a>
+        </div>
+      </footer>
     </main>
   );
 }

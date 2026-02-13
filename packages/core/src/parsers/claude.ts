@@ -3,6 +3,40 @@ import type { DiscoveredTraceFile } from "../discovery.js";
 import { asArray, asRecord, asString, compactText, normalizePreview } from "../utils.js";
 import { eventKindFromRole, extractTextBlocks, guessTimestamp, makeEvent, parseJsonLines } from "./common.js";
 
+function normalizeToolType(rawName: string): string {
+  const normalized = rawName.trim().toLowerCase();
+  if (!normalized) return "";
+
+  const compact = normalized.replace(/[\s_-]+/g, "");
+  if (compact === "websearch") return "websearch";
+  if (compact === "webfetch") return "webfetch";
+  if (
+    compact === "execcommand" ||
+    compact === "shellcommand" ||
+    compact === "writestdin" ||
+    compact === "commandexecution"
+  ) {
+    return "bash";
+  }
+  if (compact === "applypatch") return "patch";
+  if (compact === "requestuserinput") return "input";
+  if (compact === "updateplan") return "plan";
+  if (compact === "viewimage") return "image";
+  if (compact === "multiedit") return "edit";
+  if (compact === "todoread" || compact === "todowrite") return "todo";
+  return normalized.replace(/\s+/g, "_");
+}
+
+function extractThinkingText(item: Record<string, unknown>): string {
+  const directThinking = compactText(item.thinking);
+  if (directThinking && directThinking !== "{}" && directThinking !== "[]") return directThinking;
+
+  const extractedText = extractTextBlocks([item]);
+  if (extractedText.length > 0) return compactText(extractedText.join("\n"));
+
+  return compactText(item.text || item.content);
+}
+
 export class ClaudeParser implements TraceParser {
   name = "claude";
   agent = "claude" as const;
@@ -25,6 +59,7 @@ export class ClaudeParser implements TraceParser {
   parse(file: DiscoveredTraceFile, text: string): ParseOutput {
     const rows = parseJsonLines(text);
     const events: ParseOutput["events"] = [];
+    const toolTypeByCallId = new Map<string, string>();
     let sessionId = "";
     let eventIndex = 1;
 
@@ -88,8 +123,12 @@ export class ClaudeParser implements TraceParser {
           if (itemType === "tool_use") {
             const toolName = asString(item.name) || asString(item.tool_name) || "tool";
             const toolCallId = asString(item.id || item.call_id || item.tool_use_id);
+            const toolType = normalizeToolType(toolName);
             const toolArgsText = compactText(item.input || item.arguments || item.params);
             const preview = normalizePreview(toolArgsText ? `${toolName}: ${toolArgsText}` : `tool ${toolName}`);
+            if (toolCallId && toolType) {
+              toolTypeByCallId.set(toolCallId, toolType);
+            }
 
             pushEvent(
               {
@@ -103,12 +142,13 @@ export class ClaudeParser implements TraceParser {
                 toolUseId: toolCallId,
                 toolCallId,
                 toolName,
+                toolType,
                 functionName: toolName,
                 toolArgsText,
                 parentToolUseId: asString(value.parent_tool_use_id || value.parentUuid),
                 parentEventId: asString(value.uuid || parentEventId),
                 tocLabel: `Tool: ${toolName}`,
-                searchChunks: [rawType, role, itemType, toolName, toolCallId, toolArgsText],
+                searchChunks: [rawType, role, itemType, toolName, toolCallId, toolType, toolArgsText],
                 raw: value,
               },
               contentOffset,
@@ -118,6 +158,8 @@ export class ClaudeParser implements TraceParser {
 
           if (itemType === "tool_result") {
             const toolCallId = asString(item.tool_use_id || item.call_id || item.id);
+            const toolName = asString(item.name || item.tool_name);
+            const toolType = normalizeToolType(toolName) || toolTypeByCallId.get(toolCallId) || "";
             const textBlocks = extractTextBlocks(item.content);
             const toolResultText = compactText(textBlocks.join("\n") || item.content || item.result || item.output);
             const isError =
@@ -138,12 +180,14 @@ export class ClaudeParser implements TraceParser {
                 textBlocks: toolResultText ? [toolResultText] : textBlocks,
                 toolUseId: toolCallId,
                 toolCallId,
+                toolName,
+                toolType,
                 toolResultText,
                 hasError: isError,
                 parentToolUseId: asString(value.parent_tool_use_id || value.parentUuid),
                 parentEventId: asString(value.uuid || parentEventId),
                 tocLabel: `Result: ${toolCallId || "tool"}`,
-                searchChunks: [rawType, role, itemType, toolCallId, toolResultText],
+                searchChunks: [rawType, role, itemType, toolCallId, toolType, toolResultText],
                 raw: value,
               },
               contentOffset,
@@ -151,8 +195,8 @@ export class ClaudeParser implements TraceParser {
             continue;
           }
 
-          if (itemType === "thinking") {
-            const thinkingText = compactText(item.text || item.content);
+          if (itemType === "thinking" || itemType === "redacted_thinking") {
+            const thinkingText = extractThinkingText(item);
             const preview = normalizePreview(thinkingText || "thinking");
             pushEvent(
               {
@@ -165,7 +209,7 @@ export class ClaudeParser implements TraceParser {
                 textBlocks: thinkingText ? [thinkingText] : [],
                 parentToolUseId: asString(value.parent_tool_use_id || value.parentUuid),
                 parentEventId: asString(value.uuid || parentEventId),
-                tocLabel: "Thinking",
+                tocLabel: thinkingText ? preview : "Thinking",
                 searchChunks: [rawType, role, itemType, thinkingText],
                 raw: value,
               },

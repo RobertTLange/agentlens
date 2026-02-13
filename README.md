@@ -38,6 +38,8 @@ It is designed for local analysis: no hosted backend required.
 - `waiting_input` is detected from structured markers first (status/type/phase-style fields), with text-pattern fallback.
 - `running` is detected from unmatched `tool_use` events or very recent trace activity.
 - `running` and `waiting_input` auto-degrade to `idle` after freshness TTL expiration.
+- Session sparkline `activityBins` now represent full session-lifetime activity shape (first timestamped event -> latest timestamped event), not just a trailing recent window.
+- `activityBinsMode` indicates how bins were derived: `time` (timestamp span) or `event_index` (fallback when timestamp span is unavailable).
 
 TTL settings live in config under `scan`:
 
@@ -147,6 +149,81 @@ sessionLogDirectories = [
 ```
 
 Source profiles are configurable under `[sources.*]` (roots, include/exclude globs, scan depth, agent hints).
+
+Trace inspector metrics/cost/redaction settings are also configurable:
+
+```toml
+[traceInspector]
+includeMetaDefault = false
+topModelCount = 3
+showAgentBadges = true
+showHealthDiagnostics = false
+
+[redaction]
+mode = "strict"
+alwaysOn = true
+replacement = "[REDACTED]"
+keyPattern = "(?i)(api[_-]?key|token|secret|password|private[_-]?key|access[_-]?key|auth|credential|cookie)"
+valuePattern = "(?i)(sk-[a-z0-9_-]+|ghp_[a-z0-9]+|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\\-_]{20,}|-----BEGIN [A-Z ]+ PRIVATE KEY-----)"
+
+[cost]
+enabled = true
+currency = "USD"
+unknownModelPolicy = "n_a"
+
+[[cost.modelRates]]
+model = "gpt-5.2-codex"
+inputPer1MUsd = 1.5
+cachedReadPer1MUsd = 0.375
+cachedCreatePer1MUsd = 0.375
+outputPer1MUsd = 6
+reasoningOutputPer1MUsd = 0
+
+[[cost.modelRates]]
+model = "gpt-5.3-codex"
+inputPer1MUsd = 1.5 # same as gpt-5.2-codex
+cachedReadPer1MUsd = 0.375
+cachedCreatePer1MUsd = 0.375
+outputPer1MUsd = 6
+reasoningOutputPer1MUsd = 0
+
+[[cost.modelRates]]
+model = "claude-opus-4-5-20251101"
+inputPer1MUsd = 5
+cachedReadPer1MUsd = 0.5
+cachedCreatePer1MUsd = 6.25 # using 5m cache-write rate
+outputPer1MUsd = 25
+reasoningOutputPer1MUsd = 0
+
+[[cost.modelRates]]
+model = "claude-sonnet-4-5-20250929"
+inputPer1MUsd = 3
+cachedReadPer1MUsd = 0.3
+cachedCreatePer1MUsd = 3.75 # using 5m cache-write rate
+outputPer1MUsd = 15
+reasoningOutputPer1MUsd = 0
+
+[[cost.modelRates]]
+model = "claude-haiku-4-5-20251001"
+inputPer1MUsd = 1
+cachedReadPer1MUsd = 0.1
+cachedCreatePer1MUsd = 1.25
+outputPer1MUsd = 5
+reasoningOutputPer1MUsd = 0
+
+[models]
+defaultContextWindowTokens = 200000
+# Claude defaults use standard 200K window (1M is beta via context-1m header).
+contextWindows = [
+  { model = "gpt-5.2-codex", contextWindowTokens = 400000 },
+  { model = "gpt-5.3-codex", contextWindowTokens = 400000 }, # same as gpt-5.2-codex
+  { model = "gpt-5.2", contextWindowTokens = 400000 },
+  { model = "claude-opus-4-5-20251101", contextWindowTokens = 200000 },
+  { model = "claude-opus-4-6", contextWindowTokens = 200000 },
+  { model = "claude-sonnet-4-5-20250929", contextWindowTokens = 200000 },
+  { model = "claude-haiku-4-5-20251001", contextWindowTokens = 200000 }
+]
+```
 
 ## Development
 

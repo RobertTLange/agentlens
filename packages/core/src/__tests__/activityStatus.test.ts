@@ -402,7 +402,7 @@ describe("trace activity status", () => {
     expect(stale?.activityReason).toBe("stale_timeout");
   });
 
-  it("returns flat activity bins when latest event is outside current activity window", async () => {
+  it("uses full session lifetime for time-based activity bins", async () => {
     const nowMs = Date.now();
     const staleMs = nowMs - 3 * 60 * 60_000;
     const summary = await loadSummaryForCodexLines(
@@ -425,72 +425,70 @@ describe("trace activity status", () => {
       { mtimeMs: staleMs },
     );
 
+    expect(summary.activityBinsMode).toBe("time");
+    expect(summary.activityBinCount).toBe(12);
+    expect(summary.activityWindowMinutes).toBeCloseTo(0.5, 6);
+    expect(summary.activityBinMinutes).toBeCloseTo(0.5 / 12, 6);
     expect(summary.activityBins).toHaveLength(12);
-    expect(summary.activityBins?.every((value) => value === 0)).toBe(true);
+    const bins = summary.activityBins ?? [];
+    expect(bins[0]).toBeGreaterThan(0);
+    expect(bins[bins.length - 1]).toBeGreaterThan(0);
   });
 
-  it("computes normalized activity bins for recent event density", async () => {
-    const anchorMs = Date.now();
+  it("preserves pause and resume periods in lifetime bins", async () => {
+    const anchorMs = Date.now() - 2 * 60 * 60_000;
     const summary = await loadSummaryForCodexLines(
       [
         JSON.stringify({
-          timestamp: new Date(anchorMs - 61 * 60_000).toISOString(),
+          timestamp: new Date(anchorMs).toISOString(),
           type: "session_meta",
           payload: { id: "activity-bin-test" },
         }),
         JSON.stringify({
-          timestamp: new Date(anchorMs - 58 * 60_000).toISOString(),
+          timestamp: new Date(anchorMs + 60_000).toISOString(),
           type: "response_item",
           payload: {
             type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "old but in range" }],
+            role: "user",
+            content: [{ type: "input_text", text: "start work" }],
           },
         }),
         JSON.stringify({
-          timestamp: new Date(anchorMs - 7 * 60_000).toISOString(),
+          timestamp: new Date(anchorMs + 56 * 60_000).toISOString(),
           type: "response_item",
           payload: {
             type: "message",
             role: "assistant",
-            content: [{ type: "output_text", text: "middle bin" }],
+            content: [{ type: "output_text", text: "resumed work" }],
           },
         }),
         JSON.stringify({
-          timestamp: new Date(anchorMs - 4 * 60_000).toISOString(),
+          timestamp: new Date(anchorMs + 57 * 60_000).toISOString(),
           type: "response_item",
           payload: {
             type: "message",
             role: "assistant",
-            content: [{ type: "output_text", text: "latest bin 1" }],
-          },
-        }),
-        JSON.stringify({
-          timestamp: new Date(anchorMs - 30_000).toISOString(),
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "latest bin 2" }],
+            content: [{ type: "output_text", text: "resumed work done" }],
           },
         }),
       ],
-      { mtimeMs: anchorMs },
+      { mtimeMs: anchorMs + 57 * 60_000 },
     );
 
+    expect(summary.activityBinsMode).toBe("time");
     expect(summary.activityBinCount).toBe(12);
-    expect(summary.activityWindowMinutes).toBe(60);
-    expect(summary.activityBinMinutes).toBe(5);
+    expect(summary.activityWindowMinutes).toBeCloseTo(57, 6);
+    expect(summary.activityBinMinutes).toBeCloseTo(57 / 12, 6);
     expect(summary.activityBins).toHaveLength(12);
     const bins = summary.activityBins ?? [];
     const peak = bins.reduce((max, value) => Math.max(max, value), 0);
     expect(peak).toBeCloseTo(1, 6);
-    expect(bins.filter((value) => value > 0).length).toBeGreaterThanOrEqual(2);
-    expect(bins.slice(0, 2).some((value) => value > 0)).toBe(true);
+    expect(bins[0]).toBeGreaterThan(0);
+    expect(bins.slice(3, 9).every((value) => value === 0)).toBe(true);
     expect(bins.slice(-2).some((value) => value > 0)).toBe(true);
   });
 
-  it("returns flat activity bins when events do not expose timestamps", async () => {
+  it("falls back to event-index bins when timestamp span is unavailable", async () => {
     const summary = await loadSummaryForCodexLines([
       JSON.stringify({
         type: "session_meta",
@@ -506,7 +504,11 @@ describe("trace activity status", () => {
       }),
     ]);
 
+    expect(summary.activityBinsMode).toBe("event_index");
+    expect(summary.activityWindowMinutes).toBeUndefined();
+    expect(summary.activityBinMinutes).toBeUndefined();
+    expect(summary.activityBinCount).toBe(12);
     expect(summary.activityBins).toHaveLength(12);
-    expect(summary.activityBins?.every((value) => value === 0)).toBe(true);
+    expect(summary.activityBins?.some((value) => value > 0)).toBe(true);
   });
 });

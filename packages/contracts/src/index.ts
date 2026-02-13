@@ -10,6 +10,64 @@ export type EventKind =
   | "meta";
 
 export type SessionActivityStatus = "running" | "waiting_input" | "idle";
+export type ActivityBinsMode = "time" | "event_index";
+export type CostUnknownModelPolicy = "n_a" | "zero";
+
+export interface TraceInspectorConfig {
+  includeMetaDefault: boolean;
+  topModelCount: number;
+  showAgentBadges: boolean;
+  showHealthDiagnostics: boolean;
+}
+
+export interface RedactionConfig {
+  mode: "strict" | "off";
+  alwaysOn: boolean;
+  replacement: string;
+  keyPattern: string;
+  valuePattern: string;
+}
+
+export interface CostModelRate {
+  model: string;
+  inputPer1MUsd: number;
+  outputPer1MUsd: number;
+  cachedReadPer1MUsd: number;
+  cachedCreatePer1MUsd: number;
+  reasoningOutputPer1MUsd: number;
+}
+
+export interface CostConfig {
+  enabled: boolean;
+  currency: string;
+  unknownModelPolicy: CostUnknownModelPolicy;
+  modelRates: CostModelRate[];
+}
+
+export interface ModelContextWindow {
+  model: string;
+  contextWindowTokens: number;
+}
+
+export interface ModelsConfig {
+  defaultContextWindowTokens: number;
+  contextWindows: ModelContextWindow[];
+}
+
+export interface TokenTotals {
+  inputTokens: number;
+  cachedReadTokens: number;
+  cachedCreateTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+}
+
+export interface ModelTokenShare {
+  model: string;
+  tokens: number;
+  percent: number;
+}
 
 export interface SourceProfileConfig {
   name: string;
@@ -36,6 +94,10 @@ export interface AppConfig {
   };
   sessionLogDirectories: SessionLogDirectoryConfig[];
   sources: Record<string, SourceProfileConfig>;
+  traceInspector: TraceInspectorConfig;
+  redaction: RedactionConfig;
+  cost: CostConfig;
+  models: ModelsConfig;
 }
 
 export interface NormalizedEvent {
@@ -87,9 +149,15 @@ export interface TraceSummary {
   activityStatus: SessionActivityStatus;
   activityReason: string;
   activityBins?: number[];
+  activityBinsMode?: ActivityBinsMode;
   activityWindowMinutes?: number;
   activityBinMinutes?: number;
   activityBinCount?: number;
+  tokenTotals?: TokenTotals;
+  modelTokenSharesTop?: ModelTokenShare[];
+  modelTokenSharesEstimated?: boolean;
+  contextWindowPct?: number | null;
+  costEstimateUsd?: number | null;
   eventKindCounts: Record<EventKind, number>;
 }
 

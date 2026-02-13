@@ -81,9 +81,25 @@ function makeTrace(
     activityStatus,
     activityReason: `fixture_${activityStatus}`,
     activityBins: [0, 0, 0.25, 0.4, 0.6, 0.5, 0.35, 0.2, 0.15, 0.3, 0.5, 0.8],
+    activityBinsMode: "time",
     activityWindowMinutes: 60,
     activityBinMinutes: 5,
     activityBinCount: 12,
+    tokenTotals: {
+      inputTokens: 1000,
+      cachedReadTokens: 300,
+      cachedCreateTokens: 200,
+      outputTokens: 400,
+      reasoningOutputTokens: 120,
+      totalTokens: 2020,
+    },
+    modelTokenSharesTop: [
+      { model: "gpt-5.3-codex", tokens: 1800, percent: 89.1089 },
+      { model: "gpt-5.2-codex", tokens: 220, percent: 10.8911 },
+    ],
+    modelTokenSharesEstimated: true,
+    contextWindowPct: 18.2,
+    costEstimateUsd: null,
     eventKindCounts: {
       system: 0,
       assistant: 1,
@@ -294,6 +310,44 @@ afterEach(() => {
 });
 
 describe("App sessions list live motion", () => {
+  it("renders hero title with lens emoji and sessions metric label", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const heroTitle = document.querySelector(".hero h1");
+    expect(heroTitle?.textContent).toBe("🔍 AgentLens");
+
+    const heroMetrics = Array.from(document.querySelectorAll(".hero-metrics span")).map((node) =>
+      node.textContent?.trim(),
+    );
+    expect(heroMetrics[0]).toBe("sessions 3");
+  });
+
+  it("shows last live update time in footer status", async () => {
+    const nowMs = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(nowMs);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("snapshot", { traces: Object.values(tracesById), overview });
+    });
+
+    const expectedTime = new Date(nowMs).toLocaleTimeString();
+    const expectedNewestEventTime = new Date(3_000).toLocaleTimeString();
+    await waitFor(() => {
+      const footer = document.querySelector("footer.status");
+      expect(footer?.textContent).toContain("Live: 3 traces");
+      expect(footer?.textContent).toContain(`updated ${expectedTime}`);
+      expect(footer?.textContent).toContain(`newest event ${expectedNewestEventTime}`);
+    });
+  });
+
   it("defaults include meta toggle to off in trace inspector", async () => {
     render(<App />);
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/"))).toBe(true));
@@ -312,6 +366,69 @@ describe("App sessions list live motion", () => {
     expect(includeMetaInput.checked).toBe(false);
     const traceRequestUrl = requestedUrls.find((url) => url.includes("/api/trace/"));
     expect(traceRequestUrl).toContain("include_meta=0");
+  });
+
+  it("renders trace inspector summary cards with token/model/tool data", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+
+    const cards = Array.from(document.querySelectorAll(".detail-summary-card"));
+    const labels = cards.map((card) => card.querySelector(".detail-summary-title")?.textContent?.trim());
+    expect(labels).toEqual(["tokens", "models", "tool calls"]);
+
+    expect(cards[0]?.textContent).toContain("out");
+    expect(cards[0]?.textContent).toContain("ctx");
+    expect(cards[0]?.textContent).toContain("cost N/A");
+    expect(cards[1]?.textContent).toContain("gpt-5.3-codex");
+    expect(cards[2]?.textContent).toContain("types -");
+    expect(cards[2]?.textContent).not.toContain("results");
+    expect(cards[2]?.textContent).not.toContain("unmatched");
+  });
+
+  it("shows N/A cost when summary cost estimate is unknown", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c fixture");
+    tracePagesById["trace-c"] = makeTracePage({
+      ...selectedTrace,
+      costEstimateUsd: null,
+    });
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+
+    const tokensCard = document.querySelector(".detail-summary-card");
+    expect(tokensCard?.textContent).toContain("cost N/A");
+  });
+
+  it("updates trace inspector header in real time and pulses when selected trace updates", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const initialMeta = document.querySelector(".detail-head-meta");
+    expect(initialMeta?.textContent).toContain("session-trace-c");
+    expect(initialMeta?.textContent).toContain("2 events");
+    expect(document.querySelector(".detail-head-title-block.pulse")).toBeNull();
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    const updatedSelected = {
+      ...makeTrace("trace-c", 9_500, "running"),
+      eventCount: 7,
+    };
+    tracesById["trace-c"] = updatedSelected;
+
+    act(() => {
+      source.emit("trace_updated", { summary: updatedSelected });
+    });
+
+    await waitFor(() => {
+      const nextMeta = document.querySelector(".detail-head-meta");
+      expect(nextMeta?.textContent).toContain("session-trace-c");
+      expect(nextMeta?.textContent).toContain("7 events");
+    });
+    expect(document.querySelector(".detail-head-title-block.pulse")).not.toBeNull();
   });
 
   it("shows running and waiting indicators from backend activity status", async () => {
@@ -460,12 +577,69 @@ describe("App sessions list live motion", () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
     await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
 
     const tocTag = document.querySelector(".toc-row .kind-tool-type");
     expect(tocTag?.textContent?.trim()).toBe("bash");
 
     const cardTag = document.querySelector(".event-card .event-top .kind-tool-type");
     expect(cardTag?.textContent?.trim()).toBe("bash");
+
+    const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
+    expect(toolCallsCard?.textContent).toContain("bash 1");
+  });
+
+  it("counts tool calls by type including web-search events", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const toolUseEvent: NormalizedEvent = {
+      ...makeEvent("event-tool-use", { signature: "tool use" }),
+      eventKind: "tool_use",
+      toolType: "bash",
+      toolCallId: "call-1",
+      toolUseId: "call-1",
+      preview: "run command",
+      tocLabel: "Tool: exec_command",
+      searchText: "tool use bash",
+    };
+
+    const toolResultEvent: NormalizedEvent = {
+      ...makeEvent("event-tool-result", { signature: "tool result" }),
+      eventKind: "tool_result",
+      toolType: "bash",
+      toolCallId: "call-1",
+      toolUseId: "call-1",
+      preview: "command output",
+      tocLabel: "Result: call-1",
+      searchText: "tool result bash",
+    };
+
+    const webSearchEvent: NormalizedEvent = {
+      ...makeEvent("event-web-search", { signature: "web search" }),
+      eventKind: "assistant",
+      rawType: "web_search_call",
+      toolType: "web:search",
+      preview: "search docs",
+      tocLabel: "Web: search",
+      searchText: "web search",
+    };
+
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [toolUseEvent, toolResultEvent, webSearchEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+
+    const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
+    const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
+    expect(toolCallsValue).toBe("2");
+    expect(toolCallsCard?.textContent).toContain("bash 1");
+    expect(toolCallsCard?.textContent).toContain("web:search 1");
+    const toolCallRows = toolCallsCard ? Array.from(toolCallsCard.querySelectorAll(".detail-summary-sub")) : [];
+    expect(toolCallRows).toHaveLength(1);
+    expect(toolCallRows[0]?.textContent).toContain("bash 1 · web:search 1");
+    expect(toolCallsCard?.textContent).not.toContain("results");
+    expect(toolCallsCard?.textContent).not.toContain("unmatched");
   });
 
   it("does not render snippet text under the event header preview", async () => {
@@ -486,7 +660,10 @@ describe("App sessions list live motion", () => {
     tracesById = {
       "trace-a": makeTrace("trace-a", 10_000, "running"),
       "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
-      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+      "trace-c": {
+        ...makeTrace("trace-c", 30_000, "idle"),
+        activityBinsMode: "event_index",
+      },
     };
     tracePagesById = Object.fromEntries(
       Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
@@ -498,18 +675,107 @@ describe("App sessions list live motion", () => {
     const runningSparkline = getTraceRow("trace-a").querySelector(".trace-activity-sparkline");
     expect(runningSparkline?.getAttribute("class")).toContain("status-running");
     expect(runningSparkline?.getAttribute("data-point-count")).toBe("12");
-    expect(runningSparkline?.getAttribute("aria-label")).toContain("Activity trend:");
+    expect(runningSparkline?.getAttribute("data-mode")).toBe("time");
+    expect(runningSparkline?.getAttribute("aria-label")).toContain("session lifetime");
 
     const waitingSparkline = getTraceRow("trace-b").querySelector(".trace-activity-sparkline");
     expect(waitingSparkline?.getAttribute("class")).toContain("status-waiting");
 
     const idleSparkline = getTraceRow("trace-c").querySelector(".trace-activity-sparkline");
     expect(idleSparkline?.getAttribute("class")).toContain("status-idle");
+    expect(idleSparkline?.getAttribute("data-mode")).toBe("event_index");
+    expect(idleSparkline?.getAttribute("aria-label")).toContain("event-order density fallback");
+  });
+
+  it("renders composition pie with assistant/user/tool proportions and combined tool counts", async () => {
+    tracesById = {
+      "trace-a": {
+        ...makeTrace("trace-a", 10_000, "running"),
+        eventKindCounts: {
+          system: 0,
+          assistant: 6,
+          user: 3,
+          tool_use: 1,
+          tool_result: 2,
+          reasoning: 0,
+          meta: 0,
+        },
+      },
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const pie = getTraceRow("trace-a").querySelector(".trace-composition-pie");
+    expect(pie).toBeTruthy();
+    expect(pie?.getAttribute("data-assistant-count")).toBe("6");
+    expect(pie?.getAttribute("data-user-count")).toBe("3");
+    expect(pie?.getAttribute("data-tool-use-count")).toBe("1");
+    expect(pie?.getAttribute("data-tool-result-count")).toBe("2");
+    expect(pie?.getAttribute("aria-label")).toContain("assistant 50%");
+    expect(pie?.getAttribute("aria-label")).toContain("user 25%");
+    expect(pie?.getAttribute("aria-label")).toContain("tool use 8%");
+    expect(pie?.getAttribute("aria-label")).toContain("tool result 17%");
+
+    const tooltip = getTraceRow("trace-a").querySelector(".trace-composition-tooltip");
+    expect(tooltip?.textContent).toContain("Assistant: 6 (50%)");
+    expect(tooltip?.textContent).toContain("User: 3 (25%)");
+    expect(tooltip?.textContent).toContain("Tool use: 1 (8%)");
+    expect(tooltip?.textContent).toContain("Tool result: 2 (17%)");
+    expect(tooltip?.textContent).toContain("Total: 12");
+
+    const slices = getTraceRow("trace-a").querySelectorAll(".trace-composition-slice");
+    expect(slices).toHaveLength(4);
+
+    const graphWrap = getTraceRow("trace-a").querySelector(".trace-time-graph-wrap");
+    expect(graphWrap?.firstElementChild?.classList.contains("trace-composition-wrap")).toBe(true);
+    expect(graphWrap?.lastElementChild?.classList.contains("trace-activity-sparkline")).toBe(true);
+  });
+
+  it("renders empty composition pie state when no user/assistant/tool events are present", async () => {
+    tracesById = {
+      "trace-a": makeTrace("trace-a", 10_000, "running"),
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": {
+        ...makeTrace("trace-c", 30_000, "idle"),
+        eventKindCounts: {
+          system: 1,
+          assistant: 0,
+          user: 0,
+          tool_use: 0,
+          tool_result: 0,
+          reasoning: 2,
+          meta: 1,
+        },
+      },
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const row = getTraceRow("trace-c");
+    const pie = row.querySelector(".trace-composition-pie");
+    expect(pie?.getAttribute("data-total")).toBe("0");
+    expect(pie?.getAttribute("aria-label")).toContain("no user, assistant, tool use, or tool result events yet");
+    expect(row.querySelector(".trace-composition-tooltip")?.textContent).toContain(
+      "No user, assistant, tool use, or tool result events yet.",
+    );
+    expect(row.querySelector(".trace-composition-empty")).toBeTruthy();
+    expect(row.querySelectorAll(".trace-composition-slice")).toHaveLength(0);
   });
 
   it("falls back to flat sparkline when activity bins are missing or invalid", async () => {
     const traceMissingBins = makeTrace("trace-a", 10_000, "idle");
     delete traceMissingBins.activityBins;
+    delete traceMissingBins.activityBinsMode;
     delete traceMissingBins.activityWindowMinutes;
     delete traceMissingBins.activityBinMinutes;
     delete traceMissingBins.activityBinCount;
@@ -535,7 +801,28 @@ describe("App sessions list live motion", () => {
 
     const invalidSparkline = getTraceRow("trace-b").querySelector(".trace-activity-sparkline");
     expect(invalidSparkline?.getAttribute("data-flat")).toBe("false");
-    expect(invalidSparkline?.getAttribute("data-point-count")).toBe("12");
+    expect(invalidSparkline?.getAttribute("data-point-count")).toBe("2");
+  });
+
+  it("adds hover section tooltips on activity sparkline bins", async () => {
+    tracesById = {
+      "trace-a": makeTrace("trace-a", 10_000, "running"),
+      "trace-b": makeTrace("trace-b", 20_000, "waiting_input"),
+      "trace-c": makeTrace("trace-c", 30_000, "idle"),
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const sparkline = getTraceRow("trace-a").querySelector(".trace-activity-sparkline");
+    const hoverZones = sparkline?.querySelectorAll(".trace-activity-hover-zone");
+    expect(hoverZones?.length).toBe(12);
+    const firstTooltip = hoverZones?.[0]?.querySelector("title")?.textContent ?? "";
+    expect(firstTooltip).toContain("Activity");
+    expect(firstTooltip).toContain("to");
   });
 
   it("pulses matching rows for trace updates and trace additions", async () => {

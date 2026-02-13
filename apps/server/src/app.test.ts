@@ -53,6 +53,21 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
       statusWaitingTtlMs: 300_000,
     },
     sessionLogDirectories: [],
+    cost: {
+      enabled: true,
+      currency: "USD",
+      unknownModelPolicy: "n_a",
+      modelRates: [
+        {
+          model: "gpt-5.3-codex",
+          inputPer1MUsd: 1,
+          outputPer1MUsd: 1,
+          cachedReadPer1MUsd: 1,
+          cachedCreatePer1MUsd: 1,
+          reasoningOutputPer1MUsd: 1,
+        },
+      ],
+    },
     sources: {
       codex_home: {
         name: "codex_home",
@@ -146,11 +161,18 @@ describe("server api", () => {
     const configPatch = await server.inject({
       method: "POST",
       url: "/api/config",
-      payload: { scan: { intervalSeconds: 3 } },
+      payload: { scan: { intervalSeconds: 3 }, cost: { enabled: false } },
     });
     expect(configPatch.statusCode).toBe(200);
-    const configPayload = configPatch.json() as { config: { scan: { intervalSeconds: number } } };
+    const configPayload = configPatch.json() as {
+      config: {
+        scan: { intervalSeconds: number };
+        cost: { enabled: boolean; modelRates: Array<{ model: string }> };
+      };
+    };
     expect(configPayload.config.scan.intervalSeconds).toBe(3);
+    expect(configPayload.config.cost.enabled).toBe(false);
+    expect(configPayload.config.cost.modelRates[0]?.model).toBe("gpt-5.3-codex");
 
     await server.close();
   });

@@ -13,6 +13,23 @@ export interface CreateServerOptions {
   enableStatic?: boolean;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMergeConfig(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const baseValue = out[key];
+    if (isPlainObject(baseValue) && isPlainObject(value)) {
+      out[key] = deepMergeConfig(baseValue, value);
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
 export function resolveDefaultWebDistPath(packagedWebDistPath: string, monorepoWebDistPath: string): string {
   if (existsSync(monorepoWebDistPath)) {
     return monorepoWebDistPath;
@@ -80,7 +97,11 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
   server.post("/api/config", async (request) => {
     const body = request.body as Partial<AppConfig>;
-    const merged = mergeConfig({ ...traceIndex.getConfig(), ...body });
+    const mergedInput = deepMergeConfig(
+      traceIndex.getConfig() as unknown as Record<string, unknown>,
+      (body ?? {}) as Record<string, unknown>,
+    ) as Partial<AppConfig>;
+    const merged = mergeConfig(mergedInput);
     await saveConfig(merged, configPath);
     traceIndex.setConfig(merged);
     await traceIndex.refresh();
