@@ -38,6 +38,8 @@ It is designed for local analysis: no hosted backend required.
 - `waiting_input` is detected from structured markers first (status/type/phase-style fields), with text-pattern fallback.
 - `running` is detected from unmatched `tool_use` events or very recent trace activity.
 - `running` and `waiting_input` auto-degrade to `idle` after freshness TTL expiration.
+- Session sparkline `activityBins` now represent full session-lifetime activity shape (first timestamped event -> latest timestamped event), not just a trailing recent window.
+- `activityBinsMode` indicates how bins were derived: `time` (timestamp span) or `event_index` (fallback when timestamp span is unavailable).
 
 TTL settings live in config under `scan`:
 

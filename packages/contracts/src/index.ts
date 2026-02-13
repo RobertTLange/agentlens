@@ -10,6 +10,7 @@ export type EventKind =
   | "meta";
 
 export type SessionActivityStatus = "running" | "waiting_input" | "idle";
+export type ActivityBinsMode = "time" | "event_index";
 
 export interface SourceProfileConfig {
   name: string;
@@ -87,6 +88,7 @@ export interface TraceSummary {
   activityStatus: SessionActivityStatus;
   activityReason: string;
   activityBins?: number[];
+  activityBinsMode?: ActivityBinsMode;
   activityWindowMinutes?: number;
   activityBinMinutes?: number;
   activityBinCount?: number;
