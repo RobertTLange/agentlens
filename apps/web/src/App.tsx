@@ -852,6 +852,7 @@ export function App(): JSX.Element {
                   isPathExpanded={isPathExpanded}
                   isEntering={enteringTraceIds.has(trace.id)}
                   pulseSeq={pulseSeq}
+                  nowMs={clockNowMs}
                   onSelect={setSelectedId}
                   onTogglePath={toggleTracePathExpanded}
                   rowRef={bindTraceRowRef(trace.id)}

@@ -534,6 +534,42 @@ body {
   height: 18px;
 }
 
+.trace-last-event-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid #bfdbfe;
+  background: #dbeafe;
+  color: #1e3a8a;
+  font-size: 0.62rem;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.trace-last-event-chip.status-running {
+  border-color: #99f6e4;
+  background: #ccfbf1;
+  color: #0f766e;
+}
+
+.trace-last-event-chip.status-waiting {
+  border-color: #fde68a;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.trace-last-event-chip.status-idle {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #334155;
+}
+
 .trace-activity-sparkline {
   display: block;
   width: 56px;

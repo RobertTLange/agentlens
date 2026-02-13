@@ -560,6 +560,44 @@ describe("App sessions list live motion", () => {
     expect(getTocTimestampByIndex(10)).toBe("-");
   });
 
+  it("renders compact last-event age chips beside the composition pie", async () => {
+    const anchorMs = 2_000_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(anchorMs);
+
+    tracesById = {
+      "trace-a": {
+        ...makeTrace("trace-a", anchorMs - 60_000, "running"),
+        lastEventTs: anchorMs - 60_000,
+      },
+      "trace-b": {
+        ...makeTrace("trace-b", anchorMs - 3_600_000, "waiting_input"),
+        lastEventTs: anchorMs - 3_600_000,
+      },
+      "trace-c": {
+        ...makeTrace("trace-c", anchorMs - 9_000, "idle"),
+        lastEventTs: anchorMs - 9_000,
+      },
+    };
+    tracePagesById = Object.fromEntries(
+      Object.values(tracesById).map((summary) => [summary.id, makeTracePage(summary)]),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const minuteChip = getTraceRow("trace-a").querySelector(".trace-last-event-chip");
+    expect(minuteChip?.textContent?.trim()).toBe("1m");
+    expect(minuteChip?.getAttribute("title")).toContain("1 minute ago");
+
+    const hourChip = getTraceRow("trace-b").querySelector(".trace-last-event-chip");
+    expect(hourChip?.textContent?.trim()).toBe("1h");
+    expect(hourChip?.getAttribute("title")).toContain("1 hour ago");
+
+    const nowChip = getTraceRow("trace-c").querySelector(".trace-last-event-chip");
+    expect(nowChip?.textContent?.trim()).toBe("now");
+    expect(nowChip?.getAttribute("title")).toContain("just now");
+  });
+
   it("renders tool-type tags in TOC rows and trace inspector cards", async () => {
     const selectedTrace = tracesById["trace-c"];
     if (!selectedTrace) throw new Error("missing trace-c test fixture");
@@ -733,8 +771,10 @@ describe("App sessions list live motion", () => {
     expect(slices).toHaveLength(4);
 
     const graphWrap = getTraceRow("trace-a").querySelector(".trace-time-graph-wrap");
-    expect(graphWrap?.firstElementChild?.classList.contains("trace-composition-wrap")).toBe(true);
-    expect(graphWrap?.lastElementChild?.classList.contains("trace-activity-sparkline")).toBe(true);
+    const graphChildren = graphWrap ? Array.from(graphWrap.children) : [];
+    expect(graphChildren[0]?.classList.contains("trace-last-event-chip")).toBe(true);
+    expect(graphChildren[1]?.classList.contains("trace-composition-wrap")).toBe(true);
+    expect(graphChildren[2]?.classList.contains("trace-activity-sparkline")).toBe(true);
   });
 
   it("renders empty composition pie state when no user/assistant/tool events are present", async () => {
