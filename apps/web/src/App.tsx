@@ -938,9 +938,11 @@ export function App(): JSX.Element {
               <>
                 <section className="detail-summary-cards" aria-label="trace inspector summary cards">
                   <article className="detail-summary-card">
-                    <div className="detail-summary-title mono">tokens</div>
-                    <div className="detail-summary-value mono">
-                      {formatCompactNumber(page.summary.tokenTotals?.totalTokens ?? null)}
+                    <div className="detail-summary-head mono">
+                      <div className="detail-summary-title">tokens</div>
+                      <div className="detail-summary-value">
+                        {formatCompactNumber(page.summary.tokenTotals?.totalTokens ?? null)}
+                      </div>
                     </div>
                     <div className="detail-summary-sub mono">
                       {`in ${formatCompactNumber(page.summary.tokenTotals?.inputTokens ?? null)} · out ${formatCompactNumber(page.summary.tokenTotals?.outputTokens ?? null)}`}
@@ -953,8 +955,10 @@ export function App(): JSX.Element {
                     </div>
                   </article>
                   <article className="detail-summary-card">
-                    <div className="detail-summary-title mono">models</div>
-                    <div className="detail-summary-value mono">{`${page.summary.modelTokenSharesTop?.length ?? 0} shown`}</div>
+                    <div className="detail-summary-head mono">
+                      <div className="detail-summary-title">models</div>
+                      <div className="detail-summary-value">{`${page.summary.modelTokenSharesTop?.length ?? 0} shown`}</div>
+                    </div>
                     {(page.summary.modelTokenSharesTop ?? []).slice(0, 3).map((row) => (
                       <div key={`${row.model}-${row.tokens}`} className="detail-summary-sub mono" title={row.model}>
                         {`${row.model} ${formatPercent(row.percent, 1)}`}
@@ -963,8 +967,10 @@ export function App(): JSX.Element {
                     {page.summary.modelTokenSharesEstimated && <div className="detail-summary-note mono">estimated</div>}
                   </article>
                   <article className="detail-summary-card">
-                    <div className="detail-summary-title mono">tool calls</div>
-                    <div className="detail-summary-value mono">{formatCompactNumber(toolCallCountTotal)}</div>
+                    <div className="detail-summary-head mono">
+                      <div className="detail-summary-title">tool calls</div>
+                      <div className="detail-summary-value">{formatCompactNumber(toolCallCountTotal)}</div>
+                    </div>
                     {toolCallTypeCountRows.length > 0 ? (
                       toolCallTypeCountRows.map((row, rowIndex) => (
                         <div

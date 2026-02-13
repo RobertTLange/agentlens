@@ -840,6 +840,13 @@ body {
   gap: 4px;
 }
 
+.detail-summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .detail-summary-title {
   color: #475569;
   font-size: 0.68rem;
@@ -850,6 +857,7 @@ body {
 .detail-summary-value {
   font-size: 0.95rem;
   color: #0f172a;
+  white-space: nowrap;
 }
 
 .detail-summary-sub {
