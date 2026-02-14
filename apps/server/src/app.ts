@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
-import type { AppConfig, TraceSummary } from "@agentlens/contracts";
+import type { AppConfig, SessionDetail, TraceSummary } from "@agentlens/contracts";
 import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 
 const execFileAsync = promisify(execFile);
@@ -18,6 +19,7 @@ type StopSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
 interface StopTraceSessionOptions {
   force?: boolean;
   requesterPid?: number;
+  sessionCwd?: string;
 }
 
 interface StopTraceSessionResult {
@@ -33,6 +35,32 @@ type StopTraceSessionHandler = (
   options: StopTraceSessionOptions,
 ) => Promise<StopTraceSessionResult>;
 
+interface OpenTraceSessionOptions {
+  requesterPid?: number;
+  sessionCwd?: string;
+}
+
+interface TmuxPaneTarget {
+  tmuxSession: string;
+  windowIndex: number;
+  paneIndex: number;
+}
+
+interface OpenTraceSessionResult {
+  status: "focused_pane" | "ghostty_activated" | "not_resolvable" | "failed";
+  reason: string;
+  pid: number | null;
+  tty: string;
+  target: TmuxPaneTarget | null;
+  matchedPids: number[];
+  alivePids: number[];
+}
+
+type OpenTraceSessionHandler = (
+  summary: TraceSummary,
+  options: OpenTraceSessionOptions,
+) => Promise<OpenTraceSessionResult>;
+
 interface OpenFileProcess {
   pid: number;
   command: string;
@@ -47,12 +75,39 @@ interface RunningProcess {
 
 interface CurrentUserIdentity { username: string; uid: string }
 
+interface TmuxPaneInfo {
+  socketPath: string;
+  tmuxSession: string;
+  windowIndex: number;
+  paneIndex: number;
+  paneTty: string;
+}
+
+interface TmuxPaneLookupResult {
+  panes: TmuxPaneInfo[];
+  scannedSockets: string[];
+}
+
+interface TmuxClientInfo {
+  tty: string;
+  activityEpoch: number;
+  sessionName: string;
+  flags: string[];
+  isFocused: boolean;
+}
+
+interface SessionProcessResolution {
+  matchedPids: number[];
+  alivePids: number[];
+}
+
 export interface CreateServerOptions {
   traceIndex: TraceIndex;
   configPath?: string;
   webDistPath?: string;
   enableStatic?: boolean;
   stopTraceSession?: StopTraceSessionHandler;
+  openTraceSession?: OpenTraceSessionHandler;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -80,6 +135,21 @@ function delay(ms: number): Promise<void> {
 
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function asSessionCwd(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function inferSessionCwd(detail: SessionDetail): string {
+  for (const event of detail.events) {
+    if (event.rawType !== "session_meta") continue;
+    const rawPayload = (event.raw as { payload?: unknown }).payload;
+    if (!rawPayload || typeof rawPayload !== "object") continue;
+    const cwd = asSessionCwd((rawPayload as { cwd?: unknown }).cwd);
+    if (cwd) return cwd;
+  }
+  return "";
 }
 
 function isNoOpenFileMatchError(error: unknown): boolean {
@@ -179,6 +249,296 @@ async function listProcessCwd(pid: number): Promise<string> {
   }
 }
 
+function normalizeTtyPath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "?") return "";
+  return trimmed.startsWith("/dev/") ? trimmed : `/dev/${trimmed.replace(/^\/+/, "")}`;
+}
+
+async function listProcessTty(pid: number): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "tty="], {
+      maxBuffer: 64 * 1_024,
+    });
+    return normalizeTtyPath(stdout);
+  } catch {
+    return "";
+  }
+}
+
+function tmuxArgs(socketPath: string, args: string[]): string[] {
+  if (!socketPath) return args;
+  return ["-S", socketPath, ...args];
+}
+
+async function runTmux(socketPath: string, args: string[], maxBuffer = 64 * 1_024): Promise<string> {
+  const { stdout } = await execFileAsync("tmux", tmuxArgs(socketPath, args), {
+    maxBuffer,
+  });
+  return stdout;
+}
+
+function parseTmuxPanes(output: string, socketPath: string): TmuxPaneInfo[] {
+  const panes: TmuxPaneInfo[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [tmuxSession = "", windowIndexRaw = "", paneIndexRaw = "", paneTtyRaw = ""] = line.split("\t");
+    const windowIndex = Number.parseInt(windowIndexRaw, 10);
+    const paneIndex = Number.parseInt(paneIndexRaw, 10);
+    const paneTty = normalizeTtyPath(paneTtyRaw);
+    if (!tmuxSession || !Number.isInteger(windowIndex) || !Number.isInteger(paneIndex) || !paneTty) continue;
+    panes.push({
+      socketPath,
+      tmuxSession,
+      windowIndex,
+      paneIndex,
+      paneTty,
+    });
+  }
+  return panes;
+}
+
+export function parseTmuxClients(output: string): TmuxClientInfo[] {
+  const clients: TmuxClientInfo[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [ttyRaw = "", activityRaw = "", sessionName = "", flagsRaw = ""] = line.split("\t");
+    const tty = normalizeTtyPath(ttyRaw);
+    if (!tty) continue;
+    const activityEpoch = Number.parseInt(activityRaw, 10);
+    const flags = flagsRaw
+      .split(",")
+      .map((flag) => flag.trim())
+      .filter(Boolean);
+    clients.push({
+      tty,
+      activityEpoch: Number.isFinite(activityEpoch) ? activityEpoch : 0,
+      sessionName: sessionName.trim(),
+      flags,
+      isFocused: flags.includes("focused"),
+    });
+  }
+  return clients;
+}
+
+export function selectPreferredTmuxClient(clients: TmuxClientInfo[], targetSession: string): TmuxClientInfo | null {
+  if (clients.length === 0) return null;
+  const sorted = [...clients].sort((left, right) => {
+    if (right.isFocused !== left.isFocused) return Number(right.isFocused) - Number(left.isFocused);
+    if (right.activityEpoch !== left.activityEpoch) return right.activityEpoch - left.activityEpoch;
+    return left.tty.localeCompare(right.tty);
+  });
+  const normalizedTargetSession = targetSession.trim();
+  if (!normalizedTargetSession) return sorted[0] ?? null;
+  const focusedSwitchingCandidate = sorted.find(
+    (client) => client.isFocused && client.sessionName !== normalizedTargetSession,
+  );
+  if (focusedSwitchingCandidate) return focusedSwitchingCandidate;
+  const focusedCandidate = sorted.find((client) => client.isFocused);
+  if (focusedCandidate) return focusedCandidate;
+  const switchingCandidate = sorted.find((client) => client.sessionName !== normalizedTargetSession);
+  return switchingCandidate ?? sorted[0] ?? null;
+}
+
+function orderTmuxClientsForSwitch(clients: TmuxClientInfo[], preferredClient: TmuxClientInfo): TmuxClientInfo[] {
+  const byTty = new Map<string, TmuxClientInfo>();
+  for (const client of clients) {
+    if (!client.tty) continue;
+    byTty.set(client.tty, client);
+  }
+  const sorted = Array.from(byTty.values()).sort((left, right) => {
+    if (right.isFocused !== left.isFocused) return Number(right.isFocused) - Number(left.isFocused);
+    if (right.activityEpoch !== left.activityEpoch) return right.activityEpoch - left.activityEpoch;
+    return left.tty.localeCompare(right.tty);
+  });
+  const preferredIndex = sorted.findIndex((candidate) => candidate.tty === preferredClient.tty);
+  if (preferredIndex > 0) {
+    const [candidate] = sorted.splice(preferredIndex, 1);
+    if (candidate) sorted.unshift(candidate);
+  }
+  return sorted;
+}
+
+function discoverTmuxSocketPaths(identity: CurrentUserIdentity): string[] {
+  const candidates = new Set<string>();
+  const bases = [`/tmp/tmux-${identity.uid}`, `/private/tmp/tmux-${identity.uid}`];
+  for (const base of bases) {
+    if (!identity.uid || !existsSync(base)) continue;
+    try {
+      for (const entry of readdirSync(base)) {
+        const socketPath = path.join(base, entry);
+        candidates.add(socketPath);
+      }
+    } catch {
+      // Ignore unreadable socket directories.
+    }
+  }
+  if (candidates.size === 0) {
+    candidates.add("");
+  }
+  return Array.from(candidates.values());
+}
+
+async function listTmuxPanes(identity: CurrentUserIdentity): Promise<TmuxPaneLookupResult> {
+  const scannedSockets = discoverTmuxSocketPaths(identity);
+  const panes: TmuxPaneInfo[] = [];
+  for (const socketPath of scannedSockets) {
+    try {
+      const stdout = await runTmux(
+        socketPath,
+        ["list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_tty}"],
+        512 * 1_024,
+      );
+      panes.push(...parseTmuxPanes(stdout, socketPath));
+    } catch {
+      // Ignore stale/non-running tmux sockets.
+    }
+  }
+  return {
+    panes,
+    scannedSockets,
+  };
+}
+
+async function listTmuxClients(socketPath: string): Promise<TmuxClientInfo[]> {
+  try {
+    const stdout = await runTmux(
+      socketPath,
+      ["list-clients", "-F", "#{client_tty}\t#{client_activity}\t#{session_name}\t#{client_flags}"],
+      128 * 1_024,
+    );
+    return parseTmuxClients(stdout);
+  } catch {
+    return [];
+  }
+}
+
+async function listTmuxClientsWithFocusWarmup(socketPath: string): Promise<TmuxClientInfo[]> {
+  const initialClients = await listTmuxClients(socketPath);
+  if (initialClients.some((client) => client.isFocused)) {
+    return initialClients;
+  }
+  await delay(120);
+  const warmedClients = await listTmuxClients(socketPath);
+  return warmedClients.length > 0 ? warmedClients : initialClients;
+}
+
+async function focusTmuxPane(target: TmuxPaneInfo): Promise<{
+  focusedClient: string;
+  previousSession: string;
+  switchedClients: string[];
+  preferredWasFocused: boolean;
+}> {
+  const clients = await listTmuxClientsWithFocusWarmup(target.socketPath);
+  const preferredClient = selectPreferredTmuxClient(clients, target.tmuxSession);
+  if (!preferredClient) {
+    throw new Error("no attached tmux clients");
+  }
+
+  await runTmux(target.socketPath, ["select-window", "-t", `${target.tmuxSession}:${target.windowIndex}`]);
+  await runTmux(target.socketPath, ["select-pane", "-t", `${target.tmuxSession}:${target.windowIndex}.${target.paneIndex}`]);
+  const orderedClients = orderTmuxClientsForSwitch(clients, preferredClient);
+  const switchedClients: string[] = [];
+  for (const client of orderedClients) {
+    try {
+      await runTmux(target.socketPath, ["switch-client", "-c", client.tty, "-t", target.tmuxSession]);
+      await runTmux(target.socketPath, ["refresh-client", "-t", client.tty]);
+      switchedClients.push(client.tty);
+    } catch {
+      // Ignore clients that disappear while switching.
+    }
+  }
+  if (switchedClients.length === 0) {
+    throw new Error("failed to switch any attached tmux client");
+  }
+  return {
+    focusedClient: preferredClient.tty,
+    previousSession: preferredClient.sessionName,
+    switchedClients,
+    preferredWasFocused: preferredClient.isFocused,
+  };
+}
+
+function isGhosttyFrontmost(name: string): boolean {
+  return name.trim().toLowerCase().includes("ghostty");
+}
+
+async function frontmostAppName(): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(
+      "osascript",
+      ["-e", 'tell application "System Events" to get name of first process whose frontmost is true'],
+      {
+        maxBuffer: 64 * 1_024,
+      },
+    );
+    return stdout.trim();
+  } catch {
+    return "";
+  }
+}
+
+async function waitForGhosttyFrontmost(): Promise<string> {
+  let observed = "";
+  for (let index = 0; index < 4; index += 1) {
+    observed = await frontmostAppName();
+    if (isGhosttyFrontmost(observed)) return observed;
+    await delay(80);
+  }
+  return observed;
+}
+
+async function activateGhostty(): Promise<{ method: string; frontmostApp: string }> {
+  const strategies: Array<{ method: string; run: () => Promise<void> }> = [
+    {
+      method: "app_id_activate",
+      run: async () => {
+        await execFileAsync("osascript", ["-e", 'tell application id "com.mitchellh.ghostty" to activate'], {
+          maxBuffer: 64 * 1_024,
+        });
+      },
+    },
+    {
+      method: "app_name_activate",
+      run: async () => {
+        await execFileAsync("osascript", ["-e", 'tell application "Ghostty" to activate'], {
+          maxBuffer: 64 * 1_024,
+        });
+      },
+    },
+    {
+      method: "open_app",
+      run: async () => {
+        await execFileAsync("open", ["-a", "Ghostty"], {
+          maxBuffer: 64 * 1_024,
+        });
+      },
+    },
+  ];
+
+  let lastError = "";
+  let lastFrontmost = "";
+  for (const strategy of strategies) {
+    try {
+      await strategy.run();
+      const frontmost = await waitForGhosttyFrontmost();
+      if (isGhosttyFrontmost(frontmost)) {
+        return {
+          method: strategy.method,
+          frontmostApp: frontmost,
+        };
+      }
+      lastFrontmost = frontmost;
+    } catch (error) {
+      lastError = asErrorMessage(error);
+    }
+  }
+
+  const frontmost = lastFrontmost || (await frontmostAppName()) || "unknown";
+  const suffix = lastError ? `; last activation error: ${lastError}` : "";
+  throw new Error(`Ghostty did not become frontmost (frontmost: ${frontmost}${suffix})`);
+}
+
 function currentUserIdentity(): CurrentUserIdentity {
   try {
     const userInfo = os.userInfo();
@@ -232,6 +592,13 @@ interface ClaudeCandidateProcess {
   cwd: string;
 }
 
+interface AgentCandidateProcess {
+  pid: number;
+  user: string;
+  args: string;
+  cwd: string;
+}
+
 export function selectClaudeProjectProcessPids(
   summary: Pick<TraceSummary, "path" | "sessionId">,
   processes: ClaudeCandidateProcess[],
@@ -267,6 +634,42 @@ export function selectClaudeProjectProcessPids(
   return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
 }
 
+export function selectAgentProjectProcessPids(
+  processCwd: string,
+  sessionId: string,
+  agent: TraceSummary["agent"],
+  processes: AgentCandidateProcess[],
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): number[] {
+  const projectKey = claudeProjectKeyFromCwd(processCwd);
+  if (!projectKey) return [];
+
+  const sameUserAgentCandidates = processes.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, agent);
+  });
+  if (sameUserAgentCandidates.length === 0) return [];
+
+  const projectCandidates = sameUserAgentCandidates.filter(
+    (processInfo) => claudeProjectKeyFromCwd(processInfo.cwd) === projectKey,
+  );
+  if (projectCandidates.length === 0) return [];
+
+  const normalizedSessionId = sessionId.trim().toLowerCase();
+  if (normalizedSessionId) {
+    const sessionCandidates = projectCandidates.filter((processInfo) =>
+      normalizeCommand(processInfo.args).includes(normalizedSessionId),
+    );
+    if (sessionCandidates.length > 0) {
+      return uniquePids(sessionCandidates.map((processInfo) => processInfo.pid));
+    }
+  }
+
+  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+}
+
 async function findClaudeProjectProcessPids(
   summary: TraceSummary,
   identity: CurrentUserIdentity,
@@ -290,6 +693,69 @@ async function findClaudeProjectProcessPids(
     })),
   );
   return selectClaudeProjectProcessPids(summary, withCwd, identity, requesterPid);
+}
+
+async function findAgentProjectProcessPids(
+  sessionCwd: string,
+  sessionId: string,
+  agent: TraceSummary["agent"],
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const projectKey = claudeProjectKeyFromCwd(sessionCwd);
+  if (!projectKey) return [];
+
+  const runningProcesses = await listRunningProcesses();
+  const agentProcesses = runningProcesses.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, agent);
+  });
+  if (agentProcesses.length === 0) return [];
+
+  const withCwd: AgentCandidateProcess[] = await Promise.all(
+    agentProcesses.map(async (processInfo) => ({
+      ...processInfo,
+      cwd: await listProcessCwd(processInfo.pid),
+    })),
+  );
+
+  return selectAgentProjectProcessPids(sessionCwd, sessionId, agent, withCwd, identity, requesterPid);
+}
+
+async function resolveSessionProcessPids(
+  summary: TraceSummary,
+  requesterPid: number,
+  sessionCwd = "",
+): Promise<SessionProcessResolution> {
+  const openFileProcesses = await listOpenFileProcesses(summary.path);
+  const identity = currentUserIdentity();
+  const sameUserCandidates = openFileProcesses.filter((candidate) => {
+    if (candidate.pid === requesterPid) return false;
+    return matchesCurrentUser(candidate.user, identity);
+  });
+  const agentScopedCandidates = sameUserCandidates.filter((candidate) =>
+    commandMatchesAgent(candidate.command, summary.agent),
+  );
+  const chosenCandidates = agentScopedCandidates.length > 0 ? agentScopedCandidates : sameUserCandidates;
+  let matchedPids = uniquePids(chosenCandidates.map((candidate) => candidate.pid));
+  if (matchedPids.length === 0 && summary.agent === "claude") {
+    matchedPids = await findClaudeProjectProcessPids(summary, identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && sessionCwd) {
+    matchedPids = await findAgentProjectProcessPids(
+      sessionCwd,
+      summary.sessionId,
+      summary.agent,
+      identity,
+      requesterPid,
+    );
+  }
+  const alivePids = matchedPids.filter((pid) => isProcessAlive(pid));
+  return {
+    matchedPids,
+    alivePids,
+  };
 }
 
 function uniquePids(values: number[]): number[] {
@@ -341,20 +807,11 @@ async function stopTraceSessionProcess(
   options: StopTraceSessionOptions,
 ): Promise<StopTraceSessionResult> {
   const requesterPid = options.requesterPid ?? process.pid;
-  const openFileProcesses = await listOpenFileProcesses(summary.path);
-  const identity = currentUserIdentity();
-  const sameUserCandidates = openFileProcesses.filter((candidate) => {
-    if (candidate.pid === requesterPid) return false;
-    return matchesCurrentUser(candidate.user, identity);
-  });
-  const agentScopedCandidates = sameUserCandidates.filter((candidate) =>
-    commandMatchesAgent(candidate.command, summary.agent),
+  const { matchedPids, alivePids: initiallyAlivePids } = await resolveSessionProcessPids(
+    summary,
+    requesterPid,
+    options.sessionCwd ?? "",
   );
-  const chosenCandidates = agentScopedCandidates.length > 0 ? agentScopedCandidates : sameUserCandidates;
-  let matchedPids = uniquePids(chosenCandidates.map((candidate) => candidate.pid));
-  if (matchedPids.length === 0 && summary.agent === "claude") {
-    matchedPids = await findClaudeProjectProcessPids(summary, identity, requesterPid);
-  }
   if (matchedPids.length === 0) {
     return {
       status: "not_running",
@@ -365,7 +822,7 @@ async function stopTraceSessionProcess(
     };
   }
 
-  let alivePids = matchedPids.filter((pid) => isProcessAlive(pid));
+  let alivePids = initiallyAlivePids;
   if (alivePids.length === 0) {
     return {
       status: "not_running",
@@ -420,6 +877,147 @@ async function stopTraceSessionProcess(
   };
 }
 
+async function openTraceSessionProcess(
+  summary: TraceSummary,
+  options: OpenTraceSessionOptions,
+): Promise<OpenTraceSessionResult> {
+  const requesterPid = options.requesterPid ?? process.pid;
+  const { matchedPids, alivePids } = await resolveSessionProcessPids(summary, requesterPid, options.sessionCwd ?? "");
+  if (matchedPids.length === 0) {
+    try {
+      const activation = await activateGhostty();
+      return {
+        status: "ghostty_activated",
+        reason: `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; session process not resolved)`,
+        pid: null,
+        tty: "",
+        target: null,
+        matchedPids: [],
+        alivePids: [],
+      };
+    } catch (error) {
+      return {
+        status: "not_resolvable",
+        reason: `failed to open terminal: ${asErrorMessage(error)}`,
+        pid: null,
+        tty: "",
+        target: null,
+        matchedPids: [],
+        alivePids: [],
+      };
+    }
+  }
+
+  const pid = alivePids[0] ?? matchedPids[0] ?? null;
+  if (!pid) {
+    return {
+      status: "not_resolvable",
+      reason: "no session process target found",
+      pid: null,
+      tty: "",
+      target: null,
+      matchedPids,
+      alivePids,
+    };
+  }
+
+  const tty = await listProcessTty(pid);
+  if (tty) {
+    const tmuxLookup = await listTmuxPanes(currentUserIdentity());
+    const paneMatch = tmuxLookup.panes.find((pane) => pane.paneTty === tty);
+    if (paneMatch) {
+      try {
+        let preActivationNote = "";
+        try {
+          const preActivation = await activateGhostty();
+          preActivationNote = `; pre-frontmost ${preActivation.frontmostApp} via ${preActivation.method}`;
+        } catch (error) {
+          preActivationNote = `; pre-activation failed: ${asErrorMessage(error)}`;
+        }
+        await delay(120);
+        const { focusedClient, previousSession, switchedClients, preferredWasFocused } = await focusTmuxPane(paneMatch);
+        let postActivationNote = "";
+        try {
+          const postActivation = await activateGhostty();
+          postActivationNote = `; post-frontmost ${postActivation.frontmostApp} via ${postActivation.method}`;
+        } catch (error) {
+          postActivationNote = `; post-activation failed: ${asErrorMessage(error)}`;
+        }
+        return {
+          status: "focused_pane",
+          reason: `focused tmux pane via client ${focusedClient} (from session ${previousSession || "unknown"}; switched ${switchedClients.length} client${switchedClients.length === 1 ? "" : "s"}; preferred client ${preferredWasFocused ? "was" : "was not"} focused)${preActivationNote}${postActivationNote}`,
+          pid,
+          tty,
+          target: {
+            tmuxSession: paneMatch.tmuxSession,
+            windowIndex: paneMatch.windowIndex,
+            paneIndex: paneMatch.paneIndex,
+          },
+          matchedPids,
+          alivePids,
+        };
+      } catch (error) {
+        const reason = asErrorMessage(error);
+        try {
+          const activation = await activateGhostty();
+          return {
+            status: "ghostty_activated",
+            reason: `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; tmux focus failed: ${reason})`,
+            pid,
+            tty,
+            target: null,
+            matchedPids,
+            alivePids,
+          };
+        } catch {
+          // Fall through to generic fallback below.
+        }
+      }
+    } else {
+      const scanned = tmuxLookup.scannedSockets.join(", ") || "default socket";
+      try {
+        const activation = await activateGhostty();
+        return {
+          status: "ghostty_activated",
+          reason: `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; pane focus unavailable: tty ${tty} not found in tmux sockets ${scanned})`,
+          pid,
+          tty,
+          target: null,
+          matchedPids,
+          alivePids,
+        };
+      } catch {
+        // Fall back to app-level focus below.
+      }
+    }
+  }
+
+  try {
+    const activation = await activateGhostty();
+    return {
+      status: "ghostty_activated",
+      reason: tty
+        ? `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; pane focus unavailable)`
+        : `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp})`,
+      pid,
+      tty,
+      target: null,
+      matchedPids,
+      alivePids,
+    };
+  } catch (error) {
+    return {
+      status: "not_resolvable",
+      reason: `failed to open terminal: ${asErrorMessage(error)}`,
+      pid,
+      tty,
+      target: null,
+      matchedPids,
+      alivePids,
+    };
+  }
+}
+
 export function resolveDefaultWebDistPath(packagedWebDistPath: string, monorepoWebDistPath: string): string {
   if (existsSync(monorepoWebDistPath)) {
     return monorepoWebDistPath;
@@ -435,6 +1033,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   const traceIndex = options.traceIndex;
   const configPath = options.configPath ?? DEFAULT_CONFIG_PATH;
   const stopTraceSession = options.stopTraceSession ?? stopTraceSessionProcess;
+  const openTraceSession = options.openTraceSession ?? openTraceSessionProcess;
   const packagedWebDistPath = fileURLToPath(new URL("./web", import.meta.url));
   const monorepoWebDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
   const defaultWebDistPath = resolveDefaultWebDistPath(packagedWebDistPath, monorepoWebDistPath);
@@ -491,8 +1090,10 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
     try {
       const resolvedId = traceIndex.resolveId(params.id);
-      const summary = traceIndex.getSessionDetail(resolvedId).summary;
-      const result = await stopTraceSession(summary, { force, requesterPid: process.pid });
+      const detail = traceIndex.getSessionDetail(resolvedId);
+      const summary = detail.summary;
+      const sessionCwd = inferSessionCwd(detail);
+      const result = await stopTraceSession(summary, { force, requesterPid: process.pid, sessionCwd });
       if (result.status === "terminated") {
         return {
           ok: true,
@@ -516,6 +1117,57 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         traceId: summary.id,
         sessionId: summary.sessionId,
         signal: result.signal,
+        pids: result.matchedPids,
+        alivePids: result.alivePids,
+        error: result.reason,
+      };
+    } catch (error) {
+      const message = asErrorMessage(error);
+      if (message.startsWith("unknown trace/session:")) {
+        reply.code(404);
+      } else {
+        reply.code(500);
+      }
+      return { ok: false, error: message };
+    }
+  });
+
+  server.post("/api/trace/:id/open", async (request, reply) => {
+    const params = request.params as { id: string };
+
+    try {
+      const resolvedId = traceIndex.resolveId(params.id);
+      const detail = traceIndex.getSessionDetail(resolvedId);
+      const summary = detail.summary;
+      const sessionCwd = inferSessionCwd(detail);
+      const result = await openTraceSession(summary, { requesterPid: process.pid, sessionCwd });
+      if (result.status === "focused_pane" || result.status === "ghostty_activated") {
+        return {
+          ok: true,
+          status: result.status,
+          traceId: summary.id,
+          sessionId: summary.sessionId,
+          pid: result.pid,
+          tty: result.tty,
+          target: result.target,
+          pids: result.matchedPids,
+          alivePids: result.alivePids,
+          message: result.reason,
+        };
+      }
+      if (result.status === "not_resolvable") {
+        reply.code(409);
+      } else {
+        reply.code(500);
+      }
+      return {
+        ok: false,
+        status: result.status,
+        traceId: summary.id,
+        sessionId: summary.sessionId,
+        pid: result.pid,
+        tty: result.tty,
+        target: result.target,
         pids: result.matchedPids,
         alivePids: result.alivePids,
         error: result.reason,

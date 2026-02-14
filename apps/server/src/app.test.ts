@@ -6,7 +6,10 @@ import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 import {
   createServer,
   matchesCurrentUser,
+  parseTmuxClients,
   resolveDefaultWebDistPath,
+  selectPreferredTmuxClient,
+  selectAgentProjectProcessPids,
   selectClaudeProjectProcessPids,
 } from "./app.js";
 
@@ -120,6 +123,90 @@ describe("server api", () => {
     expect(matchesCurrentUser("other", { username: "rob", uid: "501" })).toBe(false);
   });
 
+  it("parses tmux clients and prioritizes focused clients", async () => {
+    const clients = parseTmuxClients(
+      [
+        "/dev/ttys010\t1739544000\tmonitor\tattached,focused,UTF-8",
+        "/dev/ttys011\t1739545000\tagent\tattached,UTF-8",
+        "/dev/ttys012\t1739544900\tagent\tattached,UTF-8",
+      ].join("\n"),
+    );
+    expect(clients).toEqual([
+      {
+        tty: "/dev/ttys010",
+        activityEpoch: 1739544000,
+        sessionName: "monitor",
+        flags: ["attached", "focused", "UTF-8"],
+        isFocused: true,
+      },
+      {
+        tty: "/dev/ttys011",
+        activityEpoch: 1739545000,
+        sessionName: "agent",
+        flags: ["attached", "UTF-8"],
+        isFocused: false,
+      },
+      {
+        tty: "/dev/ttys012",
+        activityEpoch: 1739544900,
+        sessionName: "agent",
+        flags: ["attached", "UTF-8"],
+        isFocused: false,
+      },
+    ]);
+    expect(selectPreferredTmuxClient(clients, "agent")).toEqual({
+      tty: "/dev/ttys010",
+      activityEpoch: 1739544000,
+      sessionName: "monitor",
+      flags: ["attached", "focused", "UTF-8"],
+      isFocused: true,
+    });
+    expect(selectPreferredTmuxClient(clients, "monitor")).toEqual({
+      tty: "/dev/ttys010",
+      activityEpoch: 1739544000,
+      sessionName: "monitor",
+      flags: ["attached", "focused", "UTF-8"],
+      isFocused: true,
+    });
+  });
+
+  it("prefers a non-target focused client over a focused target-session client", async () => {
+    const clients = parseTmuxClients(
+      [
+        "/dev/ttys010\t1739544000\tagent\tattached,focused,UTF-8",
+        "/dev/ttys011\t1739543000\tmonitor\tattached,focused,UTF-8",
+        "/dev/ttys012\t1739545000\tagent\tattached,UTF-8",
+      ].join("\n"),
+    );
+    expect(selectPreferredTmuxClient(clients, "agent")).toEqual({
+      tty: "/dev/ttys011",
+      activityEpoch: 1739543000,
+      sessionName: "monitor",
+      flags: ["attached", "focused", "UTF-8"],
+      isFocused: true,
+    });
+  });
+
+  it("returns null when no tmux clients are available", async () => {
+    expect(parseTmuxClients("")).toEqual([]);
+    expect(selectPreferredTmuxClient([], "main")).toBeNull();
+  });
+
+  it("falls back to the most recently active client when no focused client exists", async () => {
+    const clients = parseTmuxClients(
+      ["/dev/ttys010\t1739544000\tagent\tattached,UTF-8", "/dev/ttys011\t1739545000\tagent\tattached,UTF-8"].join(
+        "\n",
+      ),
+    );
+    expect(selectPreferredTmuxClient(clients, "agent")).toEqual({
+      tty: "/dev/ttys011",
+      activityEpoch: 1739545000,
+      sessionName: "agent",
+      flags: ["attached", "UTF-8"],
+      isFocused: false,
+    });
+  });
+
   it("selects claude fallback process by matching project cwd", async () => {
     const selected = selectClaudeProjectProcessPids(
       {
@@ -175,6 +262,59 @@ describe("server api", () => {
     expect(selected).toEqual([7001]);
   });
 
+  it("selects codex fallback process by matching project cwd", async () => {
+    const selected = selectAgentProjectProcessPids(
+      "/Users/rob/Dropbox/2026_sakana/agentlens",
+      "codex-session-123",
+      "codex",
+      [
+        {
+          pid: 6101,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/codex --dangerously-bypass-approvals-and-sandbox",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 6102,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/codex --dangerously-bypass-approvals-and-sandbox",
+          cwd: "/Users/rob/Dropbox/other-project",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([6101]);
+  });
+
+  it("prefers agent fallback process whose args include selected session id", async () => {
+    const sessionId = "codex-session-123";
+    const selected = selectAgentProjectProcessPids(
+      "/Users/rob/Dropbox/2026_sakana/agentlens",
+      sessionId,
+      "codex",
+      [
+        {
+          pid: 6201,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/codex --resume codex-session-123",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 6202,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/codex --dangerously-bypass-approvals-and-sandbox",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([6201]);
+  });
+
   it("prefers monorepo web dist when both monorepo and packaged builds exist", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-web-dist-"));
     const packagedWebDistPath = path.join(root, "packaged-web-dist");
@@ -185,9 +325,10 @@ describe("server api", () => {
     expect(resolveDefaultWebDistPath(packagedWebDistPath, monorepoWebDistPath)).toBe(monorepoWebDistPath);
   });
 
-  it("serves overview, trace listing, trace details, and config updates", async () => {
+  it("serves overview, trace listing, trace details, stop/open controls, and config updates", async () => {
     const fixture = await buildFixture();
     const stopTraceSession = vi.fn();
+    const openTraceSession = vi.fn();
     stopTraceSession.mockResolvedValue({
       status: "terminated" as const,
       reason: "session process terminated with SIGINT",
@@ -195,11 +336,25 @@ describe("server api", () => {
       matchedPids: [4242],
       alivePids: [],
     });
+    openTraceSession.mockResolvedValue({
+      status: "focused_pane" as const,
+      reason: "focused tmux pane for session process",
+      pid: 4242,
+      tty: "/dev/ttys018",
+      target: {
+        tmuxSession: "main",
+        windowIndex: 2,
+        paneIndex: 1,
+      },
+      matchedPids: [4242],
+      alivePids: [4242],
+    });
     const server = await createServer({
       traceIndex: fixture.index,
       configPath: fixture.configPath,
       enableStatic: false,
       stopTraceSession,
+      openTraceSession,
     });
 
     const health = await server.inject({ method: "GET", url: "/api/healthz" });
@@ -248,6 +403,48 @@ describe("server api", () => {
     expect(stopPayload.pids).toEqual([4242]);
     expect(stopPayload.alivePids).toEqual([]);
     expect(stopTraceSession).toHaveBeenCalledTimes(1);
+    expect(stopTraceSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: fixture.sessionId }),
+      expect.objectContaining({ requesterPid: expect.any(Number), sessionCwd: "/tmp/proj" }),
+    );
+
+    const openRes = await server.inject({ method: "POST", url: `/api/trace/${traceId}/open` });
+    expect(openRes.statusCode).toBe(200);
+    expect(openRes.json()).toMatchObject({
+      ok: true,
+      status: "focused_pane",
+      pid: 4242,
+      tty: "/dev/ttys018",
+      target: {
+        tmuxSession: "main",
+        windowIndex: 2,
+        paneIndex: 1,
+      },
+      pids: [4242],
+      alivePids: [4242],
+    });
+    expect(openTraceSession).toHaveBeenCalledTimes(1);
+    expect(openTraceSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: fixture.sessionId }),
+      expect.objectContaining({ requesterPid: expect.any(Number), sessionCwd: "/tmp/proj" }),
+    );
+
+    openTraceSession.mockResolvedValueOnce({
+      status: "not_resolvable",
+      reason: "no active session process found",
+      pid: null,
+      tty: "",
+      target: null,
+      matchedPids: [],
+      alivePids: [],
+    });
+    const openNotResolvable = await server.inject({ method: "POST", url: `/api/trace/${traceId}/open` });
+    expect(openNotResolvable.statusCode).toBe(409);
+    expect(openNotResolvable.json()).toMatchObject({
+      ok: false,
+      status: "not_resolvable",
+      error: "no active session process found",
+    });
 
     stopTraceSession.mockResolvedValueOnce({
       status: "not_running",
@@ -262,6 +459,13 @@ describe("server api", () => {
       ok: false,
       status: "not_running",
       error: "no active session process found",
+    });
+
+    const openUnknown = await server.inject({ method: "POST", url: "/api/trace/unknown/open" });
+    expect(openUnknown.statusCode).toBe(404);
+    expect(openUnknown.json()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("unknown trace/session"),
     });
 
     const configPatch = await server.inject({
