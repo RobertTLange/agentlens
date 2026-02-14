@@ -130,6 +130,7 @@ Useful patterns:
 | `GET /api/traces?agent=<name>` | List indexed trace summaries, optionally filtered by agent. |
 | `GET /api/trace/:id` | Paginated trace detail by trace id or session id. Supports `limit`, `before`, `include_meta`. |
 | `POST /api/trace/:id/stop` | Stop session process for trace/session id. Sends `SIGINT`, escalates to `SIGTERM`, and optionally `SIGKILL` with `?force=true`. |
+| `POST /api/trace/:id/open` | Open/focus the terminal target for trace/session id. Attempts exact tmux pane focus first, then Ghostty app activation fallback. |
 | `GET /api/config` | Current merged runtime config. |
 | `POST /api/config` | Update config, persist to disk, refresh index. |
 | `GET /api/stream` | SSE feed (`snapshot`, `trace_*`, `events_appended`, `overview_updated`, `heartbeat`). |
@@ -145,6 +146,30 @@ curl -X POST "http://127.0.0.1:8787/api/trace/<trace_or_session_id>/stop"
 
 - Success response includes termination signal and matched process ids.
 - Typical non-running response is HTTP `409` with `status: "not_running"`.
+
+Opening sessions from UI/API:
+
+- In the web UI, click the open icon button on a session row.
+- API equivalent:
+
+```bash
+curl -X POST "http://127.0.0.1:8787/api/trace/<trace_or_session_id>/open"
+```
+
+- Open flow (`POST /open`):
+  - Resolve the active process for the trace/session id.
+  - Read that process TTY and look for a matching tmux pane (across detected tmux sockets).
+  - If a pane is found:
+    - Choose a tmux client (prefer focused client flags, then recent activity heuristics).
+    - Switch client(s) to the pane's tmux session/window/pane target.
+    - Activate Ghostty so the terminal app is brought to front.
+    - Return `status: "focused_pane"` with `target`, `pid`, and `tty`.
+  - If pane/process targeting is not possible:
+    - Fall back to Ghostty activation only.
+    - Return `status: "ghostty_activated"` with diagnostic `message`.
+
+- UI behavior:
+  - The top header status shows the open debug/result message briefly, then fades back to the base live status line.
 
 ## Configuration
 
