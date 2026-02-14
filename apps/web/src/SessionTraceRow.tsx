@@ -15,11 +15,14 @@ interface SessionTraceRowProps {
   isActive: boolean;
   isPathExpanded: boolean;
   isEntering: boolean;
+  isOpening: boolean;
   isStopping: boolean;
+  openError: string;
   stopError: string;
   pulseSeq: number;
   nowMs: number;
   onSelect: (traceId: string) => void;
+  onOpen: (traceId: string) => void;
   onTogglePath: (traceId: string) => void;
   onStop: (traceId: string) => void;
   rowRef: (node: HTMLDivElement | null) => void;
@@ -414,11 +417,14 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
     isActive,
     isPathExpanded,
     isEntering,
+    isOpening,
     isStopping,
+    openError,
     stopError,
     pulseSeq,
     nowMs,
     onSelect,
+    onOpen,
     onTogglePath,
     onStop,
     rowRef,
@@ -464,7 +470,38 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
             {sessionName}
           </span>
           <div className="trace-topline-right">
+            {activityStatus === "running" && (
+              <span className="trace-running-indicator" role="img" aria-label="Session active" title="Session active">
+                <svg className="trace-running-spinner" viewBox="0 0 14 14" aria-hidden="true">
+                  <circle className="trace-running-spinner-track" cx="7" cy="7" r="5.2" />
+                  <circle className="trace-running-spinner-head" cx="7" cy="7" r="5.2" />
+                </svg>
+              </span>
+            )}
             <span className={`trace-status-chip mono ${statusClass}`}>{statusLabel}</span>
+            <button
+              type="button"
+              className={`trace-open-button mono ${isOpening ? "pending" : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpen(trace.id);
+              }}
+              aria-label={isOpening ? "Opening terminal pane" : "Open terminal pane"}
+              title={isOpening ? "Opening terminal pane…" : "Open terminal pane"}
+              disabled={isOpening}
+            >
+              <svg className="trace-open-icon" viewBox="0 0 14 14" aria-hidden="true">
+                <path
+                  d="M4 4.5h6M10 4.5v6M10 4.5L4.6 9.9"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <rect x="2.2" y="2.2" width="9.6" height="9.6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.1" />
+              </svg>
+            </button>
             <button
               type="button"
               className={`trace-stop-button mono ${isStopping ? "pending" : ""}`}
@@ -612,6 +649,11 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
             )}
           </span>
         </div>
+        {openError && (
+          <div className="trace-open-error mono" role="status">
+            {openError}
+          </div>
+        )}
         {stopError && (
           <div className="trace-stop-error mono" role="status">
             {stopError}

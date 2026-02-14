@@ -22,11 +22,27 @@ const EVENT_APPEND_QUEUE_BATCH_SIZE = 6;
 const EVENT_APPEND_QUEUE_DELAY_MS = 36;
 const TRACE_ENTER_ANIMATION_MS = 620;
 const TIMELINE_LATEST_EPSILON_PX = 12;
+const HEADER_FLASH_VISIBLE_MS = 2_400;
+const HEADER_FLASH_FADE_MS = 380;
 
 interface StopTraceResponse {
   ok?: boolean;
   error?: string;
   signal?: string | null;
+}
+
+interface OpenTraceResponse {
+  ok?: boolean;
+  error?: string;
+  status?: string;
+  message?: string;
+  pid?: number | null;
+  tty?: string;
+  target?: {
+    tmuxSession?: string;
+    windowIndex?: number;
+    paneIndex?: number;
+  } | null;
 }
 
 function fmtTime(ms: number | null): string {
@@ -108,6 +124,8 @@ export function App(): JSX.Element {
   const [selectedId, setSelectedId] = useState("");
   const [page, setPage] = useState<TracePage | null>(null);
   const [status, setStatus] = useState("Loading...");
+  const [flashStatus, setFlashStatus] = useState("");
+  const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [includeMeta, setIncludeMeta] = useState(false);
@@ -123,6 +141,8 @@ export function App(): JSX.Element {
   const [enteringEventIds, setEnteringEventIds] = useState<Set<string>>(new Set());
   const [visibleEventIds, setVisibleEventIds] = useState<Set<string>>(new Set());
   const [pulseSeqByTraceId, setPulseSeqByTraceId] = useState<Record<string, number>>({});
+  const [openingTraceIds, setOpeningTraceIds] = useState<Set<string>>(new Set());
+  const [openErrorByTraceId, setOpenErrorByTraceId] = useState<Record<string, string>>({});
   const [stoppingTraceIds, setStoppingTraceIds] = useState<Set<string>>(new Set());
   const [stopErrorByTraceId, setStopErrorByTraceId] = useState<Record<string, string>>({});
   const [timelineStripHasOverflow, setTimelineStripHasOverflow] = useState(false);
@@ -143,6 +163,8 @@ export function App(): JSX.Element {
   const queuedEventTimerRef = useRef<number | null>(null);
   const enterAnimationTimerByTraceIdRef = useRef<Map<string, number>>(new Map());
   const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
+  const flashStatusFadeTimerRef = useRef<number | null>(null);
+  const flashStatusClearTimerRef = useRef<number | null>(null);
   const manualStopAtByTraceIdRef = useRef<Record<string, number>>({});
 
   const applyManualStopOverride = useCallback((trace: TraceSummary): TraceSummary => {
@@ -256,11 +278,13 @@ export function App(): JSX.Element {
     }
     return newest > 0 ? newest : null;
   }, [traces]);
-  const footerStatus = useMemo(() => {
+  const baseHeaderStatus = useMemo(() => {
     if (!status.startsWith("Live:") || !lastLiveUpdateMs) return status;
     if (!newestEventTsMs) return `${status} · updated ${fmtClockTime(lastLiveUpdateMs)}`;
     return `${status} · updated ${fmtClockTime(lastLiveUpdateMs)} · newest event ${fmtClockTime(newestEventTsMs)}`;
   }, [lastLiveUpdateMs, newestEventTsMs, status]);
+  const headerStatus = flashStatus || baseHeaderStatus;
+  const heroStatusClassName = `hero-status mono${flashStatus ? " flash-active" : ""}${isFlashStatusFading ? " flash-fading" : ""}`;
   const toolCallTypeCountRows = useMemo(() => {
     const rows: Array<Array<{ toolType: string; count: number }>> = [];
     for (let index = 0; index < toolCallTypeCountsPreview.length; index += 2) {
@@ -284,6 +308,37 @@ export function App(): JSX.Element {
       }
     },
     [],
+  );
+
+  const clearFlashStatusTimers = useCallback((): void => {
+    if (flashStatusFadeTimerRef.current !== null) {
+      window.clearTimeout(flashStatusFadeTimerRef.current);
+      flashStatusFadeTimerRef.current = null;
+    }
+    if (flashStatusClearTimerRef.current !== null) {
+      window.clearTimeout(flashStatusClearTimerRef.current);
+      flashStatusClearTimerRef.current = null;
+    }
+  }, []);
+
+  const flashHeaderStatus = useCallback(
+    (message: string): void => {
+      const normalized = message.trim();
+      if (!normalized) return;
+      clearFlashStatusTimers();
+      setFlashStatus(normalized);
+      setIsFlashStatusFading(false);
+      flashStatusFadeTimerRef.current = window.setTimeout(() => {
+        setIsFlashStatusFading(true);
+      }, HEADER_FLASH_VISIBLE_MS);
+      flashStatusClearTimerRef.current = window.setTimeout(() => {
+        setFlashStatus("");
+        setIsFlashStatusFading(false);
+        flashStatusFadeTimerRef.current = null;
+        flashStatusClearTimerRef.current = null;
+      }, HEADER_FLASH_VISIBLE_MS + HEADER_FLASH_FADE_MS);
+    },
+    [clearFlashStatusTimers],
   );
 
   const clearEventAppendQueue = useCallback((): void => {
@@ -375,10 +430,11 @@ export function App(): JSX.Element {
   useEffect(
     () => () => {
       clearEventAppendQueue();
+      clearFlashStatusTimers();
       clearAnimationTimers(enterAnimationTimerByTraceIdRef.current);
       clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
     },
-    [clearEventAppendQueue],
+    [clearEventAppendQueue, clearFlashStatusTimers],
   );
 
   useEffect(() => {
@@ -558,7 +614,19 @@ export function App(): JSX.Element {
         next.delete(id);
         return next;
       });
+      setOpeningTraceIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       setStopErrorByTraceId((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setOpenErrorByTraceId((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
         delete next[id];
@@ -809,6 +877,68 @@ export function App(): JSX.Element {
     });
   };
 
+  const openTraceSession = useCallback(async (traceId: string): Promise<void> => {
+    setOpeningTraceIds((prev) => {
+      if (prev.has(traceId)) return prev;
+      const next = new Set(prev);
+      next.add(traceId);
+      return next;
+    });
+    setOpenErrorByTraceId((prev) => {
+      if (!(traceId in prev)) return prev;
+      const next = { ...prev };
+      delete next[traceId];
+      return next;
+    });
+
+    try {
+      const response = await fetch(`${API}/api/trace/${encodeURIComponent(traceId)}/open`, {
+        method: "POST",
+        cache: "no-store",
+      });
+      const payload = (await response.json().catch(() => ({}))) as OpenTraceResponse;
+      if (!response.ok || payload.ok !== true) {
+        const errorMessage = payload.error?.trim() ? payload.error : `HTTP ${response.status}`;
+        setOpenErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
+        flashHeaderStatus(`Open failed: ${errorMessage}`);
+        return;
+      }
+      const openedAtMs = Date.now();
+      const openStatus = payload.status?.trim() ?? "";
+      const openMessage = payload.message?.trim() ?? "";
+      const targetLabel =
+        payload.target &&
+        typeof payload.target.tmuxSession === "string" &&
+        typeof payload.target.windowIndex === "number" &&
+        typeof payload.target.paneIndex === "number"
+          ? `${payload.target.tmuxSession}:${payload.target.windowIndex}.${payload.target.paneIndex}`
+          : "";
+      const pidLabel = typeof payload.pid === "number" ? ` pid ${payload.pid}` : "";
+      const ttyLabel = payload.tty?.trim() ? ` tty ${payload.tty.trim()}` : "";
+      const detailBits = [targetLabel, pidLabel.trim(), ttyLabel.trim()].filter(Boolean).join(" · ");
+      const detailSuffix = detailBits ? ` (${detailBits})` : "";
+      if (openStatus === "focused_pane") {
+        flashHeaderStatus(`Open focused_pane: ${openMessage || `session ${traceId}`}${detailSuffix}`);
+      } else if (openStatus === "ghostty_activated") {
+        flashHeaderStatus(`Open ghostty_activated: ${openMessage || `session ${traceId}`}${detailSuffix}`);
+      } else {
+        flashHeaderStatus(`Open ${openStatus || "unknown"}: ${openMessage || `session ${traceId}`}${detailSuffix}`);
+      }
+      setLastLiveUpdateMs(openedAtMs);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      setOpenErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
+      flashHeaderStatus(`Open failed: ${errorMessage}`);
+    } finally {
+      setOpeningTraceIds((prev) => {
+        if (!prev.has(traceId)) return prev;
+        const next = new Set(prev);
+        next.delete(traceId);
+        return next;
+      });
+    }
+  }, [flashHeaderStatus]);
+
   const stopTraceSession = useCallback(async (traceId: string): Promise<void> => {
     setStoppingTraceIds((prev) => {
       if (prev.has(traceId)) return prev;
@@ -832,7 +962,7 @@ export function App(): JSX.Element {
       if (!response.ok || payload.ok !== true) {
         const errorMessage = payload.error?.trim() ? payload.error : `HTTP ${response.status}`;
         setStopErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
-        setStatus(`Stop failed: ${errorMessage}`);
+        flashHeaderStatus(`Stop failed: ${errorMessage}`);
         return;
       }
       const stoppedAtMs = Date.now();
@@ -851,12 +981,12 @@ export function App(): JSX.Element {
         return sortTraces(next);
       });
       const signalLabel = payload.signal?.trim() ? payload.signal : "signal";
-      setStatus(`Stop requested (${signalLabel}) for ${traceId}`);
+      flashHeaderStatus(`Stop requested (${signalLabel}) for ${traceId}`);
       setLastLiveUpdateMs(stoppedAtMs);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       setStopErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
-      setStatus(`Stop failed: ${errorMessage}`);
+      flashHeaderStatus(`Stop failed: ${errorMessage}`);
     } finally {
       setStoppingTraceIds((prev) => {
         if (!prev.has(traceId)) return prev;
@@ -865,18 +995,34 @@ export function App(): JSX.Element {
         return next;
       });
     }
-  }, []);
+  }, [flashHeaderStatus]);
 
   return (
     <main className="shell">
       <header className="hero">
-        <h1>🔍 AgentLens</h1>
-        <p>Live observability for Codex and Claude traces.</p>
+        <div className="hero-main">
+          <div className="hero-title-line">
+            <h1>🔍 AgentLens</h1>
+            <div className={heroStatusClassName} title={headerStatus}>
+              {headerStatus}
+            </div>
+          </div>
+          <p>Live observability for Codex and Claude traces.</p>
+        </div>
         <div className="hero-metrics">
           <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
           <span>{`events ${overview?.eventCount ?? 0}`}</span>
           <span>{`errors ${overview?.errorCount ?? 0}`}</span>
           <span>{`tool io ${(overview?.toolUseCount ?? 0) + (overview?.toolResultCount ?? 0)}`}</span>
+          <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
+            <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path
+                fill="currentColor"
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              />
+            </svg>
+            <span>agentlens</span>
+          </a>
         </div>
       </header>
 
@@ -950,11 +1096,14 @@ export function App(): JSX.Element {
                   isActive={isActive}
                   isPathExpanded={isPathExpanded}
                   isEntering={enteringTraceIds.has(trace.id)}
+                  isOpening={openingTraceIds.has(trace.id)}
                   isStopping={stoppingTraceIds.has(trace.id)}
+                  openError={openErrorByTraceId[trace.id] ?? ""}
                   stopError={stopErrorByTraceId[trace.id] ?? ""}
                   pulseSeq={pulseSeq}
                   nowMs={clockNowMs}
                   onSelect={setSelectedId}
+                  onOpen={openTraceSession}
                   onTogglePath={toggleTracePathExpanded}
                   onStop={stopTraceSession}
                   rowRef={bindTraceRowRef(trace.id)}
@@ -1140,29 +1289,6 @@ export function App(): JSX.Element {
             )}
         </section>
       </div>
-
-      <footer className="status status-bar">
-        <span className="mono">{footerStatus}</span>
-        <div className="corner-links mono">
-          <a className="corner-handle" href="https://x.com/RobertTLange">
-            @RobertTLange
-          </a>
-          <a className="corner-handle corner-handle-icon-link" href="https://github.com/RobertTLange/agentlens">
-            <svg
-              className="corner-handle-icon"
-              viewBox="0 0 16 16"
-              aria-hidden="true"
-              focusable="false"
-            >
-              <path
-                fill="currentColor"
-                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
-              />
-            </svg>
-            <span>agentlens</span>
-          </a>
-        </div>
-      </footer>
     </main>
   );
 }

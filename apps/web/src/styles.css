@@ -49,14 +49,14 @@ body {
 
 .shell {
   width: 100%;
-  max-width: 1500px;
+  max-width: 1780px;
   margin: 0 auto;
   padding: 20px 16px 12px;
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -68,9 +68,22 @@ body {
   padding: 9px 12px;
   box-shadow: 0 12px 32px rgba(2, 6, 23, 0.25);
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
+}
+
+.hero-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.hero-title-line {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .hero h1 {
@@ -89,20 +102,74 @@ body {
   text-overflow: ellipsis;
 }
 
+.hero-status {
+  margin: 0;
+  color: #0f172a;
+  font-size: 0.72rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 1;
+  transition:
+    opacity 0.38s ease,
+    color 0.2s ease;
+}
+
+.hero-status.flash-active {
+  color: #0b2947;
+}
+
+.hero-status.flash-active.flash-fading {
+  opacity: 0;
+}
+
 .hero-metrics {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
   justify-self: end;
 }
 
-.hero-metrics span {
+.hero-metrics > span {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 2px 8px;
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.72rem;
   background: #f8fafc;
+}
+
+.hero-github-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #94a3b8;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #0f172a;
+  color: #f8fafc;
+  text-decoration: none;
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
+.hero-github-tag:hover {
+  background: #1e293b;
+}
+
+.hero-github-tag:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.hero-github-icon {
+  width: 12px;
+  height: 12px;
+  display: block;
 }
 
 .timeline-strip-panel {
@@ -235,7 +302,7 @@ body {
   display: grid;
   width: 100%;
   min-width: 0;
-  grid-template-columns: 380px 270px minmax(0, 1fr);
+  grid-template-columns: minmax(360px, 1.15fr) minmax(300px, 0.95fr) minmax(0, 2.45fr);
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -500,6 +567,44 @@ body {
   color: #475569;
 }
 
+.trace-running-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: #0e7490;
+}
+
+.trace-running-spinner {
+  width: 14px;
+  height: 14px;
+  display: block;
+  animation: trace-running-spin 900ms linear infinite;
+}
+
+.trace-running-spinner-track,
+.trace-running-spinner-head {
+  fill: none;
+  stroke-width: 1.4;
+}
+
+.trace-running-spinner-track {
+  stroke: rgba(14, 116, 144, 0.2);
+}
+
+.trace-running-spinner-head {
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-dasharray: 12 32;
+}
+
+@keyframes trace-running-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .trace-stop-button {
   border: 1px solid #b91c1c;
   border-radius: 999px;
@@ -519,16 +624,60 @@ body {
     color 120ms ease;
 }
 
+.trace-open-button {
+  border: 1px solid #0e7490;
+  border-radius: 999px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: #155e75;
+  background: #cffafe;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.trace-open-icon {
+  width: 11px;
+  height: 11px;
+  display: block;
+}
+
 .trace-stop-icon {
   width: 11px;
   height: 11px;
   display: block;
 }
 
+.trace-open-button:hover:not(:disabled) {
+  border-color: #0f766e;
+  background: #a5f3fc;
+  color: #115e59;
+}
+
 .trace-stop-button:hover:not(:disabled) {
   border-color: #991b1b;
   background: #fecaca;
   color: #7f1d1d;
+}
+
+.trace-open-button.pending,
+.trace-open-button:disabled {
+  border-color: #94a3b8;
+  background: #e2e8f0;
+  color: #64748b;
+  cursor: default;
+}
+
+.trace-open-button.pending .trace-open-icon,
+.trace-open-button:disabled .trace-open-icon {
+  opacity: 0.8;
 }
 
 .trace-stop-button.pending,
@@ -759,6 +908,12 @@ body {
 .trace-stop-error {
   font-size: 0.64rem;
   color: #991b1b;
+  overflow-wrap: anywhere;
+}
+
+.trace-open-error {
+  font-size: 0.64rem;
+  color: #0f766e;
   overflow-wrap: anywhere;
 }
 
@@ -1230,63 +1385,6 @@ body {
 .kind-meta { background: var(--event-meta-bg); border-color: var(--event-meta-border); }
 .kind-tool-type { background: #eef2ff; border-color: #c7d2fe; color: #312e81; }
 
-.status {
-  color: #f1f5f9;
-  font-size: 0.76rem;
-}
-
-.status-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-}
-
-.corner-links {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
-  flex-wrap: wrap;
-  margin-left: auto;
-}
-
-.corner-handle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid rgba(148, 163, 184, 0.75);
-  border-radius: 999px;
-  padding: 3px 9px;
-  color: #e2e8f0;
-  text-decoration: none;
-  font-size: 0.75rem;
-  background: rgba(15, 23, 42, 0.72);
-  backdrop-filter: blur(6px);
-}
-
-.corner-handle:hover {
-  background: rgba(15, 23, 42, 0.9);
-  color: #f8fafc;
-}
-
-.corner-handle:focus-visible {
-  outline: 2px solid #f8fafc;
-  outline-offset: 2px;
-}
-
-.corner-handle-icon-link {
-  padding-left: 8px;
-}
-
-.corner-handle-icon {
-  width: 12px;
-  height: 12px;
-  display: block;
-}
-
 .empty {
   padding: 20px;
   color: var(--muted);
@@ -1317,7 +1415,7 @@ body {
   .shell {
     height: 100dvh;
     min-height: 0;
-    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr);
   }
 
   .hero {
@@ -1342,9 +1440,5 @@ body {
 
   .timeline-strip-panel.timeline-strip-has-right-glow::after {
     width: 26px;
-  }
-
-  .status-bar {
-    gap: 8px;
   }
 }

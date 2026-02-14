@@ -195,6 +195,11 @@ function traceIdFromStopUrl(url: string): string {
   return decodeURIComponent(match?.[1] ?? "");
 }
 
+function traceIdFromOpenUrl(url: string): string {
+  const match = url.match(/\/api\/trace\/([^/]+)\/open(?:\?|$)/);
+  return decodeURIComponent(match?.[1] ?? "");
+}
+
 function getTraceRow(id: string): HTMLDivElement {
   const row = document.querySelector(`[data-trace-id="${id}"]`);
   if (!row) throw new Error(`missing row for ${id}`);
@@ -205,6 +210,14 @@ function getTraceStopButton(id: string): HTMLButtonElement {
   const button = getTraceRow(id).querySelector(".trace-stop-button");
   if (!(button instanceof HTMLButtonElement)) {
     throw new Error(`missing stop button for ${id}`);
+  }
+  return button;
+}
+
+function getTraceOpenButton(id: string): HTMLButtonElement {
+  const button = getTraceRow(id).querySelector(".trace-open-button");
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`missing open button for ${id}`);
   }
   return button;
 }
@@ -269,6 +282,7 @@ let overview: OverviewStats;
 let rafQueue: FrameRequestCallback[];
 let requestedUrls: string[];
 let stopResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
+let openResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 
 beforeEach(() => {
   tracesById = {
@@ -283,6 +297,7 @@ beforeEach(() => {
   rafQueue = [];
   requestedUrls = [];
   stopResponsesByTraceId = {};
+  openResponsesByTraceId = {};
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
   vi.stubGlobal(
@@ -310,6 +325,13 @@ beforeEach(() => {
         const custom = stopResponsesByTraceId[traceId];
         const status = custom?.status ?? 200;
         const body = custom?.body ?? { ok: true, status: "terminated", signal: "SIGINT" };
+        return new Response(JSON.stringify(body), { status });
+      }
+      if (method === "POST" && url.includes("/api/trace/") && url.includes("/open")) {
+        const traceId = traceIdFromOpenUrl(url);
+        const custom = openResponsesByTraceId[traceId];
+        const status = custom?.status ?? 200;
+        const body = custom?.body ?? { ok: true, status: "ghostty_activated" };
         return new Response(JSON.stringify(body), { status });
       }
       if (url.includes("/api/trace/")) {
@@ -344,9 +366,13 @@ describe("App sessions list live motion", () => {
       node.textContent?.trim(),
     );
     expect(heroMetrics[0]).toBe("sessions 3");
+    expect(document.querySelector(".hero-github-tag")?.getAttribute("href")).toBe(
+      "https://github.com/RobertTLange/agentlens",
+    );
+    expect(document.querySelector("footer")).toBeNull();
   });
 
-  it("shows last live update time in footer status", async () => {
+  it("shows last live update time in header status", async () => {
     const nowMs = 1_700_000_000_000;
     vi.spyOn(Date, "now").mockReturnValue(nowMs);
 
@@ -364,10 +390,10 @@ describe("App sessions list live motion", () => {
     const expectedTime = new Date(nowMs).toLocaleTimeString();
     const expectedNewestEventTime = new Date(3_000).toLocaleTimeString();
     await waitFor(() => {
-      const footer = document.querySelector("footer.status");
-      expect(footer?.textContent).toContain("Live: 3 traces");
-      expect(footer?.textContent).toContain(`updated ${expectedTime}`);
-      expect(footer?.textContent).toContain(`newest event ${expectedNewestEventTime}`);
+      const headerStatus = document.querySelector(".hero-status");
+      expect(headerStatus?.textContent).toContain("Live: 3 traces");
+      expect(headerStatus?.textContent).toContain(`updated ${expectedTime}`);
+      expect(headerStatus?.textContent).toContain(`newest event ${expectedNewestEventTime}`);
     });
   });
 
@@ -473,14 +499,17 @@ describe("App sessions list live motion", () => {
     const runningRow = getTraceRow("trace-a");
     expect(runningRow.className).toContain("status-running");
     expect(runningRow.querySelector(".trace-status-chip")?.textContent).toBe("Running");
+    expect(runningRow.querySelector(".trace-running-indicator")).not.toBeNull();
 
     const waitingRow = getTraceRow("trace-b");
     expect(waitingRow.className).toContain("status-waiting");
     expect(waitingRow.querySelector(".trace-status-chip")?.textContent).toBe("Waiting");
+    expect(waitingRow.querySelector(".trace-running-indicator")).toBeNull();
 
     const idleRow = getTraceRow("trace-c");
     expect(idleRow.className).toContain("status-idle");
     expect(idleRow.querySelector(".trace-status-chip")?.textContent).toBe("Idle");
+    expect(idleRow.querySelector(".trace-running-indicator")).toBeNull();
   });
 
   it("keeps stopped trace idle across stale snapshots and clears override on newer activity", async () => {
@@ -507,7 +536,7 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(getTraceRow("trace-c").querySelector(".trace-status-chip")?.textContent).toBe("Idle"));
     await waitFor(() => expect(document.querySelector(".session-head-counter.status-running")?.textContent).toBe("running 0"));
     await waitFor(() =>
-      expect(document.querySelector("footer.status")?.textContent).toContain("Stop requested (SIGINT) for trace-c"),
+      expect(document.querySelector(".hero-status")?.textContent).toContain("Stop requested (SIGINT) for trace-c"),
     );
 
     const source = MockEventSource.instances[0];
@@ -550,7 +579,133 @@ describe("App sessions list live motion", () => {
         "no active session process found",
       ),
     );
-    await waitFor(() => expect(document.querySelector("footer.status")?.textContent).toContain("Stop failed"));
+    await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Stop failed"));
+  });
+
+  it("opens the exact terminal pane when open endpoint reports focused_pane", async () => {
+    openResponsesByTraceId["trace-c"] = {
+      status: 200,
+      body: {
+        ok: true,
+        status: "focused_pane",
+        message: "focused tmux pane for session process",
+        target: { tmuxSession: "main", windowIndex: 2, paneIndex: 1 },
+        pid: 4242,
+        tty: "/dev/ttys018",
+      },
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const openButton = getTraceOpenButton("trace-c");
+    expect(openButton.disabled).toBe(false);
+    expect(openButton.getAttribute("aria-label")).toBe("Open terminal pane");
+    expect(openButton.querySelector(".trace-open-icon")).not.toBeNull();
+
+    act(() => {
+      openButton.click();
+    });
+
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/trace-c/open"))).toBe(true));
+    await waitFor(() =>
+      expect(document.querySelector(".hero-status")?.textContent).toContain(
+        "Open focused_pane: focused tmux pane for session process (main:2.1 · pid 4242 · tty /dev/ttys018)",
+      ),
+    );
+  });
+
+  it("shows open debug status briefly then returns to base live status", async () => {
+    openResponsesByTraceId["trace-c"] = {
+      status: 200,
+      body: {
+        ok: true,
+        status: "focused_pane",
+        message: "focused tmux pane for session process",
+        target: { tmuxSession: "main", windowIndex: 2, paneIndex: 1 },
+        pid: 4242,
+        tty: "/dev/ttys018",
+      },
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("snapshot", { traces: Object.values(tracesById), overview });
+    });
+    await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Live: 3 traces"));
+
+    const openButton = getTraceOpenButton("trace-c");
+    act(() => {
+      openButton.click();
+    });
+
+    await waitFor(() =>
+      expect(document.querySelector(".hero-status")?.textContent).toContain(
+        "Open focused_pane: focused tmux pane for session process (main:2.1 · pid 4242 · tty /dev/ttys018)",
+      ),
+    );
+    await waitFor(() => expect(document.querySelector(".hero-status")?.className).toContain("flash-active"));
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 3_100));
+    });
+
+    await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Live: 3 traces"));
+    expect(document.querySelector(".hero-status")?.className).not.toContain("flash-active");
+  });
+
+  it("falls back to Ghostty activation when open endpoint reports ghostty_activated", async () => {
+    openResponsesByTraceId["trace-c"] = {
+      status: 200,
+      body: {
+        ok: true,
+        status: "ghostty_activated",
+        message: "activated Ghostty (session process not resolved)",
+      },
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const openButton = getTraceOpenButton("trace-c");
+    act(() => {
+      openButton.click();
+    });
+
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/trace-c/open"))).toBe(true));
+    await waitFor(() =>
+      expect(document.querySelector(".hero-status")?.textContent).toContain(
+        "Open ghostty_activated: activated Ghostty (session process not resolved)",
+      ),
+    );
+  });
+
+  it("shows open failure error in the session row when open endpoint rejects", async () => {
+    openResponsesByTraceId["trace-c"] = {
+      status: 409,
+      body: { ok: false, error: "no active session process found" },
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const openButton = getTraceOpenButton("trace-c");
+    act(() => {
+      openButton.click();
+    });
+
+    await waitFor(() =>
+      expect(getTraceRow("trace-c").querySelector(".trace-open-error")?.textContent).toContain(
+        "no active session process found",
+      ),
+    );
+    await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Open failed"));
   });
 
   it("renders session rows with single-line name element and start/updated fields", async () => {
