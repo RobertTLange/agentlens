@@ -15,7 +15,7 @@
   <img alt="Runtime" src="https://img.shields.io/badge/Runtime-Local--first-111827" />
 </p>
 
-![AgentLens web UI](docs/demo-2026-02-15.png)
+![AgentLens web UI](docs/demo-2026-02-15-141523.png)
 
 ## Overview
 
