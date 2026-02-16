@@ -7,6 +7,11 @@ import { loadConfig, mergeConfig } from "../config.js";
 describe("config", () => {
   it("provides defaults for trace inspector, redaction, cost, and model context windows", () => {
     const config = mergeConfig();
+    expect(config.scan.mode).toBe("adaptive");
+    expect(config.scan.intervalMinMs).toBeGreaterThan(0);
+    expect(config.scan.intervalMaxMs).toBeGreaterThanOrEqual(config.scan.intervalMinMs);
+    expect(config.retention.strategy).toBe("aggressive_recency");
+    expect(config.retention.hotTraceCount).toBeGreaterThan(0);
     expect(config.traceInspector.includeMetaDefault).toBe(false);
     expect(config.traceInspector.topModelCount).toBe(3);
     expect(config.redaction.alwaysOn).toBe(true);
@@ -67,6 +72,25 @@ defaultContextWindowTokens = 123456
 [[models.contextWindows]]
 model = "gpt-5.3-codex"
 contextWindowTokens = 272000
+
+[scan]
+mode = "fixed"
+intervalSeconds = 7
+intervalMinMs = 250
+intervalMaxMs = 900
+fullRescanIntervalMs = 10000
+batchDebounceMs = 88
+recentEventWindow = 321
+includeMetaDefault = false
+statusRunningTtlMs = 555
+statusWaitingTtlMs = 777
+
+[retention]
+strategy = "full_memory"
+hotTraceCount = 9
+warmTraceCount = 8
+maxResidentEventsPerHotTrace = 200
+maxResidentEventsPerWarmTrace = 20
 `,
       "utf8",
     );
@@ -77,5 +101,10 @@ contextWindowTokens = 272000
     expect(config.cost.modelRates[0]?.model).toBe("gpt-5.3-codex");
     expect(config.models.defaultContextWindowTokens).toBe(123456);
     expect(config.models.contextWindows[0]?.contextWindowTokens).toBe(272000);
+    expect(config.scan.mode).toBe("fixed");
+    expect(config.scan.intervalSeconds).toBe(7);
+    expect(config.scan.batchDebounceMs).toBe(88);
+    expect(config.retention.strategy).toBe("full_memory");
+    expect(config.retention.hotTraceCount).toBe(9);
   });
 });

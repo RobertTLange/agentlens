@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -131,6 +131,10 @@ describe("trace index", () => {
     expect(summaries[0]?.eventCount).toBe(5);
     expect(summaries[0]?.toolUseCount).toBe(1);
     expect(summaries[0]?.toolResultCount).toBe(1);
+    expect(summaries[0]?.residentTier).toBeTypeOf("string");
+    expect(typeof summaries[0]?.isMaterialized).toBe("boolean");
+    expect(index.getTopTools(3)[0]).toEqual({ name: "exec_command", count: 1 });
+    expect(index.getPerformanceStats().refreshCount).toBeGreaterThan(0);
 
     const detail = index.getSessionDetail(summaries[0]!.id);
     const toolUseEvent = detail.events.find((event) => event.eventKind === "tool_use") as
@@ -1092,5 +1096,122 @@ describe("trace index", () => {
     expect(toolUse?.toolArgsText.includes("[REDACTED]")).toBe(true);
     expect(JSON.stringify(toolResult?.raw).includes("sk-secret")).toBe(false);
     expect(JSON.stringify(toolResult?.raw).includes("[REDACTED]")).toBe(true);
+  });
+
+  it("uses incremental append parsing for hot traces", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+    const codexPath = path.join(codexDir, "rollout-incremental.jsonl");
+
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-incremental", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            id: "fc_1",
+            name: "exec_command",
+            call_id: "call_1",
+            arguments: "{\"command\":\"echo one\"}",
+          },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      scan: {
+        mode: "adaptive",
+        intervalSeconds: 1,
+        intervalMinMs: 60,
+        intervalMaxMs: 200,
+        fullRescanIntervalMs: 600_000,
+        batchDebounceMs: 40,
+        recentEventWindow: 400,
+        includeMetaDefault: true,
+        statusRunningTtlMs: 300_000,
+        statusWaitingTtlMs: 900_000,
+      },
+      retention: {
+        strategy: "aggressive_recency",
+        hotTraceCount: 5,
+        warmTraceCount: 0,
+        maxResidentEventsPerHotTrace: 1000,
+        maxResidentEventsPerWarmTrace: 50,
+        detailLoadMode: "lazy_from_disk",
+      },
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.start();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await appendFile(
+        codexPath,
+        `${JSON.stringify({
+          timestamp: "2026-02-13T10:00:02.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call_1",
+            output: "one",
+          },
+        })}\n`,
+        "utf8",
+      );
+
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        const summary = index.getSummaries()[0];
+        if ((summary?.eventCount ?? 0) >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      const summary = index.getSummaries()[0];
+      expect(summary?.eventCount).toBe(3);
+      const perf = index.getPerformanceStats();
+      expect(perf.incrementalAppendCount).toBeGreaterThan(0);
+      expect(perf.fullReparseCount).toBeGreaterThan(0);
+    } finally {
+      index.stop();
+    }
   });
 });

@@ -15,7 +15,12 @@ const cliMain = path.resolve(repoRoot, "apps/cli/src/main.ts");
 function buildFixtureConfig(codexSessionsRoot: string) {
   return mergeConfig({
     scan: {
+      mode: "adaptive",
       intervalSeconds: 5,
+      intervalMinMs: 200,
+      intervalMaxMs: 3000,
+      fullRescanIntervalMs: 900_000,
+      batchDebounceMs: 120,
       recentEventWindow: 200,
       includeMetaDefault: false,
       statusRunningTtlMs: 30_000,

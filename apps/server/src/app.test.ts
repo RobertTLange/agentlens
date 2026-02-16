@@ -54,7 +54,12 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
 
   const config = mergeConfig({
     scan: {
+      mode: "adaptive",
       intervalSeconds: 5,
+      intervalMinMs: 200,
+      intervalMaxMs: 3000,
+      fullRescanIntervalMs: 900_000,
+      batchDebounceMs: 120,
       recentEventWindow: 200,
       includeMetaDefault: false,
       statusRunningTtlMs: 30_000,
@@ -360,6 +365,15 @@ describe("server api", () => {
     const health = await server.inject({ method: "GET", url: "/api/healthz" });
     expect(health.statusCode).toBe(200);
     expect(health.json()).toEqual({ ok: true });
+
+    const perfRes = await server.inject({ method: "GET", url: "/api/perf" });
+    expect(perfRes.statusCode).toBe(200);
+    expect(perfRes.json()).toMatchObject({
+      perf: {
+        refreshCount: expect.any(Number),
+        trackedFiles: 1,
+      },
+    });
 
     const tracesRes = await server.inject({ method: "GET", url: "/api/traces" });
     expect(tracesRes.statusCode).toBe(200);

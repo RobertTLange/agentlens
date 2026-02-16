@@ -100,6 +100,8 @@ function makeTrace(
     modelTokenSharesEstimated: true,
     contextWindowPct: 18.2,
     costEstimateUsd: null,
+    residentTier: "hot",
+    isMaterialized: true,
     eventKindCounts: {
       system: 0,
       assistant: 1,

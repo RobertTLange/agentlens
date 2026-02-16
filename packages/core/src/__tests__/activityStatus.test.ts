@@ -31,7 +31,12 @@ async function loadSummaryForCodexLines(
 
   const config = mergeConfig({
     scan: {
+      mode: "adaptive",
       intervalSeconds: 2,
+      intervalMinMs: 200,
+      intervalMaxMs: 3000,
+      fullRescanIntervalMs: 900_000,
+      batchDebounceMs: 120,
       recentEventWindow: 400,
       includeMetaDefault: true,
       statusRunningTtlMs: options.statusRunningTtlMs ?? 300_000,
@@ -381,7 +386,12 @@ describe("trace activity status", () => {
 
     const config = mergeConfig({
       scan: {
+        mode: "adaptive",
         intervalSeconds: 2,
+        intervalMinMs: 200,
+        intervalMaxMs: 3000,
+        fullRescanIntervalMs: 900_000,
+        batchDebounceMs: 120,
         recentEventWindow: 400,
         includeMetaDefault: true,
         statusRunningTtlMs: 50,
