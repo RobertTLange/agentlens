@@ -1049,6 +1049,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   server.get("/api/healthz", async () => ({ ok: true }));
 
   server.get("/api/overview", async () => ({ overview: traceIndex.getOverview() }));
+  server.get("/api/perf", async () => ({ perf: traceIndex.getPerformanceStats() }));
 
   server.get("/api/traces", async (request) => {
     const query = request.query as { agent?: string };

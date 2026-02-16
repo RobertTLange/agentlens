@@ -1,10 +1,16 @@
 import { EventEmitter } from "node:events";
+import path from "node:path";
+import { open, stat } from "node:fs/promises";
+import chokidar, { type FSWatcher } from "chokidar";
 import type {
   ActivityBinsMode,
   AppConfig,
   EventKind,
+  IndexPerformanceStats,
+  NamedCount,
   NormalizedEvent,
   OverviewStats,
+  ResidentTier,
   SessionActivityStatus,
   SessionDetail,
   StreamEnvelope,
@@ -17,7 +23,7 @@ import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
 import { deriveSessionMetrics } from "./metrics.js";
 import { redactEvents } from "./redaction.js";
-import { asRecord, asString, nowMs } from "./utils.js";
+import { asRecord, asString, expandHome, nowMs, stableId } from "./utils.js";
 
 const EVENT_KIND_KEYS: EventKind[] = [
   "system",
@@ -34,10 +40,15 @@ const WAITING_INPUT_PATTERN =
 const WAITING_PROMPT_PATTERN =
   /\b(?:do\s+you\s+want(?:\s+me)?|would\s+you\s+like(?:\s+me)?|should\s+i\b|can\s+you\s+confirm|please\s+confirm|let\s+me\s+know\s+if\s+you(?:'d)?\s+like|which\s+(?:option|approach)|choose\s+(?:one|an?\s+option)|pick\s+(?:one|an?\s+option)|approve(?:\s+this)?|permission\s+to)\b/i;
 const ACTIVITY_BIN_COUNT = 12;
+const MATERIALIZED_TTL_MS = 5 * 60_000;
+const DIRTY_BATCH_LIMIT = 64;
 
 interface TraceEntry {
   file: DiscoveredTraceFile;
-  detail: SessionDetail;
+  summary: TraceSummary;
+  residentEvents: NormalizedEvent[];
+  cachedFullEvents: NormalizedEvent[] | null;
+  pinnedMaterializedAtMs: number;
 }
 
 export interface TracePageOptions {
@@ -69,6 +80,19 @@ interface ActivityBinsMeta {
   binCount: number;
   windowMinutes?: number;
   binMinutes?: number;
+}
+
+interface RefreshStats {
+  parsedFileCount: number;
+  dirtyPathCount: number;
+  usedFullRefresh: boolean;
+  hadFileMutations: boolean;
+}
+
+interface ParserCursorState {
+  parsedSizeBytes: number;
+  pendingText: string;
+  parserName: string;
 }
 
 function emptyEventKindCounts(): Record<EventKind, number> {
@@ -347,6 +371,31 @@ function withDerivedActivityStatus(
   };
 }
 
+function withAgedActivityStatus(summary: TraceSummary, fileMtimeMs: number, scanConfig: AppConfig["scan"], nowMsValue: number): TraceSummary {
+  if (summary.activityStatus === "idle") return summary;
+  const updatedMs = Math.max(summary.lastEventTs ?? 0, fileMtimeMs);
+  if (updatedMs <= 0) {
+    return { ...summary, activityStatus: "idle", activityReason: "stale_timeout" };
+  }
+
+  const ageMs = Math.max(0, nowMsValue - updatedMs);
+  const runningTtlMs = Math.max(0, scanConfig.statusRunningTtlMs);
+  const waitingTtlMs = Math.max(0, scanConfig.statusWaitingTtlMs);
+
+  if (ageMs > waitingTtlMs) {
+    return { ...summary, activityStatus: "idle", activityReason: "stale_timeout" };
+  }
+  if (summary.unmatchedToolUses > 0) {
+    if (summary.activityStatus === "running" && summary.activityReason === "pending_tool_use_fresh") return summary;
+    return { ...summary, activityStatus: "running", activityReason: "pending_tool_use_fresh" };
+  }
+  if (summary.activityStatus === "running" && ageMs > runningTtlMs && ageMs <= waitingTtlMs) {
+    if (summary.activityReason === "recent_activity_cooling") return summary;
+    return { ...summary, activityStatus: "waiting_input", activityReason: "recent_activity_cooling" };
+  }
+  return summary;
+}
+
 function summarize(
   file: DiscoveredTraceFile,
   agent: TraceSummary["agent"],
@@ -358,6 +407,7 @@ function summarize(
   nowMsValue: number,
 ): TraceSummary {
   const eventKindCounts = emptyEventKindCounts();
+  const topToolCounts = new Map<string, number>();
   let errorCount = 0;
   let toolUseCount = 0;
   let toolResultCount = 0;
@@ -372,6 +422,10 @@ function summarize(
     if (event.hasError) errorCount += 1;
     if (event.eventKind === "tool_use") {
       toolUseCount += 1;
+      const toolName = event.toolName || event.functionName;
+      if (toolName) {
+        topToolCounts.set(toolName, (topToolCounts.get(toolName) ?? 0) + 1);
+      }
       if (event.toolUseId) toolUseIds.add(event.toolUseId);
     }
     if (event.eventKind === "tool_result") {
@@ -405,6 +459,10 @@ function summarize(
   });
   const activityBinsMeta = buildActivityBins(events);
   const sessionMetrics = deriveSessionMetrics(events, agent, config);
+  const topTools: NamedCount[] = Array.from(topToolCounts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 12)
+    .map(([name, count]) => ({ name, count }));
 
   return {
     id: file.id,
@@ -438,6 +496,9 @@ function summarize(
     contextWindowPct: sessionMetrics.contextWindowPct,
     costEstimateUsd: sessionMetrics.costEstimateUsd,
     eventKindCounts,
+    residentTier: "hot",
+    isMaterialized: true,
+    topTools,
   };
 }
 
@@ -457,16 +518,74 @@ function buildToc(events: NormalizedEvent[]): TraceTocItem[] {
   }));
 }
 
+function byteLengthUtf8(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function looksLikeCompleteJsonObject(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+  } catch {
+    return false;
+  }
+}
+
+function splitCompleteJsonlText(chunk: string): { completeText: string; pendingText: string } {
+  if (!chunk) return { completeText: "", pendingText: "" };
+
+  const lastNewline = Math.max(chunk.lastIndexOf("\n"), chunk.lastIndexOf("\r"));
+  if (lastNewline < 0) {
+    return looksLikeCompleteJsonObject(chunk) ? { completeText: chunk, pendingText: "" } : { completeText: "", pendingText: chunk };
+  }
+
+  const completeText = chunk.slice(0, lastNewline + 1);
+  const pendingText = chunk.slice(lastNewline + 1);
+  return { completeText, pendingText };
+}
+
 export class TraceIndex extends EventEmitter {
   private readonly parserRegistry = new ParserRegistry();
   private config: AppConfig;
   private entries = new Map<string, TraceEntry>();
+  private pathToId = new Map<string, string>();
+  private cursorById = new Map<string, ParserCursorState>();
+  private watcher: FSWatcher | null = null;
   private timer: NodeJS.Timeout | null = null;
   private streamVersion = 0;
+  private started = false;
+  private refreshInFlight = false;
+  private refreshPending = false;
+  private queuedForceFullRefresh = false;
+  private dirtyPaths = new Set<string>();
+  private adaptiveIntervalMs: number;
+  private perf: IndexPerformanceStats = {
+    refreshCount: 0,
+    fullRefreshCount: 0,
+    dirtyRefreshCount: 0,
+    idleRefreshCount: 0,
+    parsedFileCount: 0,
+    incrementalAppendCount: 0,
+    fullReparseCount: 0,
+    lastRefreshDurationMs: 0,
+    lastRefreshAtMs: 0,
+    averageRefreshDurationMs: 0,
+    watcherRoots: 0,
+    trackedFiles: 0,
+    dirtyPathQueue: 0,
+    hotTraces: 0,
+    warmTraces: 0,
+    coldTraces: 0,
+    materializedTraces: 0,
+  };
+  private lastFullRefreshAtMs = 0;
 
   constructor(config: AppConfig) {
     super();
     this.config = config;
+    this.adaptiveIntervalMs = this.computeBaseIntervalMs();
   }
 
   static async fromConfigPath(configPath?: string): Promise<TraceIndex> {
@@ -480,99 +599,633 @@ export class TraceIndex extends EventEmitter {
 
   setConfig(config: AppConfig): void {
     this.config = config;
+    this.adaptiveIntervalMs = this.computeBaseIntervalMs();
+    if (this.started) {
+      void this.restartWatcher();
+      this.scheduleNextRefresh(this.config.scan.batchDebounceMs);
+    }
   }
 
   async start(): Promise<void> {
+    this.started = true;
     await this.refresh();
-    const intervalMs = Math.max(500, Math.round(this.config.scan.intervalSeconds * 1000));
-    this.timer = setInterval(() => {
-      void this.refresh();
-    }, intervalMs);
+    await this.restartWatcher();
+    this.scheduleNextRefresh(this.computeBaseIntervalMs());
   }
 
   stop(): void {
+    this.started = false;
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
+    }
+    if (this.watcher) {
+      void this.watcher.close();
+      this.watcher = null;
     }
   }
 
   async refresh(): Promise<void> {
-    const refreshNowMs = nowMs();
+    this.queuedForceFullRefresh = true;
+    await this.runRefreshLoop();
+  }
+
+  getPerformanceStats(): IndexPerformanceStats {
+    const stats = this.buildRetentionStats();
+    return {
+      ...this.perf,
+      trackedFiles: this.entries.size,
+      dirtyPathQueue: this.dirtyPaths.size,
+      ...stats,
+    };
+  }
+
+  getTopTools(limit = 12): NamedCount[] {
+    const counts = new Map<string, number>();
+    for (const entry of this.entries.values()) {
+      for (const row of entry.summary.topTools ?? []) {
+        counts.set(row.name, (counts.get(row.name) ?? 0) + row.count);
+      }
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, Math.max(1, limit))
+      .map(([name, count]) => ({ name, count }));
+  }
+
+  private buildRetentionStats(): Pick<
+    IndexPerformanceStats,
+    "hotTraces" | "warmTraces" | "coldTraces" | "materializedTraces"
+  > {
+    let hotTraces = 0;
+    let warmTraces = 0;
+    let coldTraces = 0;
+    let materializedTraces = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.summary.residentTier === "hot") hotTraces += 1;
+      else if (entry.summary.residentTier === "warm") warmTraces += 1;
+      else coldTraces += 1;
+      if (entry.summary.isMaterialized) materializedTraces += 1;
+    }
+    return { hotTraces, warmTraces, coldTraces, materializedTraces };
+  }
+
+  private computeBaseIntervalMs(): number {
+    if (this.config.scan.mode === "fixed") {
+      return Math.max(100, Math.round(this.config.scan.intervalSeconds * 1000));
+    }
+    return Math.max(50, this.config.scan.intervalMinMs);
+  }
+
+  private nextIntervalMs(): number {
+    if (this.config.scan.mode === "fixed") {
+      return this.computeBaseIntervalMs();
+    }
+    const minMs = Math.max(50, this.config.scan.intervalMinMs);
+    const maxMs = Math.max(minMs, this.config.scan.intervalMaxMs);
+    return Math.max(minMs, Math.min(maxMs, this.adaptiveIntervalMs));
+  }
+
+  private scheduleNextRefresh(delayMs = this.nextIntervalMs()): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.triggerRefresh(false);
+    }, Math.max(25, delayMs));
+  }
+
+  private async restartWatcher(): Promise<void> {
+    const roots = this.collectWatchRoots();
+    this.perf.watcherRoots = roots.length;
+    if (this.watcher) {
+      await this.watcher.close();
+      this.watcher = null;
+    }
+    if (roots.length === 0) return;
+
+    const debounceMs = Math.max(50, this.config.scan.batchDebounceMs);
+    this.watcher = chokidar.watch(roots, {
+      ignoreInitial: true,
+      persistent: true,
+      followSymlinks: false,
+      awaitWriteFinish: {
+        stabilityThreshold: debounceMs,
+        pollInterval: 40,
+      },
+    });
+
+    const onDirty = (rawPath: string): void => {
+      if (!rawPath.toLowerCase().endsWith(".jsonl")) return;
+      this.dirtyPaths.add(path.resolve(rawPath));
+      this.perf.dirtyPathQueue = this.dirtyPaths.size;
+      this.scheduleNextRefresh(debounceMs);
+    };
+    this.watcher.on("add", onDirty);
+    this.watcher.on("change", onDirty);
+    this.watcher.on("unlink", onDirty);
+    this.watcher.on("error", () => {
+      // Fallback periodic full-rescan handles watcher misses.
+    });
+  }
+
+  private collectWatchRoots(): string[] {
+    const dedup = new Set<string>();
+    const hasPathSegment = (input: string, segment: string): boolean =>
+      path
+        .normalize(input)
+        .split(path.sep)
+        .some((part) => part.toLowerCase() === segment.toLowerCase());
+
+    for (const entry of this.config.sessionLogDirectories) {
+      const baseRoot = path.resolve(expandHome(entry.directory));
+      const watchRoot =
+        entry.logType === "codex"
+          ? hasPathSegment(baseRoot, "sessions")
+            ? baseRoot
+            : path.join(baseRoot, "sessions")
+          : entry.logType === "claude"
+            ? hasPathSegment(baseRoot, "projects")
+              ? baseRoot
+              : path.join(baseRoot, "projects")
+            : baseRoot;
+      dedup.add(watchRoot);
+    }
+    for (const profile of Object.values(this.config.sources)) {
+      if (!profile.enabled) continue;
+      for (const root of profile.roots) {
+        dedup.add(path.resolve(expandHome(root)));
+      }
+    }
+    return Array.from(dedup.values());
+  }
+
+  private shouldRunFullRefresh(nowMsValue: number): boolean {
+    if (this.lastFullRefreshAtMs <= 0) return true;
+    const fullIntervalMs = Math.max(1_000, this.config.scan.fullRescanIntervalMs);
+    return nowMsValue - this.lastFullRefreshAtMs >= fullIntervalMs;
+  }
+
+  private async triggerRefresh(forceFull: boolean): Promise<void> {
+    if (forceFull) this.queuedForceFullRefresh = true;
+    await this.runRefreshLoop();
+  }
+
+  private async runRefreshLoop(): Promise<void> {
+    if (this.refreshInFlight) {
+      this.refreshPending = true;
+      return;
+    }
+    this.refreshInFlight = true;
+    try {
+      this.refreshPending = false;
+      const startedAtMs = nowMs();
+      const useFullRefresh = this.queuedForceFullRefresh || this.shouldRunFullRefresh(startedAtMs);
+      this.queuedForceFullRefresh = false;
+      const stats = await this.performRefresh(useFullRefresh, startedAtMs);
+      this.recordRefreshPerf(stats, startedAtMs);
+    } finally {
+      this.refreshInFlight = false;
+      if (this.refreshPending || this.queuedForceFullRefresh) {
+        this.scheduleNextRefresh(25);
+      } else if (this.started) {
+        this.scheduleNextRefresh();
+      }
+    }
+  }
+
+  private recordRefreshPerf(stats: RefreshStats, startedAtMs: number): void {
+    const finishedAtMs = nowMs();
+    const durationMs = Math.max(0, finishedAtMs - startedAtMs);
+    this.perf.refreshCount += 1;
+    this.perf.parsedFileCount += stats.parsedFileCount;
+    this.perf.lastRefreshDurationMs = durationMs;
+    this.perf.lastRefreshAtMs = finishedAtMs;
+    this.perf.averageRefreshDurationMs =
+      this.perf.refreshCount === 1
+        ? durationMs
+        : this.perf.averageRefreshDurationMs + (durationMs - this.perf.averageRefreshDurationMs) / this.perf.refreshCount;
+    if (stats.usedFullRefresh) this.perf.fullRefreshCount += 1;
+    else if (stats.dirtyPathCount > 0) this.perf.dirtyRefreshCount += 1;
+    else this.perf.idleRefreshCount += 1;
+
+    if (this.config.scan.mode === "adaptive") {
+      const minMs = Math.max(50, this.config.scan.intervalMinMs);
+      const maxMs = Math.max(minMs, this.config.scan.intervalMaxMs);
+      if (stats.hadFileMutations) this.adaptiveIntervalMs = minMs;
+      else this.adaptiveIntervalMs = Math.min(maxMs, Math.round(Math.max(minMs, this.adaptiveIntervalMs) * 1.4));
+    }
+  }
+
+  private async performRefresh(useFullRefresh: boolean, refreshNowMs: number): Promise<RefreshStats> {
+    const stats: RefreshStats = {
+      parsedFileCount: 0,
+      dirtyPathCount: this.dirtyPaths.size,
+      usedFullRefresh: useFullRefresh,
+      hadFileMutations: false,
+    };
+    if (useFullRefresh) {
+      await this.refreshFull(refreshNowMs, stats);
+    } else {
+      await this.refreshDirty(refreshNowMs, stats);
+    }
+    this.applyRetention(refreshNowMs);
+    this.refreshActivityStatus(refreshNowMs, stats);
+    this.perf.trackedFiles = this.entries.size;
+    this.perf.dirtyPathQueue = this.dirtyPaths.size;
+    const retentionStats = this.buildRetentionStats();
+    this.perf.hotTraces = retentionStats.hotTraces;
+    this.perf.warmTraces = retentionStats.warmTraces;
+    this.perf.coldTraces = retentionStats.coldTraces;
+    this.perf.materializedTraces = retentionStats.materializedTraces;
+    this.emitStream("overview_updated", { overview: this.getOverview() });
+    return stats;
+  }
+
+  private async refreshFull(refreshNowMs: number, stats: RefreshStats): Promise<void> {
     const files = await discoverTraceFiles(this.config);
+    this.lastFullRefreshAtMs = refreshNowMs;
+
     const nextIds = new Set(files.map((file) => file.id));
+    const nextPathToId = new Map<string, string>();
+    for (const file of files) {
+      nextPathToId.set(file.path, file.id);
+    }
+    this.pathToId = nextPathToId;
 
     for (const existingId of this.entries.keys()) {
       if (!nextIds.has(existingId)) {
         this.entries.delete(existingId);
+        this.cursorById.delete(existingId);
         this.emitStream("trace_removed", { id: existingId });
+        stats.hadFileMutations = true;
       }
     }
 
     for (const file of files) {
-      const current = this.entries.get(file.id);
-      const changed = !current || current.file.mtimeMs !== file.mtimeMs || current.file.sizeBytes !== file.sizeBytes;
-      if (!changed) continue;
+      const changed = await this.upsertFile(file, refreshNowMs);
+      if (changed) {
+        stats.parsedFileCount += 1;
+        stats.hadFileMutations = true;
+      }
+    }
+  }
 
-      try {
-        const parsed = await this.parserRegistry.parseFile(file);
-        const parsedEvents = parsed.events;
-        const summary = summarize(
-          file,
-          parsed.agent,
-          parsed.parser,
-          parsed.sessionId,
-          parsedEvents,
-          parsed.parseError,
-          this.config,
-          refreshNowMs,
-        );
-        const redactedEvents = redactEvents(parsedEvents, this.config.redaction);
-        const detail: SessionDetail = { summary, events: redactedEvents };
+  private async refreshDirty(refreshNowMs: number, stats: RefreshStats): Promise<void> {
+    if (this.dirtyPaths.size === 0) return;
+    const dirtyPaths: string[] = [];
+    for (const dirtyPath of this.dirtyPaths) {
+      dirtyPaths.push(dirtyPath);
+      this.dirtyPaths.delete(dirtyPath);
+      if (dirtyPaths.length >= DIRTY_BATCH_LIMIT) break;
+    }
+    if (this.dirtyPaths.size > 0) {
+      this.refreshPending = true;
+    }
+    this.perf.dirtyPathQueue = this.dirtyPaths.size;
+    stats.dirtyPathCount = dirtyPaths.length;
 
-        const previousCount = current?.detail.events.length ?? 0;
-        this.entries.set(file.id, { file, detail });
-        const eventType = current ? "trace_updated" : "trace_added";
-        this.emitStream(eventType, { summary });
-
-        const appended = Math.max(0, parsed.events.length - previousCount);
-        if (appended > 0) {
-          this.emitStream("events_appended", {
-            id: file.id,
-            appended,
-            latestEvents: redactedEvents.slice(-Math.min(40, appended)),
-          });
+    const processedIds = new Set<string>();
+    for (const dirtyPath of dirtyPaths) {
+      const normalizedPath = path.resolve(dirtyPath);
+      const existingId = this.pathToId.get(normalizedPath);
+      const file = await this.discoverSingleTraceFile(normalizedPath, existingId);
+      if (!file) {
+        if (existingId && this.entries.delete(existingId)) {
+          this.cursorById.delete(existingId);
+          this.emitStream("trace_removed", { id: existingId });
+          stats.hadFileMutations = true;
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config, refreshNowMs);
-        this.entries.set(file.id, { file, detail: { summary, events: [] } });
-        this.emitStream(current ? "trace_updated" : "trace_added", { summary });
+        this.pathToId.delete(normalizedPath);
+        continue;
+      }
+
+      this.pathToId.set(file.path, file.id);
+      if (existingId && existingId !== file.id && this.entries.delete(existingId)) {
+        this.cursorById.delete(existingId);
+        this.emitStream("trace_removed", { id: existingId });
+        stats.hadFileMutations = true;
+      }
+      if (processedIds.has(file.id)) continue;
+      processedIds.add(file.id);
+
+      const changed = await this.upsertFile(file, refreshNowMs);
+      if (changed) {
+        stats.parsedFileCount += 1;
+        stats.hadFileMutations = true;
+      }
+    }
+  }
+
+  private inferSourceMetadata(filePath: string): Pick<DiscoveredTraceFile, "sourceProfile" | "agentHint" | "parserHint"> | null {
+    const normalizedPath = filePath.replace(/\\/g, "/").toLowerCase();
+    for (const entry of this.config.sessionLogDirectories) {
+      const root = path.resolve(expandHome(entry.directory));
+      const normalizedRoot = root.replace(/\\/g, "/").toLowerCase();
+      if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`)) continue;
+      if (entry.logType === "codex" && !normalizedPath.includes("/sessions/")) continue;
+      if (entry.logType === "claude" && !normalizedPath.includes("/projects/")) continue;
+      return {
+        sourceProfile: "session_log",
+        agentHint: entry.logType,
+        parserHint: entry.logType,
+      };
+    }
+
+    const sourceNames = Object.keys(this.config.sources).sort();
+    for (const sourceName of sourceNames) {
+      const profile = this.config.sources[sourceName];
+      if (!profile?.enabled) continue;
+      for (const rootRaw of profile.roots) {
+        const root = path.resolve(expandHome(rootRaw));
+        const normalizedRoot = root.replace(/\\/g, "/").toLowerCase();
+        if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`)) continue;
+        const hint = profile.agentHint ?? "unknown";
+        return {
+          sourceProfile: sourceName,
+          agentHint: hint,
+          ...(hint !== "unknown" ? { parserHint: hint } : {}),
+        };
+      }
+    }
+    return null;
+  }
+
+  private async discoverSingleTraceFile(filePath: string, existingId?: string): Promise<DiscoveredTraceFile | null> {
+    if (!filePath.toLowerCase().endsWith(".jsonl")) return null;
+    try {
+      const fileStat = await stat(filePath);
+      const existingEntry = existingId ? this.entries.get(existingId) : undefined;
+      if (existingEntry && existingEntry.file.path === filePath) {
+        return {
+          ...existingEntry.file,
+          sizeBytes: fileStat.size,
+          mtimeMs: fileStat.mtimeMs,
+          ino: Number(fileStat.ino),
+          dev: Number(fileStat.dev),
+        };
+      }
+
+      const inferred = this.inferSourceMetadata(filePath);
+      if (!inferred) return null;
+      const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
+      return {
+        id,
+        path: filePath,
+        sourceProfile: inferred.sourceProfile,
+        agentHint: inferred.agentHint,
+        ...(inferred.parserHint ? { parserHint: inferred.parserHint } : {}),
+        sizeBytes: fileStat.size,
+        mtimeMs: fileStat.mtimeMs,
+        ino: Number(fileStat.ino),
+        dev: Number(fileStat.dev),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async upsertFile(file: DiscoveredTraceFile, refreshNowMs: number): Promise<boolean> {
+    const current = this.entries.get(file.id);
+    const changed = !current || current.file.mtimeMs !== file.mtimeMs || current.file.sizeBytes !== file.sizeBytes;
+    if (!changed) {
+      if (current) current.file = file;
+      return false;
+    }
+
+    if (current) {
+      const appendApplied = await this.tryIncrementalAppend(current, file, refreshNowMs);
+      if (appendApplied) {
+        return true;
       }
     }
 
-    for (const [id, entry] of this.entries) {
-      const nextSummary = withDerivedActivityStatus(
-        entry.detail.summary,
-        entry.detail.events,
-        entry.file.mtimeMs,
-        this.config.scan,
+    this.perf.fullReparseCount += 1;
+    try {
+      const parsed = await this.parserRegistry.parseFile(file);
+      const summary = summarize(
+        file,
+        parsed.agent,
+        parsed.parser,
+        parsed.sessionId,
+        parsed.events,
+        parsed.parseError,
+        this.config,
         refreshNowMs,
       );
-      if (nextSummary === entry.detail.summary) continue;
+      const redactedEvents = redactEvents(parsed.events, this.config.redaction);
+      const previousCount = current?.summary.eventCount ?? 0;
 
-      const detail: SessionDetail = {
-        ...entry.detail,
-        summary: nextSummary,
-      };
-      this.entries.set(id, {
-        ...entry,
-        detail,
+      this.entries.set(file.id, {
+        file,
+        summary,
+        residentEvents: redactedEvents,
+        cachedFullEvents: redactedEvents,
+        pinnedMaterializedAtMs: current?.pinnedMaterializedAtMs ?? 0,
       });
-      this.emitStream("trace_updated", { summary: nextSummary });
+      this.cursorById.set(file.id, {
+        parsedSizeBytes: file.sizeBytes,
+        pendingText: "",
+        parserName: parsed.parser,
+      });
+      const eventType = current ? "trace_updated" : "trace_added";
+      this.emitStream(eventType, { summary });
+
+      const appended = Math.max(0, redactedEvents.length - previousCount);
+      if (appended > 0) {
+        this.emitStream("events_appended", {
+          id: file.id,
+          appended,
+          latestEvents: redactedEvents.slice(-Math.min(40, appended)),
+        });
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const summary = summarize(file, file.agentHint, "unknown", "", [], message, this.config, refreshNowMs);
+      this.entries.set(file.id, {
+        file,
+        summary,
+        residentEvents: [],
+        cachedFullEvents: [],
+        pinnedMaterializedAtMs: 0,
+      });
+      this.cursorById.set(file.id, {
+        parsedSizeBytes: file.sizeBytes,
+        pendingText: "",
+        parserName: current?.summary.parser ?? "unknown",
+      });
+      this.emitStream(current ? "trace_updated" : "trace_added", { summary });
+      return true;
+    }
+  }
+
+  private async tryIncrementalAppend(current: TraceEntry, file: DiscoveredTraceFile, refreshNowMs: number): Promise<boolean> {
+    if (!current.cachedFullEvents || current.summary.parseError) return false;
+    if (file.sizeBytes < current.file.sizeBytes) return false;
+    const cursor = this.cursorById.get(file.id);
+    if (!cursor) return false;
+    if (file.sizeBytes <= cursor.parsedSizeBytes) return false;
+    if (cursor.parsedSizeBytes < 0 || cursor.parsedSizeBytes > file.sizeBytes) return false;
+
+    const newChunk = await this.readFileChunk(file.path, cursor.parsedSizeBytes, file.sizeBytes - cursor.parsedSizeBytes);
+    if (!newChunk) {
+      current.file = file;
+      this.entries.set(file.id, current);
+      return false;
     }
 
-    this.emitStream("overview_updated", { overview: this.getOverview() });
+    const combined = cursor.pendingText + newChunk;
+    const { completeText, pendingText } = splitCompleteJsonlText(combined);
+    if (!completeText.trim()) {
+      this.cursorById.set(file.id, {
+        parsedSizeBytes: file.sizeBytes,
+        pendingText,
+        parserName: cursor.parserName,
+      });
+      current.file = file;
+      this.entries.set(file.id, current);
+      return false;
+    }
+
+    const parsed = this.parserRegistry.parseText(file, completeText, cursor.parserName);
+    const redactedNewEvents = redactEvents(parsed.events, this.config.redaction);
+    if (redactedNewEvents.length === 0) {
+      this.cursorById.set(file.id, {
+        parsedSizeBytes: file.sizeBytes,
+        pendingText,
+        parserName: parsed.parser,
+      });
+      current.file = file;
+      this.entries.set(file.id, current);
+      return false;
+    }
+
+    const baseIndex = current.summary.eventCount;
+    const baseOffset = Math.max(0, cursor.parsedSizeBytes - byteLengthUtf8(cursor.pendingText));
+    const rebasedEvents = redactedNewEvents.map((event, idx) => {
+      const nextIndex = baseIndex + idx + 1;
+      const nextOffset = baseOffset + event.offset;
+      return {
+        ...event,
+        index: nextIndex,
+        offset: nextOffset,
+        sessionId: event.sessionId || current.summary.sessionId,
+        eventId: `${event.traceId}:${nextIndex}:${nextOffset}`,
+      };
+    });
+
+    const mergedEvents = current.cachedFullEvents.concat(rebasedEvents);
+    const mergedSummary = summarize(
+      file,
+      current.summary.agent,
+      current.summary.parser,
+      current.summary.sessionId || parsed.sessionId,
+      mergedEvents,
+      "",
+      this.config,
+      refreshNowMs,
+    );
+    const summary: TraceSummary = {
+      ...mergedSummary,
+      residentTier: current.summary.residentTier,
+      isMaterialized: true,
+    };
+
+    this.entries.set(file.id, {
+      ...current,
+      file,
+      summary,
+      residentEvents: mergedEvents,
+      cachedFullEvents: mergedEvents,
+      pinnedMaterializedAtMs: current.pinnedMaterializedAtMs,
+    });
+    this.cursorById.set(file.id, {
+      parsedSizeBytes: file.sizeBytes,
+      pendingText,
+      parserName: parsed.parser,
+    });
+    this.perf.incrementalAppendCount += 1;
+
+    this.emitStream("trace_updated", { summary });
+    this.emitStream("events_appended", {
+      id: file.id,
+      appended: rebasedEvents.length,
+      latestEvents: rebasedEvents.slice(-Math.min(40, rebasedEvents.length)),
+    });
+    return true;
+  }
+
+  private async readFileChunk(filePath: string, offset: number, length: number): Promise<string> {
+    if (length <= 0) return "";
+    const fileHandle = await open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(Math.max(0, length));
+      const { bytesRead } = await fileHandle.read(buffer, 0, buffer.length, offset);
+      if (bytesRead <= 0) return "";
+      return buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await fileHandle.close();
+    }
+  }
+
+  private applyRetention(nowMsValue: number): void {
+    const sortedSummaries = sortSummaries(Array.from(this.entries.values(), (entry) => entry.summary));
+    const hotLimit = this.config.retention.hotTraceCount;
+    const warmLimit = this.config.retention.warmTraceCount;
+    const hotMaxEvents = this.config.retention.maxResidentEventsPerHotTrace;
+    const warmMaxEvents = this.config.retention.maxResidentEventsPerWarmTrace;
+
+    for (const [idx, summary] of sortedSummaries.entries()) {
+      const entry = this.entries.get(summary.id);
+      if (!entry) continue;
+
+      const tier: ResidentTier =
+        this.config.retention.strategy === "full_memory"
+          ? "hot"
+          : idx < hotLimit
+            ? "hot"
+            : idx < hotLimit + warmLimit
+              ? "warm"
+              : "cold";
+      const maxResidentEvents =
+        this.config.retention.strategy === "full_memory" ? Number.MAX_SAFE_INTEGER : tier === "hot" ? hotMaxEvents : tier === "warm" ? warmMaxEvents : 0;
+      const sourceEvents = entry.cachedFullEvents ?? entry.residentEvents;
+      entry.residentEvents =
+        maxResidentEvents === 0
+          ? []
+          : sourceEvents.slice(-Math.min(sourceEvents.length, Math.max(1, maxResidentEvents)));
+
+      const keepPinned = entry.pinnedMaterializedAtMs > 0 && nowMsValue - entry.pinnedMaterializedAtMs <= MATERIALIZED_TTL_MS;
+      if (this.config.retention.strategy !== "full_memory" && tier !== "hot" && !keepPinned) {
+        entry.cachedFullEvents = null;
+      }
+      if (this.config.retention.strategy === "full_memory" && !entry.cachedFullEvents) {
+        entry.cachedFullEvents = sourceEvents;
+      }
+
+      const isMaterialized =
+        (entry.cachedFullEvents?.length ?? 0) >= summary.eventCount || entry.residentEvents.length >= summary.eventCount;
+      if (summary.residentTier !== tier || summary.isMaterialized !== isMaterialized) {
+        const nextSummary: TraceSummary = {
+          ...summary,
+          residentTier: tier,
+          isMaterialized,
+        };
+        entry.summary = nextSummary;
+        this.emitStream("trace_updated", { summary: nextSummary });
+      }
+    }
+  }
+
+  private refreshActivityStatus(refreshNowMs: number, stats: RefreshStats): void {
+    for (const [id, entry] of this.entries) {
+      const nextSummary = withAgedActivityStatus(entry.summary, entry.file.mtimeMs, this.config.scan, refreshNowMs);
+      if (nextSummary === entry.summary) continue;
+      entry.summary = nextSummary;
+      this.entries.set(id, entry);
+      this.emitStream("trace_updated", { summary: nextSummary });
+      stats.hadFileMutations = true;
+    }
   }
 
   private emitStream(type: StreamEnvelope["type"], payload: Record<string, unknown>): void {
@@ -587,7 +1240,7 @@ export class TraceIndex extends EventEmitter {
   }
 
   getSummaries(): TraceSummary[] {
-    return sortSummaries(Array.from(this.entries.values(), (entry) => entry.detail.summary));
+    return sortSummaries(Array.from(this.entries.values(), (entry) => entry.summary));
   }
 
   getOverview(): OverviewStats {
@@ -627,12 +1280,46 @@ export class TraceIndex extends EventEmitter {
     };
   }
 
+  private hydrateEventsForEntry(entry: TraceEntry): NormalizedEvent[] {
+    if (entry.cachedFullEvents && entry.cachedFullEvents.length >= entry.summary.eventCount) {
+      return entry.cachedFullEvents;
+    }
+    if (entry.residentEvents.length >= entry.summary.eventCount) {
+      return entry.residentEvents;
+    }
+
+    const parsed = this.parserRegistry.parseFileSync(entry.file, entry.summary.parser);
+    const redactedEvents = redactEvents(parsed.events, this.config.redaction);
+    const refreshedSummary = summarize(
+      entry.file,
+      parsed.agent,
+      parsed.parser,
+      parsed.sessionId,
+      parsed.events,
+      parsed.parseError,
+      this.config,
+      nowMs(),
+    );
+    entry.cachedFullEvents = redactedEvents;
+    entry.pinnedMaterializedAtMs = nowMs();
+    entry.summary = {
+      ...refreshedSummary,
+      residentTier: entry.summary.residentTier,
+      isMaterialized: true,
+    };
+    return redactedEvents;
+  }
+
   getSessionDetail(id: string): SessionDetail {
     const found = this.entries.get(id);
     if (!found) {
       throw new Error(`unknown trace id: ${id}`);
     }
-    return found.detail;
+    const events = this.hydrateEventsForEntry(found);
+    return {
+      summary: found.summary,
+      events,
+    };
   }
 
   getTracePage(id: string, options: TracePageOptions = {}): TracePage {

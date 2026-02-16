@@ -12,6 +12,36 @@ export type EventKind =
 export type SessionActivityStatus = "running" | "waiting_input" | "idle";
 export type ActivityBinsMode = "time" | "event_index";
 export type CostUnknownModelPolicy = "n_a" | "zero";
+export type ScanMode = "adaptive" | "fixed";
+export type RetentionStrategy = "aggressive_recency" | "full_memory";
+export type ResidentTier = "hot" | "warm" | "cold";
+
+export interface ScanConfig {
+  mode: ScanMode;
+  intervalSeconds: number;
+  intervalMinMs: number;
+  intervalMaxMs: number;
+  fullRescanIntervalMs: number;
+  batchDebounceMs: number;
+  recentEventWindow: number;
+  includeMetaDefault: boolean;
+  statusRunningTtlMs: number;
+  statusWaitingTtlMs: number;
+}
+
+export interface RetentionConfig {
+  strategy: RetentionStrategy;
+  hotTraceCount: number;
+  warmTraceCount: number;
+  maxResidentEventsPerHotTrace: number;
+  maxResidentEventsPerWarmTrace: number;
+  detailLoadMode: "lazy_from_disk";
+}
+
+export interface NamedCount {
+  name: string;
+  count: number;
+}
 
 export interface TraceInspectorConfig {
   includeMetaDefault: boolean;
@@ -85,13 +115,8 @@ export interface SessionLogDirectoryConfig {
 }
 
 export interface AppConfig {
-  scan: {
-    intervalSeconds: number;
-    recentEventWindow: number;
-    includeMetaDefault: boolean;
-    statusRunningTtlMs: number;
-    statusWaitingTtlMs: number;
-  };
+  scan: ScanConfig;
+  retention: RetentionConfig;
   sessionLogDirectories: SessionLogDirectoryConfig[];
   sources: Record<string, SourceProfileConfig>;
   traceInspector: TraceInspectorConfig;
@@ -159,6 +184,9 @@ export interface TraceSummary {
   contextWindowPct?: number | null;
   costEstimateUsd?: number | null;
   eventKindCounts: Record<EventKind, number>;
+  residentTier: ResidentTier;
+  isMaterialized: boolean;
+  topTools?: NamedCount[];
 }
 
 export interface SessionDetail {
@@ -194,6 +222,26 @@ export interface OverviewStats {
   byAgent: Record<string, number>;
   byEventKind: Record<EventKind, number>;
   updatedAtMs: number;
+}
+
+export interface IndexPerformanceStats {
+  refreshCount: number;
+  fullRefreshCount: number;
+  dirtyRefreshCount: number;
+  idleRefreshCount: number;
+  parsedFileCount: number;
+  incrementalAppendCount: number;
+  fullReparseCount: number;
+  lastRefreshDurationMs: number;
+  lastRefreshAtMs: number;
+  averageRefreshDurationMs: number;
+  watcherRoots: number;
+  trackedFiles: number;
+  dirtyPathQueue: number;
+  hotTraces: number;
+  warmTraces: number;
+  coldTraces: number;
+  materializedTraces: number;
 }
 
 export interface StreamEnvelope {

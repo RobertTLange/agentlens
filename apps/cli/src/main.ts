@@ -136,8 +136,6 @@ program
     const cutoff = opts.since ? now - toMsWindow(opts.since) : 0;
 
     const items = cutoff > 0 ? all.filter((summary) => (summary.lastEventTs ?? summary.mtimeMs) >= cutoff) : all;
-    const topTools = new Map<string, number>();
-
     const data = {
       traces: items.length,
       sessions: items.filter((item) => Boolean(item.sessionId)).length,
@@ -155,22 +153,8 @@ program
         }
         return acc;
       }, {}),
-      topTools: [] as Array<{ name: string; count: number }>,
+      topTools: snapshot.getTopTools(12),
     };
-
-    for (const item of items) {
-      const detail = snapshot.getSessionDetail(item.id);
-      for (const event of detail.events) {
-        if (event.eventKind !== "tool_use") continue;
-        const key = event.toolName || event.functionName;
-        if (!key) continue;
-        topTools.set(key, (topTools.get(key) ?? 0) + 1);
-      }
-    }
-    data.topTools = Array.from(topTools.entries())
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, 12)
-      .map(([name, count]) => ({ name, count }));
 
     if (opts.json) {
       console.log(JSON.stringify(data, null, 2));

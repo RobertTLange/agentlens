@@ -8,7 +8,9 @@ import type {
   CostConfig,
   CostModelRate,
   ModelsConfig,
+  RetentionConfig,
   RedactionConfig,
+  ScanConfig,
   SessionLogDirectoryConfig,
   SourceProfileConfig,
   TraceInspectorConfig,
@@ -96,6 +98,60 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
 
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function positiveIntOrDefault(value: unknown, fallback: number): number {
+  const numeric = toFiniteNumber(value);
+  if (numeric === null || numeric <= 0) return fallback;
+  return Math.round(numeric);
+}
+
+function positiveMsOrDefault(value: unknown, fallback: number): number {
+  const numeric = toFiniteNumber(value);
+  if (numeric === null || numeric <= 0) return fallback;
+  return Math.max(1, Math.round(numeric));
+}
+
+function mergeScan(input?: Partial<ScanConfig>): ScanConfig {
+  const defaults = DEFAULT_CONFIG.scan;
+  const mode = input?.mode === "fixed" ? "fixed" : "adaptive";
+  const intervalMinMs = positiveMsOrDefault(input?.intervalMinMs, defaults.intervalMinMs);
+  const intervalMaxMs = Math.max(intervalMinMs, positiveMsOrDefault(input?.intervalMaxMs, defaults.intervalMaxMs));
+
+  return {
+    mode,
+    intervalSeconds: positiveMsOrDefault(input?.intervalSeconds, defaults.intervalSeconds),
+    intervalMinMs,
+    intervalMaxMs,
+    fullRescanIntervalMs: positiveMsOrDefault(input?.fullRescanIntervalMs, defaults.fullRescanIntervalMs),
+    batchDebounceMs: positiveMsOrDefault(input?.batchDebounceMs, defaults.batchDebounceMs),
+    recentEventWindow: positiveIntOrDefault(input?.recentEventWindow, defaults.recentEventWindow),
+    includeMetaDefault: input?.includeMetaDefault ?? defaults.includeMetaDefault,
+    statusRunningTtlMs: positiveMsOrDefault(input?.statusRunningTtlMs, defaults.statusRunningTtlMs),
+    statusWaitingTtlMs: positiveMsOrDefault(input?.statusWaitingTtlMs, defaults.statusWaitingTtlMs),
+  };
+}
+
+function mergeRetention(input?: Partial<RetentionConfig>): RetentionConfig {
+  const defaults = DEFAULT_CONFIG.retention;
+  const strategy = input?.strategy === "full_memory" ? "full_memory" : "aggressive_recency";
+  const hotTraceCount = Math.max(1, positiveIntOrDefault(input?.hotTraceCount, defaults.hotTraceCount));
+  const warmTraceCount = Math.max(0, positiveIntOrDefault(input?.warmTraceCount, defaults.warmTraceCount));
+
+  return {
+    strategy,
+    hotTraceCount,
+    warmTraceCount,
+    maxResidentEventsPerHotTrace: Math.max(
+      1,
+      positiveIntOrDefault(input?.maxResidentEventsPerHotTrace, defaults.maxResidentEventsPerHotTrace),
+    ),
+    maxResidentEventsPerWarmTrace: Math.max(
+      1,
+      positiveIntOrDefault(input?.maxResidentEventsPerWarmTrace, defaults.maxResidentEventsPerWarmTrace),
+    ),
+    detailLoadMode: "lazy_from_disk",
+  };
 }
 
 function mergeTraceInspector(input?: Partial<TraceInspectorConfig>): TraceInspectorConfig {
@@ -195,13 +251,8 @@ export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
   }
 
   return {
-    scan: {
-      intervalSeconds: input?.scan?.intervalSeconds ?? DEFAULT_CONFIG.scan.intervalSeconds,
-      recentEventWindow: input?.scan?.recentEventWindow ?? DEFAULT_CONFIG.scan.recentEventWindow,
-      includeMetaDefault: input?.scan?.includeMetaDefault ?? DEFAULT_CONFIG.scan.includeMetaDefault,
-      statusRunningTtlMs: input?.scan?.statusRunningTtlMs ?? DEFAULT_CONFIG.scan.statusRunningTtlMs,
-      statusWaitingTtlMs: input?.scan?.statusWaitingTtlMs ?? DEFAULT_CONFIG.scan.statusWaitingTtlMs,
-    },
+    scan: mergeScan(input?.scan),
+    retention: mergeRetention(input?.retention),
     sessionLogDirectories: mergeSessionLogDirectories(input?.sessionLogDirectories, input?.sessionJsonlDirectories),
     sources,
     traceInspector: mergeTraceInspector(input?.traceInspector),

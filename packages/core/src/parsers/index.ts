@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import type { ParseOutput, TraceParser } from "./types.js";
 import type { DiscoveredTraceFile } from "../discovery.js";
@@ -10,6 +11,10 @@ export class ParserRegistry {
 
   constructor(parsers?: TraceParser[]) {
     this.parsers = parsers ?? [new ClaudeParser(), new CodexParser(), new GenericParser()];
+  }
+
+  private byName(name: string): TraceParser | undefined {
+    return this.parsers.find((parser) => parser.name === name);
   }
 
   private choose(file: DiscoveredTraceFile, headText: string): TraceParser {
@@ -34,10 +39,22 @@ export class ParserRegistry {
     return best ?? new GenericParser();
   }
 
+  parseText(file: DiscoveredTraceFile, text: string, parserNameHint?: string): ParseOutput {
+    const hinted = parserNameHint ? this.byName(parserNameHint) : undefined;
+    const parser = hinted ?? this.choose(file, text.slice(0, 8192));
+    return parser.parse(file, text);
+  }
+
   async parseFile(file: DiscoveredTraceFile): Promise<ParseOutput> {
     const text = await readFile(file.path, "utf8");
+    return this.parseText(file, text);
+  }
+
+  parseFileSync(file: DiscoveredTraceFile, parserNameHint?: string): ParseOutput {
+    const text = readFileSync(file.path, "utf8");
     const headText = text.slice(0, 8192);
-    const parser = this.choose(file, headText);
+    const hinted = parserNameHint ? this.byName(parserNameHint) : undefined;
+    const parser = hinted ?? this.choose(file, headText);
     return parser.parse(file, text);
   }
 }

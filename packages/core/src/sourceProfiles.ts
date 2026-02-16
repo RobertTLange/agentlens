@@ -37,11 +37,24 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
 
 export const DEFAULT_CONFIG: AppConfig = {
   scan: {
+    mode: "adaptive",
     intervalSeconds: 2,
+    intervalMinMs: 200,
+    intervalMaxMs: 3000,
+    fullRescanIntervalMs: 900_000,
+    batchDebounceMs: 120,
     recentEventWindow: 400,
     includeMetaDefault: true,
     statusRunningTtlMs: 20_000,
     statusWaitingTtlMs: 1_800_000,
+  },
+  retention: {
+    strategy: "aggressive_recency",
+    hotTraceCount: 60,
+    warmTraceCount: 240,
+    maxResidentEventsPerHotTrace: 1200,
+    maxResidentEventsPerWarmTrace: 120,
+    detailLoadMode: "lazy_from_disk",
   },
   sessionLogDirectories: DEFAULT_SESSION_LOG_DIRECTORIES,
   sources: DEFAULT_SOURCE_PROFILES,
