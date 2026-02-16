@@ -2,11 +2,24 @@
 # Copy to ~/.agentlens/config.toml and edit per machine/workflow.
 
 [scan]
+mode = "adaptive"
 intervalSeconds = 2
+intervalMinMs = 200
+intervalMaxMs = 3000
+fullRescanIntervalMs = 900000
+batchDebounceMs = 120
 recentEventWindow = 400
 includeMetaDefault = true
 statusRunningTtlMs = 300000
 statusWaitingTtlMs = 900000
+
+[retention]
+strategy = "aggressive_recency"
+hotTraceCount = 60
+warmTraceCount = 240
+maxResidentEventsPerHotTrace = 1200
+maxResidentEventsPerWarmTrace = 120
+detailLoadMode = "lazy_from_disk"
 
 sessionLogDirectories = [
   { directory = "~/.codex", logType = "codex" },

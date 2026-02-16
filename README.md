@@ -47,8 +47,25 @@ TTL settings live in config under `scan`:
 
 ```toml
 [scan]
+mode = "adaptive" # or "fixed"
+intervalMinMs = 200
+intervalMaxMs = 3000
+fullRescanIntervalMs = 900000
+batchDebounceMs = 120
 statusRunningTtlMs = 300000
 statusWaitingTtlMs = 900000
+```
+
+Retention controls are under `retention`:
+
+```toml
+[retention]
+strategy = "aggressive_recency" # or "full_memory"
+hotTraceCount = 60
+warmTraceCount = 240
+maxResidentEventsPerHotTrace = 1200
+maxResidentEventsPerWarmTrace = 120
+detailLoadMode = "lazy_from_disk"
 ```
 
 ## Architecture
@@ -127,6 +144,7 @@ Useful patterns:
 | --- | --- |
 | `GET /api/healthz` | Health check. |
 | `GET /api/overview` | Aggregate counters and distributions. |
+| `GET /api/perf` | Index refresh timings, watcher stats, and retention/materialization counters. |
 | `GET /api/traces?agent=<name>` | List indexed trace summaries, optionally filtered by agent. |
 | `GET /api/trace/:id` | Paginated trace detail by trace id or session id. Supports `limit`, `before`, `include_meta`. |
 | `POST /api/trace/:id/stop` | Stop session process for trace/session id. Sends `SIGINT`, escalates to `SIGTERM`, and optionally `SIGKILL` with `?force=true`. |
