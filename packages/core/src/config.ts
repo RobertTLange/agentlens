@@ -38,7 +38,14 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
 type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
 
 function isAgentKind(value: string): value is AgentKind {
-  return value === "claude" || value === "codex" || value === "cursor" || value === "opencode" || value === "unknown";
+  return (
+    value === "claude" ||
+    value === "codex" ||
+    value === "cursor" ||
+    value === "opencode" ||
+    value === "gemini" ||
+    value === "unknown"
+  );
 }
 
 function cloneDefaultSessionLogDirectories(): SessionLogDirectoryConfig[] {
@@ -61,32 +68,39 @@ function normalizeSessionLogDirectory(value: unknown): SessionLogDirectoryConfig
   return { directory, logType: logTypeRaw };
 }
 
-function ensureCursorSessionLogDirectory(entries: SessionLogDirectoryConfig[]): SessionLogDirectoryConfig[] {
-  if (entries.some((entry) => entry.logType === "cursor")) {
+function ensureDefaultSessionLogDirectory(
+  entries: SessionLogDirectoryConfig[],
+  targetLogType: "cursor" | "gemini",
+  anchorTypes: AgentKind[],
+): SessionLogDirectoryConfig[] {
+  if (entries.some((entry) => entry.logType === targetLogType)) {
     return entries;
   }
 
   const hasKnownLegacyAgents = entries.some(
-    (entry) =>
-      (entry.logType === "codex" || entry.logType === "claude" || entry.logType === "opencode") &&
-      entry.directory.trim().startsWith("~/"),
+    (entry) => anchorTypes.includes(entry.logType) && entry.directory.trim().startsWith("~/"),
   );
   if (!hasKnownLegacyAgents) {
     return entries;
   }
 
-  const defaultCursorEntry = DEFAULT_CONFIG.sessionLogDirectories.find((entry) => entry.logType === "cursor");
-  if (!defaultCursorEntry) {
+  const defaultEntry = DEFAULT_CONFIG.sessionLogDirectories.find((entry) => entry.logType === targetLogType);
+  if (!defaultEntry) {
     return entries;
   }
 
   return [
     ...entries,
     {
-      directory: defaultCursorEntry.directory,
-      logType: "cursor",
+      directory: defaultEntry.directory,
+      logType: targetLogType,
     },
   ];
+}
+
+function ensureKnownSessionLogDirectories(entries: SessionLogDirectoryConfig[]): SessionLogDirectoryConfig[] {
+  const withCursor = ensureDefaultSessionLogDirectory(entries, "cursor", ["codex", "claude", "opencode"]);
+  return ensureDefaultSessionLogDirectory(withCursor, "gemini", ["codex", "claude", "cursor", "opencode"]);
 }
 
 function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[]): SessionLogDirectoryConfig[] {
@@ -97,7 +111,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
       if (!normalized) continue;
       dedup.set(`${normalized.directory}::${normalized.logType}`, normalized);
     }
-    return ensureCursorSessionLogDirectory(Array.from(dedup.values()));
+    return ensureKnownSessionLogDirectories(Array.from(dedup.values()));
   }
 
   if (Array.isArray(legacyDirectories)) {
@@ -111,6 +125,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
         if (normalized.includes(".codex")) logType = "codex";
         else if (normalized.includes(".claude")) logType = "claude";
         else if (normalized.includes(".cursor")) logType = "cursor";
+        else if (normalized.includes(".gemini")) logType = "gemini";
         else if (normalized.includes("opencode")) logType = "opencode";
         return { directory, logType };
       })
@@ -120,7 +135,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
         dedup.add(key);
         return true;
       });
-    return ensureCursorSessionLogDirectory(legacy);
+    return ensureKnownSessionLogDirectories(legacy);
   }
 
   return cloneDefaultSessionLogDirectories();

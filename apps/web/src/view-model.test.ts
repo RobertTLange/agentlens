@@ -101,6 +101,7 @@ describe("web view model", () => {
     expect(iconForAgent("claude")).toBe("/icons/claude.svg");
     expect(iconForAgent("cursor")).toBe("/icons/cursor.jpeg");
     expect(iconForAgent("opencode")).toBe("/icons/opencode.png");
+    expect(iconForAgent("gemini")).toBe("/icons/gemini.svg");
     expect(iconForAgent("unknown")).toBeNull();
   });
 

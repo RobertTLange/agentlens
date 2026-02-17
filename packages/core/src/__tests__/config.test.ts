@@ -32,6 +32,33 @@ describe("config", () => {
         (entry) => entry.model === "claude-sonnet-4-5-20250929" && entry.contextWindowTokens === 200_000,
       ),
     ).toBe(true);
+    expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
+  });
+
+  it("infers gemini log type from legacy sessionJsonlDirectories paths", () => {
+    const config = mergeConfig({
+      sessionJsonlDirectories: ["~/.gemini", "~/logs/other"],
+    });
+    expect(config.sessionLogDirectories).toEqual([
+      { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/logs/other", logType: "unknown" },
+    ]);
+  });
+
+  it("auto-injects gemini directory for legacy typed sessionLogDirectories", () => {
+    const config = mergeConfig({
+      sessionLogDirectories: [
+        { directory: "~/.codex", logType: "codex" },
+        { directory: "~/.claude", logType: "claude" },
+        { directory: "~/.cursor", logType: "cursor" },
+      ],
+    });
+    expect(config.sessionLogDirectories).toEqual([
+      { directory: "~/.codex", logType: "codex" },
+      { directory: "~/.claude", logType: "claude" },
+      { directory: "~/.cursor", logType: "cursor" },
+      { directory: "~/.gemini", logType: "gemini" },
+    ]);
   });
 
   it("loads new nested sections from TOML", async () => {

@@ -5,6 +5,7 @@ import type { DiscoveredTraceFile } from "../discovery.js";
 import { ClaudeParser } from "./claude.js";
 import { CodexParser } from "./codex.js";
 import { CursorParser } from "./cursor.js";
+import { GeminiParser } from "./gemini.js";
 import { GenericParser } from "./generic.js";
 import { OpencodeParser } from "./opencode.js";
 
@@ -12,7 +13,14 @@ export class ParserRegistry {
   private readonly parsers: TraceParser[];
 
   constructor(parsers?: TraceParser[]) {
-    this.parsers = parsers ?? [new ClaudeParser(), new CodexParser(), new CursorParser(), new OpencodeParser(), new GenericParser()];
+    this.parsers = parsers ?? [
+      new ClaudeParser(),
+      new CodexParser(),
+      new CursorParser(),
+      new OpencodeParser(),
+      new GeminiParser(),
+      new GenericParser(),
+    ];
   }
 
   private byName(name: string): TraceParser | undefined {
