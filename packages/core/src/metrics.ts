@@ -72,6 +72,18 @@ function tokenTotalsFromCodexUsageRecord(record: Record<string, unknown>): Token
   return finalizeTokenTotals(totals);
 }
 
+function tokenTotalsFromOpenCodeTokensRecord(record: Record<string, unknown>): TokenTotals {
+  const cache = asRecord(record.cache);
+  const totals = emptyTokenTotals();
+  totals.inputTokens = toNumber(record.input);
+  totals.cachedReadTokens = toNumber(cache.read);
+  totals.cachedCreateTokens = toNumber(cache.write);
+  totals.outputTokens = toNumber(record.output);
+  totals.reasoningOutputTokens = toNumber(record.reasoning);
+  totals.totalTokens = toNumber(record.total);
+  return finalizeTokenTotals(totals);
+}
+
 function contextWindowResolver(config: AppConfig): (model: string) => number {
   const byModel = new Map<string, number>();
   for (const entry of config.models.contextWindows) {
@@ -276,9 +288,64 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
   };
 }
 
+function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): SessionMetrics {
+  const resolveWindow = contextWindowResolver(config);
+  const totals = emptyTokenTotals();
+  const modelBreakdown = new Map<string, TokenTotals>();
+  let maxContextPct: number | null = null;
+  const seenAssistantMessageIds = new Set<string>();
+
+  for (const event of events) {
+    const raw = asRecord(event.raw);
+    const nestedMessage = asRecord(raw.message);
+    const message = Object.keys(nestedMessage).length > 0 ? nestedMessage : raw;
+    if (asString(message.role).toLowerCase() !== "assistant") continue;
+
+    const messageId = asString(message.id);
+    if (messageId && seenAssistantMessageIds.has(messageId)) continue;
+    if (messageId) seenAssistantMessageIds.add(messageId);
+
+    const tokens = asRecord(message.tokens);
+    if (Object.keys(tokens).length === 0) continue;
+    const usageTotals = tokenTotalsFromOpenCodeTokensRecord(tokens);
+    addTokenTotals(totals, usageTotals);
+
+    const modelId = asString(message.modelID) || asString(asRecord(message.model).modelID);
+    const providerId = asString(message.providerID) || asString(asRecord(message.model).providerID);
+    const model = modelId || (providerId ? `${providerId}/<unknown>` : "<unknown>");
+
+    const existing = modelBreakdown.get(model) ?? emptyTokenTotals();
+    addTokenTotals(existing, usageTotals);
+    modelBreakdown.set(model, existing);
+
+    const promptTokens = usageTotals.inputTokens + usageTotals.cachedReadTokens + usageTotals.cachedCreateTokens;
+    const window = resolveWindow(modelId || model);
+    if (window > 0 && promptTokens > 0) {
+      const pct = (promptTokens / window) * 100;
+      maxContextPct = maxContextPct === null ? pct : Math.max(maxContextPct, pct);
+    }
+  }
+
+  for (const [model, modelTotals] of modelBreakdown) {
+    modelBreakdown.set(model, finalizeTokenTotals(modelTotals));
+  }
+
+  return {
+    tokenTotals: finalizeTokenTotals(totals),
+    modelTokenSharesTop: buildTopModelShares(
+      new Map([...modelBreakdown.entries()].map(([model, modelTotals]) => [model, modelTotals.totalTokens] as const)),
+      config.traceInspector.topModelCount,
+    ),
+    modelTokenSharesEstimated: false,
+    contextWindowPct: maxContextPct,
+    costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+  };
+}
+
 export function deriveSessionMetrics(events: NormalizedEvent[], agent: AgentKind, config: AppConfig): SessionMetrics {
   if (agent === "claude") return deriveClaudeMetrics(events, config);
   if (agent === "codex") return deriveCodexMetrics(events, config);
+  if (agent === "opencode") return deriveOpenCodeMetrics(events, config);
   return {
     tokenTotals: emptyTokenTotals(),
     modelTokenSharesTop: [],

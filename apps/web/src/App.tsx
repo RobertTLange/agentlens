@@ -24,6 +24,8 @@ const TRACE_ENTER_ANIMATION_MS = 620;
 const TIMELINE_LATEST_EPSILON_PX = 12;
 const HEADER_FLASH_VISIBLE_MS = 2_400;
 const HEADER_FLASH_FADE_MS = 380;
+const RECENT_TRACE_LIMIT = 50;
+const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 
 interface StopTraceResponse {
   ok?: boolean;
@@ -43,6 +45,11 @@ interface OpenTraceResponse {
     windowIndex?: number;
     paneIndex?: number;
   } | null;
+}
+
+interface TracePageCacheEntry {
+  page: TracePage;
+  summaryStamp: string;
 }
 
 function fmtTime(ms: number | null): string {
@@ -96,8 +103,37 @@ function sortTraces(traces: TraceSummary[]): TraceSummary[] {
   return [...traces].sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store" });
+function limitRecentTraces(traces: TraceSummary[]): TraceSummary[] {
+  return sortTraces(traces).slice(0, RECENT_TRACE_LIMIT);
+}
+
+function buildTraceSummaryStamp(summary: Pick<TraceSummary, "eventCount" | "mtimeMs" | "lastEventTs">): string {
+  return `${summary.eventCount}:${summary.mtimeMs}:${summary.lastEventTs ?? 0}`;
+}
+
+function buildTracePageCacheKey(traceId: string, includeMeta: boolean): string {
+  return `${includeMeta ? "meta" : "default"}:${traceId}`;
+}
+
+function upsertTracePageCache(cache: Map<string, TracePageCacheEntry>, key: string, entry: TracePageCacheEntry): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+  cache.set(key, entry);
+  while (cache.size > TRACE_PAGE_CACHE_ENTRY_LIMIT) {
+    const oldestKey = cache.keys().next().value;
+    if (!oldestKey) break;
+    cache.delete(oldestKey);
+  }
+}
+
+function removeTracePageCacheEntries(cache: Map<string, TracePageCacheEntry>, traceId: string): void {
+  cache.delete(buildTracePageCacheKey(traceId, false));
+  cache.delete(buildTracePageCacheKey(traceId, true));
+}
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, { cache: "no-store", ...init });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -166,6 +202,13 @@ export function App(): JSX.Element {
   const flashStatusFadeTimerRef = useRef<number | null>(null);
   const flashStatusClearTimerRef = useRef<number | null>(null);
   const manualStopAtByTraceIdRef = useRef<Record<string, number>>({});
+  const tracePageCacheRef = useRef<Map<string, TracePageCacheEntry>>(new Map());
+  const traceLoadRequestSeqRef = useRef(0);
+  const previousTraceLoadInputsRef = useRef<{ selectedId: string; includeMeta: boolean; liveTick: number }>({
+    selectedId: "",
+    includeMeta: false,
+    liveTick: 0,
+  });
 
   const applyManualStopOverride = useCallback((trace: TraceSummary): TraceSummary => {
     const manualStopAtMs = manualStopAtByTraceIdRef.current[trace.id];
@@ -227,6 +270,7 @@ export function App(): JSX.Element {
     if (!selectedId) return null;
     return traces.find((trace) => trace.id === selectedId) ?? null;
   }, [selectedId, traces]);
+  const selectedTraceSummaryStamp = selectedTraceSummary ? buildTraceSummaryStamp(selectedTraceSummary) : "";
   const selectedTracePulseSeq = selectedTraceSummary ? (pulseSeqByTraceId[selectedTraceSummary.id] ?? 0) : 0;
   const selectedTraceLabel = selectedTraceSummary?.sessionId || selectedTraceSummary?.id || "";
   const selectedTraceEventCount = selectedTraceSummary?.eventCount ?? 0;
@@ -427,6 +471,13 @@ export function App(): JSX.Element {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
 
+  useEffect(() => {
+    if (selectedId && traces.some((trace) => trace.id === selectedId)) return;
+    const fallbackId = traces[0]?.id ?? "";
+    if (fallbackId === selectedId) return;
+    setSelectedId(fallbackId);
+  }, [selectedId, traces]);
+
   useEffect(
     () => () => {
       clearEventAppendQueue();
@@ -516,9 +567,9 @@ export function App(): JSX.Element {
       try {
         const [overviewResp, tracesResp] = await Promise.all([
           fetchJson<{ overview: OverviewStats }>(`${API}/api/overview`),
-          fetchJson<{ traces: TraceSummary[] }>(`${API}/api/traces`),
+          fetchJson<{ traces: TraceSummary[] }>(`${API}/api/traces?limit=${RECENT_TRACE_LIMIT}`),
         ]);
-        const sorted = sortTraces(tracesResp.traces.map(applyManualStopOverride));
+        const sorted = limitRecentTraces(tracesResp.traces.map(applyManualStopOverride));
         setOverview(overviewResp.overview);
         setTraces(sorted);
         setSelectedId((prev) => prev || sorted[0]?.id || "");
@@ -530,14 +581,14 @@ export function App(): JSX.Element {
 
     void loadBoot();
 
-    const source = new EventSource(`${API}/api/stream`);
+    const source = new EventSource(`${API}/api/stream?limit=${RECENT_TRACE_LIMIT}`);
 
     source.addEventListener("snapshot", (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data) as {
           payload?: { traces?: TraceSummary[]; overview?: OverviewStats };
         };
-        const nextTraces = sortTraces((data.payload?.traces ?? []).map(applyManualStopOverride));
+        const nextTraces = limitRecentTraces((data.payload?.traces ?? []).map(applyManualStopOverride));
         if (nextTraces.length > 0) {
           setTraces(nextTraces);
           setSelectedId((prev) => prev || nextTraces[0]?.id || "");
@@ -560,7 +611,7 @@ export function App(): JSX.Element {
         } else {
           next.push(patchedSummary);
         }
-        return sortTraces(next);
+        return limitRecentTraces(next);
       });
       setSelectedId((prev) => prev || patchedSummary.id);
     };
@@ -588,6 +639,7 @@ export function App(): JSX.Element {
       const id = data.payload?.id;
       if (!id) return;
       delete manualStopAtByTraceIdRef.current[id];
+      removeTracePageCacheEntries(tracePageCacheRef.current, id);
       setTraces((prev) => prev.filter((trace) => trace.id !== id));
       setSelectedId((prev) => (prev === id ? "" : prev));
       removeTraceRow(id);
@@ -664,6 +716,8 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (!selectedId) {
+      traceLoadRequestSeqRef.current += 1;
+      previousTraceLoadInputsRef.current = { selectedId: "", includeMeta, liveTick };
       setPage(null);
       setExpandedEventIds(new Set());
       setEnteringEventIds(new Set());
@@ -684,35 +738,76 @@ export function App(): JSX.Element {
 
     const isTraceChanged = previousSelectedTraceIdRef.current !== selectedId;
     previousSelectedTraceIdRef.current = selectedId;
+    const previousLoadInputs = previousTraceLoadInputsRef.current;
+    const sameTraceAsPreviousLoad = previousLoadInputs.selectedId === selectedId;
+    const includeMetaChanged = previousLoadInputs.includeMeta !== includeMeta;
+    const liveTickChanged = previousLoadInputs.liveTick !== liveTick;
+    previousTraceLoadInputsRef.current = { selectedId, includeMeta, liveTick };
+    const cacheKey = buildTracePageCacheKey(selectedId, includeMeta);
+    const selectedSummaryStamp = selectedTraceSummaryStamp;
+    const cachedEntry = tracePageCacheRef.current.get(cacheKey);
+
+    const applyTraceDetail = (detail: TracePage): void => {
+      const eventIds = new Set(detail.events.map((event) => event.eventId));
+      setPage(detail);
+      setExpandedEventIds((prev) => {
+        if (isTraceChanged) return new Set();
+        const next = new Set<string>();
+        for (const eventId of prev) {
+          if (eventIds.has(eventId)) next.add(eventId);
+        }
+        return next;
+      });
+      setSelectedEventId((prev) => {
+        if (prev && detail.events.some((event) => event.eventId === prev)) {
+          return prev;
+        }
+        return sortTimelineItems(detail.events, timelineSortDirection)[0]?.eventId ?? "";
+      });
+    };
+
+    if (cachedEntry) {
+      applyTraceDetail(cachedEntry.page);
+    }
+
+    const shouldFetch =
+      !cachedEntry ||
+      !selectedSummaryStamp ||
+      cachedEntry.summaryStamp !== selectedSummaryStamp ||
+      (sameTraceAsPreviousLoad && (includeMetaChanged || liveTickChanged));
+    if (!shouldFetch) {
+      return;
+    }
+
+    traceLoadRequestSeqRef.current += 1;
+    const requestSeq = traceLoadRequestSeqRef.current;
+    const abortController = new AbortController();
 
     const loadTrace = async (): Promise<void> => {
       try {
         const detail = await fetchJson<TracePage>(
           `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=1200&include_meta=${includeMeta ? "1" : "0"}`,
+          { signal: abortController.signal },
         );
-        const eventIds = new Set(detail.events.map((event) => event.eventId));
-        setPage(detail);
-        setExpandedEventIds((prev) => {
-          if (isTraceChanged) return new Set();
-          const next = new Set<string>();
-          for (const eventId of prev) {
-            if (eventIds.has(eventId)) next.add(eventId);
-          }
-          return next;
+        if (abortController.signal.aborted) return;
+        if (traceLoadRequestSeqRef.current !== requestSeq) return;
+        upsertTracePageCache(tracePageCacheRef.current, cacheKey, {
+          page: detail,
+          summaryStamp: buildTraceSummaryStamp(detail.summary),
         });
-        setSelectedEventId((prev) => {
-          if (prev && detail.events.some((event) => event.eventId === prev)) {
-            return prev;
-          }
-          return sortTimelineItems(detail.events, timelineSortDirection)[0]?.eventId ?? "";
-        });
+        applyTraceDetail(detail);
       } catch (error) {
+        if (abortController.signal.aborted) return;
+        if (error instanceof Error && error.name === "AbortError") return;
         setStatus(`Trace load failed: ${String(error)}`);
       }
     };
 
     void loadTrace();
-  }, [clearEventAppendQueue, selectedId, includeMeta, liveTick]);
+    return () => {
+      abortController.abort();
+    };
+  }, [clearEventAppendQueue, selectedId, selectedTraceSummaryStamp, includeMeta, liveTick]);
 
   useEffect(() => {
     if (!autoFollow) return;
@@ -1007,7 +1102,7 @@ export function App(): JSX.Element {
               {headerStatus}
             </div>
           </div>
-          <p>Live observability for Codex and Claude traces.</p>
+          <p>Live observability for Codex, Claude, and OpenCode traces.</p>
         </div>
         <div className="hero-metrics">
           <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>

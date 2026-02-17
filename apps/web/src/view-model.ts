@@ -15,6 +15,7 @@ export interface TruncatedText {
 const AGENT_ICON_BY_KIND: Record<AgentKind, string | null> = {
   claude: "/icons/claude.svg",
   codex: "/icons/openai.svg",
+  opencode: "/icons/opencode.png",
   unknown: null,
 };
 

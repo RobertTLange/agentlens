@@ -38,7 +38,7 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
 type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
 
 function isAgentKind(value: string): value is AgentKind {
-  return value === "claude" || value === "codex" || value === "unknown";
+  return value === "claude" || value === "codex" || value === "opencode" || value === "unknown";
 }
 
 function cloneDefaultSessionLogDirectories(): SessionLogDirectoryConfig[] {
@@ -82,6 +82,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
         let logType: AgentKind = "unknown";
         if (normalized.includes(".codex")) logType = "codex";
         else if (normalized.includes(".claude")) logType = "claude";
+        else if (normalized.includes("opencode")) logType = "opencode";
         return { directory, logType };
       })
       .filter((entry) => {

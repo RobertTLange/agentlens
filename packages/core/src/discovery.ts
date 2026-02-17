@@ -74,22 +74,67 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
     if (logType === "claude") {
       return hasPathSegment(root, "projects") ? ["**/*.jsonl"] : ["projects/**/*.jsonl"];
     }
+    if (logType === "opencode") {
+      if (hasPathSegment(root, "storage")) {
+        return hasPathSegment(root, "session") ? ["**/*.json"] : ["session/**/*.json"];
+      }
+      return ["storage/session/**/*.json"];
+    }
     return ["**/*.jsonl"];
   };
 
   const files: DiscoveredTraceFile[] = [];
   for (const entry of config.sessionLogDirectories) {
     const root = expandHome(entry.directory);
-    const matches = await fg(includeGlobsForSessionDirectory(root, entry.logType), {
-      cwd: root,
-      absolute: true,
-      onlyFiles: true,
-      dot: true,
-      deep: 12,
-      suppressErrors: true,
-      unique: true,
-      followSymbolicLinks: false,
-    });
+    const collectMatches = async (includeGlobs: string[]): Promise<string[]> => {
+      if (includeGlobs.length === 0) return [];
+      return fg(includeGlobs, {
+        cwd: root,
+        absolute: true,
+        onlyFiles: true,
+        dot: true,
+        deep: 12,
+        suppressErrors: true,
+        unique: true,
+        followSymbolicLinks: false,
+      });
+    };
+
+    let matches: string[] = [];
+    if (entry.logType === "opencode") {
+      const sessionGlobs = (() => {
+        if (hasPathSegment(root, "storage")) {
+          if (hasPathSegment(root, "session")) return ["**/*.json"];
+          return ["session/**/*.json"];
+        }
+        return ["storage/session/**/*.json"];
+      })();
+      const sessionDiffGlobs = (() => {
+        if (hasPathSegment(root, "storage")) {
+          if (hasPathSegment(root, "session_diff")) return ["**/*.json"];
+          return ["session_diff/**/*.json"];
+        }
+        return ["storage/session_diff/**/*.json"];
+      })();
+
+      const sessionMatches = await collectMatches(sessionGlobs);
+      const discoveredSessionIds = new Set(
+        sessionMatches
+          .map((filePath) => path.basename(filePath, path.extname(filePath)).trim())
+          .filter((value) => value.length > 0),
+      );
+
+      const sessionDiffMatches = await collectMatches(sessionDiffGlobs);
+      const filteredSessionDiffMatches = sessionDiffMatches.filter((filePath) => {
+        const sessionId = path.basename(filePath, path.extname(filePath)).trim();
+        if (!sessionId) return false;
+        return !discoveredSessionIds.has(sessionId);
+      });
+
+      matches = [...sessionMatches, ...filteredSessionDiffMatches];
+    } else {
+      matches = await collectMatches(includeGlobsForSessionDirectory(root, entry.logType));
+    }
 
     for (const filePath of matches) {
       try {

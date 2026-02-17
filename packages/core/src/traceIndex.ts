@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import path from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import chokidar, { type FSWatcher } from "chokidar";
 import type {
@@ -560,6 +561,7 @@ export class TraceIndex extends EventEmitter {
   private refreshPending = false;
   private queuedForceFullRefresh = false;
   private dirtyPaths = new Set<string>();
+  private forceReparsePaths = new Set<string>();
   private adaptiveIntervalMs: number;
   private perf: IndexPerformanceStats = {
     refreshCount: 0,
@@ -623,6 +625,7 @@ export class TraceIndex extends EventEmitter {
       void this.watcher.close();
       this.watcher = null;
     }
+    this.forceReparsePaths.clear();
   }
 
   async refresh(): Promise<void> {
@@ -715,8 +718,21 @@ export class TraceIndex extends EventEmitter {
     });
 
     const onDirty = (rawPath: string): void => {
-      if (!rawPath.toLowerCase().endsWith(".jsonl")) return;
-      this.dirtyPaths.add(path.resolve(rawPath));
+      const normalized = rawPath.toLowerCase();
+      if (!normalized.endsWith(".jsonl") && !normalized.endsWith(".json")) return;
+      const resolvedPath = path.resolve(rawPath);
+      const normalizedResolvedPath = resolvedPath.replace(/\\/g, "/");
+      const opencodeSessionPaths = this.resolveOpencodeSessionPathsForDirtyPath(resolvedPath);
+      const candidatePaths = opencodeSessionPaths.length > 0 ? opencodeSessionPaths : [resolvedPath];
+      const forceReparseFromAuxiliaryOpencodePath =
+        opencodeSessionPaths.length > 0 && !normalizedResolvedPath.includes("/storage/session/");
+      for (const candidatePath of candidatePaths) {
+        const resolvedCandidatePath = path.resolve(candidatePath);
+        this.dirtyPaths.add(resolvedCandidatePath);
+        if (forceReparseFromAuxiliaryOpencodePath) {
+          this.forceReparsePaths.add(resolvedCandidatePath);
+        }
+      }
       this.perf.dirtyPathQueue = this.dirtyPaths.size;
       this.scheduleNextRefresh(debounceMs);
     };
@@ -747,6 +763,10 @@ export class TraceIndex extends EventEmitter {
             ? hasPathSegment(baseRoot, "projects")
               ? baseRoot
               : path.join(baseRoot, "projects")
+            : entry.logType === "opencode"
+              ? hasPathSegment(baseRoot, "storage")
+                ? baseRoot
+                : path.join(baseRoot, "storage")
             : baseRoot;
       dedup.add(watchRoot);
     }
@@ -757,6 +777,58 @@ export class TraceIndex extends EventEmitter {
       }
     }
     return Array.from(dedup.values());
+  }
+
+  private resolveOpencodeSessionPathsForDirtyPath(filePath: string): string[] {
+    const normalizedPath = filePath.replace(/\\/g, "/");
+    const matches = new Set<string>();
+
+    const addBySessionId = (sessionIdRaw: string): void => {
+      const sessionId = sessionIdRaw.trim();
+      if (!sessionId) return;
+      const suffix = `/${sessionId}.json`;
+      for (const trackedPath of this.pathToId.keys()) {
+        const normalizedTrackedPath = trackedPath.replace(/\\/g, "/");
+        if (!normalizedTrackedPath.includes("/storage/session/")) continue;
+        if (!normalizedTrackedPath.endsWith(suffix)) continue;
+        matches.add(path.resolve(trackedPath));
+      }
+    };
+
+    if (normalizedPath.includes("/storage/session/")) {
+      return [path.resolve(filePath)];
+    }
+
+    const messageMarker = "/storage/message/";
+    const messageMarkerIndex = normalizedPath.indexOf(messageMarker);
+    if (messageMarkerIndex >= 0) {
+      const tail = normalizedPath.slice(messageMarkerIndex + messageMarker.length);
+      const sessionId = tail.split("/", 1)[0] ?? "";
+      addBySessionId(sessionId);
+    }
+
+    const sessionDiffMarker = "/storage/session_diff/";
+    const sessionDiffMarkerIndex = normalizedPath.indexOf(sessionDiffMarker);
+    if (sessionDiffMarkerIndex >= 0) {
+      const tail = normalizedPath.slice(sessionDiffMarkerIndex + sessionDiffMarker.length);
+      const fileName = tail.split("/", 1)[0] ?? "";
+      if (fileName.toLowerCase().endsWith(".json")) {
+        addBySessionId(fileName.slice(0, -5));
+      }
+    }
+
+    const partMarker = "/storage/part/";
+    if (normalizedPath.includes(partMarker) && existsSync(filePath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+        const part = asRecord(parsed);
+        addBySessionId(asString(part.sessionID));
+      } catch {
+        // Ignore temporary/invalid write states.
+      }
+    }
+
+    return Array.from(matches.values());
   }
 
   private shouldRunFullRefresh(nowMsValue: number): boolean {
@@ -844,6 +916,7 @@ export class TraceIndex extends EventEmitter {
   private async refreshFull(refreshNowMs: number, stats: RefreshStats): Promise<void> {
     const files = await discoverTraceFiles(this.config);
     this.lastFullRefreshAtMs = refreshNowMs;
+    this.forceReparsePaths.clear();
 
     const nextIds = new Set(files.map((file) => file.id));
     const nextPathToId = new Map<string, string>();
@@ -872,21 +945,25 @@ export class TraceIndex extends EventEmitter {
 
   private async refreshDirty(refreshNowMs: number, stats: RefreshStats): Promise<void> {
     if (this.dirtyPaths.size === 0) return;
-    const dirtyPaths: string[] = [];
+    const dirtyEntries: { path: string; forceReparse: boolean }[] = [];
     for (const dirtyPath of this.dirtyPaths) {
-      dirtyPaths.push(dirtyPath);
+      const normalizedPath = path.resolve(dirtyPath);
+      dirtyEntries.push({
+        path: normalizedPath,
+        forceReparse: this.forceReparsePaths.delete(normalizedPath),
+      });
       this.dirtyPaths.delete(dirtyPath);
-      if (dirtyPaths.length >= DIRTY_BATCH_LIMIT) break;
+      if (dirtyEntries.length >= DIRTY_BATCH_LIMIT) break;
     }
     if (this.dirtyPaths.size > 0) {
       this.refreshPending = true;
     }
     this.perf.dirtyPathQueue = this.dirtyPaths.size;
-    stats.dirtyPathCount = dirtyPaths.length;
+    stats.dirtyPathCount = dirtyEntries.length;
 
     const processedIds = new Set<string>();
-    for (const dirtyPath of dirtyPaths) {
-      const normalizedPath = path.resolve(dirtyPath);
+    for (const dirtyEntry of dirtyEntries) {
+      const normalizedPath = dirtyEntry.path;
       const existingId = this.pathToId.get(normalizedPath);
       const file = await this.discoverSingleTraceFile(normalizedPath, existingId);
       if (!file) {
@@ -905,10 +982,13 @@ export class TraceIndex extends EventEmitter {
         this.emitStream("trace_removed", { id: existingId });
         stats.hadFileMutations = true;
       }
-      if (processedIds.has(file.id)) continue;
-      processedIds.add(file.id);
+      if (processedIds.has(file.id)) {
+        if (!dirtyEntry.forceReparse) continue;
+      } else {
+        processedIds.add(file.id);
+      }
 
-      const changed = await this.upsertFile(file, refreshNowMs);
+      const changed = await this.upsertFile(file, refreshNowMs, { forceReparse: dirtyEntry.forceReparse });
       if (changed) {
         stats.parsedFileCount += 1;
         stats.hadFileMutations = true;
@@ -924,6 +1004,9 @@ export class TraceIndex extends EventEmitter {
       if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`)) continue;
       if (entry.logType === "codex" && !normalizedPath.includes("/sessions/")) continue;
       if (entry.logType === "claude" && !normalizedPath.includes("/projects/")) continue;
+      if (entry.logType === "opencode" && !normalizedPath.includes("/storage/session/") && !normalizedPath.includes("/storage/session_diff/")) {
+        continue;
+      }
       return {
         sourceProfile: "session_log",
         agentHint: entry.logType,
@@ -951,7 +1034,10 @@ export class TraceIndex extends EventEmitter {
   }
 
   private async discoverSingleTraceFile(filePath: string, existingId?: string): Promise<DiscoveredTraceFile | null> {
-    if (!filePath.toLowerCase().endsWith(".jsonl")) return null;
+    const normalizedPath = filePath.toLowerCase();
+    const isJsonl = normalizedPath.endsWith(".jsonl");
+    const isJson = normalizedPath.endsWith(".json");
+    if (!isJsonl && !isJson) return null;
     try {
       const fileStat = await stat(filePath);
       const existingEntry = existingId ? this.entries.get(existingId) : undefined;
@@ -967,6 +1053,7 @@ export class TraceIndex extends EventEmitter {
 
       const inferred = this.inferSourceMetadata(filePath);
       if (!inferred) return null;
+      if (inferred.agentHint === "opencode" ? !isJson : !isJsonl) return null;
       const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
       return {
         id,
@@ -984,15 +1071,20 @@ export class TraceIndex extends EventEmitter {
     }
   }
 
-  private async upsertFile(file: DiscoveredTraceFile, refreshNowMs: number): Promise<boolean> {
+  private async upsertFile(
+    file: DiscoveredTraceFile,
+    refreshNowMs: number,
+    options: { forceReparse?: boolean } = {},
+  ): Promise<boolean> {
+    const forceReparse = options.forceReparse === true;
     const current = this.entries.get(file.id);
-    const changed = !current || current.file.mtimeMs !== file.mtimeMs || current.file.sizeBytes !== file.sizeBytes;
+    const changed = forceReparse || !current || current.file.mtimeMs !== file.mtimeMs || current.file.sizeBytes !== file.sizeBytes;
     if (!changed) {
       if (current) current.file = file;
       return false;
     }
 
-    if (current) {
+    if (current && !forceReparse) {
       const appendApplied = await this.tryIncrementalAppend(current, file, refreshNowMs);
       if (appendApplied) {
         return true;
