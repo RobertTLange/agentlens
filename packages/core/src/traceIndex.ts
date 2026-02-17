@@ -49,6 +49,7 @@ interface TraceEntry {
   summary: TraceSummary;
   residentEvents: NormalizedEvent[];
   cachedFullEvents: NormalizedEvent[] | null;
+  cachedRawEvents: NormalizedEvent[] | null;
   pinnedMaterializedAtMs: number;
 }
 
@@ -719,7 +720,7 @@ export class TraceIndex extends EventEmitter {
 
     const onDirty = (rawPath: string): void => {
       const normalized = rawPath.toLowerCase();
-      if (!normalized.endsWith(".jsonl") && !normalized.endsWith(".json")) return;
+      if (!normalized.endsWith(".jsonl") && !normalized.endsWith(".json") && !normalized.endsWith(".txt")) return;
       const resolvedPath = path.resolve(rawPath);
       const normalizedResolvedPath = resolvedPath.replace(/\\/g, "/");
       const opencodeSessionPaths = this.resolveOpencodeSessionPathsForDirtyPath(resolvedPath);
@@ -763,6 +764,10 @@ export class TraceIndex extends EventEmitter {
             ? hasPathSegment(baseRoot, "projects")
               ? baseRoot
               : path.join(baseRoot, "projects")
+            : entry.logType === "cursor"
+              ? hasPathSegment(baseRoot, "projects")
+                ? baseRoot
+                : path.join(baseRoot, "projects")
             : entry.logType === "opencode"
               ? hasPathSegment(baseRoot, "storage")
                 ? baseRoot
@@ -1004,6 +1009,9 @@ export class TraceIndex extends EventEmitter {
       if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`)) continue;
       if (entry.logType === "codex" && !normalizedPath.includes("/sessions/")) continue;
       if (entry.logType === "claude" && !normalizedPath.includes("/projects/")) continue;
+      if (entry.logType === "cursor" && (!normalizedPath.includes("/projects/") || !normalizedPath.includes("/agent-transcripts/"))) {
+        continue;
+      }
       if (entry.logType === "opencode" && !normalizedPath.includes("/storage/session/") && !normalizedPath.includes("/storage/session_diff/")) {
         continue;
       }
@@ -1037,7 +1045,8 @@ export class TraceIndex extends EventEmitter {
     const normalizedPath = filePath.toLowerCase();
     const isJsonl = normalizedPath.endsWith(".jsonl");
     const isJson = normalizedPath.endsWith(".json");
-    if (!isJsonl && !isJson) return null;
+    const isTxt = normalizedPath.endsWith(".txt");
+    if (!isJsonl && !isJson && !isTxt) return null;
     try {
       const fileStat = await stat(filePath);
       const existingEntry = existingId ? this.entries.get(existingId) : undefined;
@@ -1053,7 +1062,7 @@ export class TraceIndex extends EventEmitter {
 
       const inferred = this.inferSourceMetadata(filePath);
       if (!inferred) return null;
-      if (inferred.agentHint === "opencode" ? !isJson : !isJsonl) return null;
+      if (inferred.agentHint === "opencode" ? !isJson : inferred.agentHint === "cursor" ? !isTxt : !isJsonl) return null;
       const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
       return {
         id,
@@ -1112,6 +1121,7 @@ export class TraceIndex extends EventEmitter {
         summary,
         residentEvents: redactedEvents,
         cachedFullEvents: redactedEvents,
+        cachedRawEvents: parsed.events,
         pinnedMaterializedAtMs: current?.pinnedMaterializedAtMs ?? 0,
       });
       this.cursorById.set(file.id, {
@@ -1139,6 +1149,7 @@ export class TraceIndex extends EventEmitter {
         summary,
         residentEvents: [],
         cachedFullEvents: [],
+        cachedRawEvents: [],
         pinnedMaterializedAtMs: 0,
       });
       this.cursorById.set(file.id, {
@@ -1152,7 +1163,7 @@ export class TraceIndex extends EventEmitter {
   }
 
   private async tryIncrementalAppend(current: TraceEntry, file: DiscoveredTraceFile, refreshNowMs: number): Promise<boolean> {
-    if (!current.cachedFullEvents || current.summary.parseError) return false;
+    if (!current.cachedFullEvents || !current.cachedRawEvents || current.summary.parseError) return false;
     if (file.sizeBytes < current.file.sizeBytes) return false;
     const cursor = this.cursorById.get(file.id);
     if (!cursor) return false;
@@ -1194,25 +1205,29 @@ export class TraceIndex extends EventEmitter {
 
     const baseIndex = current.summary.eventCount;
     const baseOffset = Math.max(0, cursor.parsedSizeBytes - byteLengthUtf8(cursor.pendingText));
-    const rebasedEvents = redactedNewEvents.map((event, idx) => {
-      const nextIndex = baseIndex + idx + 1;
-      const nextOffset = baseOffset + event.offset;
-      return {
-        ...event,
-        index: nextIndex,
-        offset: nextOffset,
-        sessionId: event.sessionId || current.summary.sessionId,
-        eventId: `${event.traceId}:${nextIndex}:${nextOffset}`,
-      };
-    });
+    const rebaseEvents = (events: NormalizedEvent[]): NormalizedEvent[] =>
+      events.map((event, idx) => {
+        const nextIndex = baseIndex + idx + 1;
+        const nextOffset = baseOffset + event.offset;
+        return {
+          ...event,
+          index: nextIndex,
+          offset: nextOffset,
+          sessionId: event.sessionId || current.summary.sessionId,
+          eventId: `${event.traceId}:${nextIndex}:${nextOffset}`,
+        };
+      });
 
+    const rebasedEvents = rebaseEvents(redactedNewEvents);
+    const rebasedRawEvents = rebaseEvents(parsed.events);
     const mergedEvents = current.cachedFullEvents.concat(rebasedEvents);
+    const mergedRawEvents = current.cachedRawEvents.concat(rebasedRawEvents);
     const mergedSummary = summarize(
       file,
       current.summary.agent,
       current.summary.parser,
       current.summary.sessionId || parsed.sessionId,
-      mergedEvents,
+      mergedRawEvents,
       "",
       this.config,
       refreshNowMs,
@@ -1229,6 +1244,7 @@ export class TraceIndex extends EventEmitter {
       summary,
       residentEvents: mergedEvents,
       cachedFullEvents: mergedEvents,
+      cachedRawEvents: mergedRawEvents,
       pinnedMaterializedAtMs: current.pinnedMaterializedAtMs,
     });
     this.cursorById.set(file.id, {
@@ -1290,6 +1306,7 @@ export class TraceIndex extends EventEmitter {
       const keepPinned = entry.pinnedMaterializedAtMs > 0 && nowMsValue - entry.pinnedMaterializedAtMs <= MATERIALIZED_TTL_MS;
       if (this.config.retention.strategy !== "full_memory" && tier !== "hot" && !keepPinned) {
         entry.cachedFullEvents = null;
+        entry.cachedRawEvents = null;
       }
       if (this.config.retention.strategy === "full_memory" && !entry.cachedFullEvents) {
         entry.cachedFullEvents = sourceEvents;
@@ -1393,6 +1410,7 @@ export class TraceIndex extends EventEmitter {
       nowMs(),
     );
     entry.cachedFullEvents = redactedEvents;
+    entry.cachedRawEvents = parsed.events;
     entry.pinnedMaterializedAtMs = nowMs();
     entry.summary = {
       ...refreshedSummary,

@@ -11,6 +11,7 @@ import {
   selectPreferredTmuxClient,
   selectAgentProjectProcessPids,
   selectClaudeProjectProcessPids,
+  selectCursorProjectProcessPids,
 } from "./app.js";
 
 function buildTraceLog(sessionId: string, sequence: number, withToolEvents: boolean): string {
@@ -377,6 +378,62 @@ describe("server api", () => {
     );
 
     expect(selected).toEqual([6302]);
+  });
+
+  it("selects cursor fallback process by matching cursor transcript project key", async () => {
+    const sessionId = "81907d70-7e5c-45d8-bbbb-22f66e9878f0";
+    const selected = selectCursorProjectProcessPids(
+      {
+        path: `/Users/rob/.cursor/projects/Users-rob-Dropbox-Mac-2-Desktop/agent-transcripts/${sessionId}.txt`,
+        sessionId,
+      },
+      [
+        {
+          pid: 53121,
+          user: "rob",
+          args: "/Users/rob/.local/bin/agent --use-system-ca /Users/rob/.local/share/cursor-agent/versions/2026.01.28-fd13201/index.js",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+        {
+          pid: 65932,
+          user: "rob",
+          args: "/Applications/Cursor.app/Contents/MacOS/Cursor",
+          cwd: "/Applications/Cursor.app",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([53121]);
+  });
+
+  it("prefers cursor fallback process whose args include selected session id", async () => {
+    const sessionId = "81907d70-7e5c-45d8-bbbb-22f66e9878f0";
+    const selected = selectCursorProjectProcessPids(
+      {
+        path: `/Users/rob/.cursor/projects/Users-rob-Dropbox-Mac-2-Desktop/agent-transcripts/${sessionId}.txt`,
+        sessionId,
+      },
+      [
+        {
+          pid: 53121,
+          user: "rob",
+          args: "/Users/rob/.local/bin/agent --use-system-ca /Users/rob/.local/share/cursor-agent/versions/2026.01.28-fd13201/index.js",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+        {
+          pid: 53122,
+          user: "rob",
+          args: "/Users/rob/.local/bin/agent --session-id 81907d70-7e5c-45d8-bbbb-22f66e9878f0 --use-system-ca /Users/rob/.local/share/cursor-agent/versions/2026.01.28-fd13201/index.js",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([53122]);
   });
 
   it("prefers monorepo web dist when both monorepo and packaged builds exist", async () => {

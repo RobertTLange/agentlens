@@ -13,6 +13,22 @@ function toNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function estimateTokenCountFromText(text: string): number {
+  const normalized = text.trim();
+  if (!normalized) return 0;
+  const charEstimate = Math.ceil(normalized.length / 4);
+  const wordEstimate = Math.ceil(normalized.split(/\s+/).filter(Boolean).length * 0.75);
+  return Math.max(1, charEstimate, wordEstimate);
+}
+
+function estimateTokenCountFromTextBlocks(blocks: string[]): number {
+  let total = 0;
+  for (const block of blocks) {
+    total += estimateTokenCountFromText(block);
+  }
+  return total;
+}
+
 function emptyTokenTotals(): TokenTotals {
   return {
     inputTokens: 0,
@@ -342,9 +358,72 @@ function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): Se
   };
 }
 
+function deriveCursorMetrics(events: NormalizedEvent[], config: AppConfig): SessionMetrics {
+  const resolveWindow = contextWindowResolver(config);
+  const totals = emptyTokenTotals();
+  const modelBreakdown = new Map<string, TokenTotals>();
+  let maxContextPct: number | null = null;
+
+  const modelFallback =
+    events
+      .map((event) => asString(asRecord(event.raw).model).trim())
+      .find((model) => model.length > 0) ?? "<unknown>";
+  let currentModel = modelFallback;
+
+  for (const event of events) {
+    const eventModel = asString(asRecord(event.raw).model).trim();
+    if (eventModel) currentModel = eventModel;
+    const model = currentModel || "<unknown>";
+    const estimatedTokens = estimateTokenCountFromTextBlocks(event.textBlocks);
+    if (estimatedTokens <= 0) continue;
+
+    const modelTotals = modelBreakdown.get(model) ?? emptyTokenTotals();
+    const applyPromptWindowEstimate = (): void => {
+      const window = resolveWindow(model);
+      if (window <= 0) return;
+      const pct = (estimatedTokens / window) * 100;
+      maxContextPct = maxContextPct === null ? pct : Math.max(maxContextPct, pct);
+    };
+
+    if (event.eventKind === "user" || event.eventKind === "tool_result") {
+      totals.inputTokens += estimatedTokens;
+      modelTotals.inputTokens += estimatedTokens;
+      applyPromptWindowEstimate();
+      modelBreakdown.set(model, modelTotals);
+      continue;
+    }
+
+    if (event.eventKind === "assistant" || event.eventKind === "tool_use" || event.eventKind === "reasoning") {
+      totals.outputTokens += estimatedTokens;
+      modelTotals.outputTokens += estimatedTokens;
+      if (event.eventKind === "reasoning") {
+        totals.reasoningOutputTokens += estimatedTokens;
+        modelTotals.reasoningOutputTokens += estimatedTokens;
+      }
+      modelBreakdown.set(model, modelTotals);
+    }
+  }
+
+  for (const [model, modelTotals] of modelBreakdown) {
+    modelBreakdown.set(model, finalizeTokenTotals(modelTotals));
+  }
+
+  return {
+    tokenTotals: finalizeTokenTotals(totals),
+    modelTokenSharesTop: buildTopModelShares(
+      new Map([...modelBreakdown.entries()].map(([model, modelTotals]) => [model, modelTotals.totalTokens] as const)),
+      config.traceInspector.topModelCount,
+    ),
+    modelTokenSharesEstimated: modelBreakdown.size > 0,
+    contextWindowPct: maxContextPct,
+    costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+  };
+}
+
 export function deriveSessionMetrics(events: NormalizedEvent[], agent: AgentKind, config: AppConfig): SessionMetrics {
   if (agent === "claude") return deriveClaudeMetrics(events, config);
   if (agent === "codex") return deriveCodexMetrics(events, config);
+  if (agent === "cursor") return deriveCursorMetrics(events, config);
   if (agent === "opencode") return deriveOpenCodeMetrics(events, config);
   return {
     tokenTotals: emptyTokenTotals(),

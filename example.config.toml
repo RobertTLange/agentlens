@@ -24,6 +24,7 @@ detailLoadMode = "lazy_from_disk"
 sessionLogDirectories = [
   { directory = "~/.codex", logType = "codex" },
   { directory = "~/.claude", logType = "claude" },
+  { directory = "~/.cursor", logType = "cursor" },
   { directory = "~/.local/share/opencode", logType = "opencode" }
 ]
 
@@ -53,6 +54,15 @@ includeGlobs = ["history.jsonl"]
 excludeGlobs = []
 maxDepth = 2
 agentHint = "claude"
+
+[sources.cursor_agent_transcripts]
+name = "cursor_agent_transcripts"
+enabled = false
+roots = ["~/.cursor/projects"]
+includeGlobs = ["**/agent-transcripts/*.txt"]
+excludeGlobs = []
+maxDepth = 8
+agentHint = "cursor"
 
 [sources.opencode_storage_session]
 name = "opencode_storage_session"
