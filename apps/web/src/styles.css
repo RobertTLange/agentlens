@@ -408,6 +408,8 @@ body {
   white-space: normal;
   min-width: 0;
   position: relative;
+  content-visibility: auto;
+  contain-intrinsic-size: 136px;
   transition:
     border-color 200ms ease,
     background-color 200ms ease,
@@ -1181,6 +1183,8 @@ body {
   grid-template-columns: auto auto auto auto minmax(0, 1fr);
   align-items: center;
   gap: 7px;
+  content-visibility: auto;
+  contain-intrinsic-size: 27px;
   transition:
     border-color 180ms ease,
     background-color 180ms ease,
@@ -1266,6 +1270,8 @@ body {
   padding: 9px;
   background: #fff;
   position: relative;
+  content-visibility: auto;
+  contain-intrinsic-size: 168px;
   transition:
     border-color 180ms ease,
     box-shadow 220ms ease,
@@ -1388,6 +1394,27 @@ body {
 .empty {
   padding: 20px;
   color: var(--muted);
+}
+
+.load-more {
+  margin: 6px 0 2px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  padding: 7px 10px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.load-more:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.load-more:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
 }
 
 @media (prefers-reduced-motion: reduce) {
