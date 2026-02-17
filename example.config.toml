@@ -23,7 +23,8 @@ detailLoadMode = "lazy_from_disk"
 
 sessionLogDirectories = [
   { directory = "~/.codex", logType = "codex" },
-  { directory = "~/.claude", logType = "claude" }
+  { directory = "~/.claude", logType = "claude" },
+  { directory = "~/.local/share/opencode", logType = "opencode" }
 ]
 
 [sources.codex_home]
@@ -52,6 +53,15 @@ includeGlobs = ["history.jsonl"]
 excludeGlobs = []
 maxDepth = 2
 agentHint = "claude"
+
+[sources.opencode_storage_session]
+name = "opencode_storage_session"
+enabled = false
+roots = ["~/.local/share/opencode/storage/session"]
+includeGlobs = ["**/*.json"]
+excludeGlobs = []
+maxDepth = 8
+agentHint = "opencode"
 
 [traceInspector]
 includeMetaDefault = false
