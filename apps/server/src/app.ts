@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -596,6 +597,7 @@ function commandMatchesAgent(command: string, agent: TraceSummary["agent"]): boo
   if (agent === "codex") return /\bcodex\b/.test(normalized);
   if (agent === "claude") return /\bclaude\b/.test(normalized);
   if (agent === "cursor") return /\bcursor\b/.test(normalized);
+  if (agent === "gemini") return /\bgemini\b/.test(normalized);
   if (agent === "opencode") return /\bopencode\b/.test(normalized);
   return false;
 }
@@ -636,6 +638,26 @@ export function cursorProjectKeyFromCwd(cwd: string): string {
     .replace(/[^A-Za-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase();
+}
+
+export function geminiProjectHashFromTracePath(tracePath: string): string {
+  const normalizedPath = tracePath.replace(/\\/g, "/");
+  const marker = "/.gemini/tmp/";
+  const markerIndex = normalizedPath.indexOf(marker);
+  if (markerIndex < 0) return "";
+  const tail = normalizedPath.slice(markerIndex + marker.length);
+  const projectHash = (tail.split("/", 1)[0] ?? "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(projectHash)) return "";
+  return projectHash;
+}
+
+export function geminiProjectHashesFromCwd(cwd: string): string[] {
+  const trimmed = cwd.trim();
+  if (!trimmed) return [];
+  const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/g, "");
+  const candidates = [trimmed, normalized].map((value) => value.trim()).filter((value) => value.length > 0);
+  const uniqueValues = Array.from(new Set(candidates));
+  return uniqueValues.map((value) => createHash("sha256").update(value).digest("hex"));
 }
 
 interface ClaudeCandidateProcess {
@@ -725,6 +747,38 @@ export function selectAgentProjectProcessPids(
   return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
 }
 
+export function selectAgentProcessPidsBySessionId(
+  sessionId: string,
+  agent: TraceSummary["agent"],
+  processes: Pick<AgentCandidateProcess, "pid" | "user" | "args">[],
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): number[] {
+  const sameUserAgentCandidates = processes.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    if (!commandMatchesAgent(processInfo.args, agent)) return false;
+    if (isExcludedAgentCommand(processInfo.args, agent)) return false;
+    return true;
+  });
+  if (sameUserAgentCandidates.length === 0) return [];
+
+  const normalizedSessionId = sessionId.trim().toLowerCase();
+  if (normalizedSessionId) {
+    const sessionCandidates = sameUserAgentCandidates.filter((processInfo) =>
+      normalizeCommand(processInfo.args).includes(normalizedSessionId),
+    );
+    if (sessionCandidates.length > 0) {
+      return uniquePids(sessionCandidates.map((processInfo) => processInfo.pid));
+    }
+  }
+
+  if (sameUserAgentCandidates.length === 1) {
+    return uniquePids([sameUserAgentCandidates[0]?.pid ?? 0]);
+  }
+  return [];
+}
+
 export function selectCursorProjectProcessPids(
   summary: Pick<TraceSummary, "path" | "sessionId">,
   processes: AgentCandidateProcess[],
@@ -743,6 +797,40 @@ export function selectCursorProjectProcessPids(
 
   const projectCandidates = sameUserCursorCandidates.filter(
     (processInfo) => cursorProjectKeyFromCwd(processInfo.cwd) === projectKey,
+  );
+  if (projectCandidates.length === 0) return [];
+
+  const normalizedSessionId = summary.sessionId.trim().toLowerCase();
+  if (normalizedSessionId) {
+    const sessionCandidates = projectCandidates.filter((processInfo) =>
+      normalizeCommand(processInfo.args).includes(normalizedSessionId),
+    );
+    if (sessionCandidates.length > 0) {
+      return uniquePids(sessionCandidates.map((processInfo) => processInfo.pid));
+    }
+  }
+
+  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+}
+
+export function selectGeminiProjectProcessPids(
+  summary: Pick<TraceSummary, "path" | "sessionId">,
+  processes: AgentCandidateProcess[],
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): number[] {
+  const projectHash = geminiProjectHashFromTracePath(summary.path);
+  if (!projectHash) return [];
+
+  const sameUserGeminiCandidates = processes.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, "gemini");
+  });
+  if (sameUserGeminiCandidates.length === 0) return [];
+
+  const projectCandidates = sameUserGeminiCandidates.filter((processInfo) =>
+    geminiProjectHashesFromCwd(processInfo.cwd).includes(projectHash),
   );
   if (projectCandidates.length === 0) return [];
 
@@ -814,6 +902,16 @@ async function findAgentProjectProcessPids(
   return selectAgentProjectProcessPids(sessionCwd, sessionId, agent, withCwd, identity, requesterPid);
 }
 
+async function findAgentProcessPidsBySessionId(
+  sessionId: string,
+  agent: TraceSummary["agent"],
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const runningProcesses = await listRunningProcesses();
+  return selectAgentProcessPidsBySessionId(sessionId, agent, runningProcesses, identity, requesterPid);
+}
+
 async function findCursorProjectProcessPids(
   summary: TraceSummary,
   identity: CurrentUserIdentity,
@@ -837,6 +935,31 @@ async function findCursorProjectProcessPids(
     })),
   );
   return selectCursorProjectProcessPids(summary, withCwd, identity, requesterPid);
+}
+
+async function findGeminiProjectProcessPids(
+  summary: TraceSummary,
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const projectHash = geminiProjectHashFromTracePath(summary.path);
+  if (!projectHash) return [];
+
+  const runningProcesses = await listRunningProcesses();
+  const geminiProcesses = runningProcesses.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, "gemini");
+  });
+  if (geminiProcesses.length === 0) return [];
+
+  const withCwd: AgentCandidateProcess[] = await Promise.all(
+    geminiProcesses.map(async (processInfo) => ({
+      ...processInfo,
+      cwd: await listProcessCwd(processInfo.pid),
+    })),
+  );
+  return selectGeminiProjectProcessPids(summary, withCwd, identity, requesterPid);
 }
 
 async function excludeOpenCodeServePids(pids: number[]): Promise<number[]> {
@@ -878,6 +1001,12 @@ async function resolveSessionProcessPids(
   }
   if (matchedPids.length === 0 && summary.agent === "cursor") {
     matchedPids = await findCursorProjectProcessPids(summary, identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "gemini") {
+    matchedPids = await findGeminiProjectProcessPids(summary, identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "gemini") {
+    matchedPids = await findAgentProcessPidsBySessionId(summary.sessionId, "gemini", identity, requesterPid);
   }
   if (matchedPids.length === 0 && sessionCwd) {
     matchedPids = await findAgentProjectProcessPids(

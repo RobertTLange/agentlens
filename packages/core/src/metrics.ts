@@ -100,6 +100,17 @@ function tokenTotalsFromOpenCodeTokensRecord(record: Record<string, unknown>): T
   return finalizeTokenTotals(totals);
 }
 
+function tokenTotalsFromGeminiTokensRecord(record: Record<string, unknown>): TokenTotals {
+  const totals = emptyTokenTotals();
+  totals.inputTokens = toNumber(record.input);
+  totals.cachedReadTokens = toNumber(record.cached);
+  totals.cachedCreateTokens = 0;
+  totals.outputTokens = toNumber(record.output) + toNumber(record.tool);
+  totals.reasoningOutputTokens = toNumber(record.thoughts);
+  totals.totalTokens = toNumber(record.total);
+  return finalizeTokenTotals(totals);
+}
+
 function contextWindowResolver(config: AppConfig): (model: string) => number {
   const byModel = new Map<string, number>();
   for (const entry of config.models.contextWindows) {
@@ -420,11 +431,66 @@ function deriveCursorMetrics(events: NormalizedEvent[], config: AppConfig): Sess
   };
 }
 
+function deriveGeminiMetrics(events: NormalizedEvent[], config: AppConfig): SessionMetrics {
+  const resolveWindow = contextWindowResolver(config);
+  const totals = emptyTokenTotals();
+  const modelBreakdown = new Map<string, TokenTotals>();
+  let maxContextPct: number | null = null;
+  const seenMessageIds = new Set<string>();
+  const seenRows = new Set<Record<string, unknown>>();
+
+  for (const event of events) {
+    const raw = asRecord(event.raw);
+    if (seenRows.has(raw)) continue;
+    seenRows.add(raw);
+
+    const rawType = asString(raw.type).toLowerCase();
+    if (rawType !== "gemini" && rawType !== "assistant" && rawType !== "model") continue;
+
+    const messageId = asString(raw.id);
+    if (messageId && seenMessageIds.has(messageId)) continue;
+    if (messageId) seenMessageIds.add(messageId);
+
+    const tokens = asRecord(raw.tokens);
+    if (Object.keys(tokens).length === 0) continue;
+    const usageTotals = tokenTotalsFromGeminiTokensRecord(tokens);
+    addTokenTotals(totals, usageTotals);
+
+    const model = asString(raw.model || raw.modelVersion) || "<unknown>";
+    const existing = modelBreakdown.get(model) ?? emptyTokenTotals();
+    addTokenTotals(existing, usageTotals);
+    modelBreakdown.set(model, existing);
+
+    const promptTokens = usageTotals.inputTokens + usageTotals.cachedReadTokens;
+    const window = resolveWindow(model);
+    if (window > 0 && promptTokens > 0) {
+      const pct = (promptTokens / window) * 100;
+      maxContextPct = maxContextPct === null ? pct : Math.max(maxContextPct, pct);
+    }
+  }
+
+  for (const [model, modelTotals] of modelBreakdown) {
+    modelBreakdown.set(model, finalizeTokenTotals(modelTotals));
+  }
+
+  return {
+    tokenTotals: finalizeTokenTotals(totals),
+    modelTokenSharesTop: buildTopModelShares(
+      new Map([...modelBreakdown.entries()].map(([model, modelTotals]) => [model, modelTotals.totalTokens] as const)),
+      config.traceInspector.topModelCount,
+    ),
+    modelTokenSharesEstimated: false,
+    contextWindowPct: maxContextPct,
+    costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+  };
+}
+
 export function deriveSessionMetrics(events: NormalizedEvent[], agent: AgentKind, config: AppConfig): SessionMetrics {
   if (agent === "claude") return deriveClaudeMetrics(events, config);
   if (agent === "codex") return deriveCodexMetrics(events, config);
   if (agent === "cursor") return deriveCursorMetrics(events, config);
   if (agent === "opencode") return deriveOpenCodeMetrics(events, config);
+  if (agent === "gemini") return deriveGeminiMetrics(events, config);
   return {
     tokenTotals: emptyTokenTotals(),
     modelTokenSharesTop: [],

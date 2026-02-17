@@ -4,6 +4,7 @@ export const DEFAULT_SESSION_LOG_DIRECTORIES: SessionLogDirectoryConfig[] = [
   { directory: "~/.codex", logType: "codex" },
   { directory: "~/.claude", logType: "claude" },
   { directory: "~/.cursor", logType: "cursor" },
+  { directory: "~/.gemini", logType: "gemini" },
   { directory: "~/.local/share/opencode", logType: "opencode" },
 ];
 
@@ -52,6 +53,15 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
     excludeGlobs: [],
     maxDepth: 8,
     agentHint: "opencode",
+  },
+  gemini_tmp: {
+    name: "gemini_tmp",
+    enabled: false,
+    roots: ["~/.gemini/tmp"],
+    includeGlobs: ["**/chats/session-*.json", "**/*.jsonl"],
+    excludeGlobs: [],
+    maxDepth: 8,
+    agentHint: "gemini",
   },
 };
 

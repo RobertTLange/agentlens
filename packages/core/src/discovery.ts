@@ -83,6 +83,15 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
       }
       return ["projects/**/agent-transcripts/*.txt"];
     }
+    if (logType === "gemini") {
+      if (hasPathSegment(root, "chats")) {
+        return ["**/session-*.json", "**/*.jsonl"];
+      }
+      if (hasPathSegment(root, "tmp")) {
+        return ["**/chats/session-*.json", "**/*.jsonl"];
+      }
+      return ["tmp/**/chats/session-*.json", "tmp/**/*.jsonl"];
+    }
     if (logType === "opencode") {
       if (hasPathSegment(root, "storage")) {
         return hasPathSegment(root, "session") ? ["**/*.json"] : ["session/**/*.json"];

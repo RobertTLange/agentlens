@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import type { OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import {
   buildTimelineStripSegments,
@@ -24,6 +24,10 @@ const TRACE_ENTER_ANIMATION_MS = 620;
 const TIMELINE_LATEST_EPSILON_PX = 12;
 const HEADER_FLASH_VISIBLE_MS = 2_400;
 const HEADER_FLASH_FADE_MS = 380;
+const CLOCK_TICK_MS = 5_000;
+const TIMELINE_EVENT_INITIAL_RENDER_LIMIT = 240;
+const TIMELINE_EVENT_RENDER_STEP = 240;
+const TIMELINE_EVENT_RENDER_PREFETCH_PX = 320;
 const RECENT_TRACE_LIMIT = 50;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 
@@ -220,6 +224,7 @@ export function App(): JSX.Element {
   const [expandedPathTraceIds, setExpandedPathTraceIds] = useState<Set<string>>(new Set());
   const [autoFollow, setAutoFollow] = useState(true);
   const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("latest-first");
+  const [timelineEventRenderLimit, setTimelineEventRenderLimit] = useState(TIMELINE_EVENT_INITIAL_RENDER_LIMIT);
   const [liveTick, setLiveTick] = useState(0);
   const [clockNowMs, setClockNowMs] = useState(() => Date.now());
   const [enteringTraceIds, setEnteringTraceIds] = useState<Set<string>>(new Set());
@@ -236,6 +241,8 @@ export function App(): JSX.Element {
   const selectedIdRef = useRef("");
   const timelineStripRef = useRef<HTMLDivElement | null>(null);
   const timelinePinnedToLatestRef = useRef(true);
+  const timelineHasOverflowRef = useRef(false);
+  const timelinePinnedStateRef = useRef(true);
   const previousTimelineTraceIdRef = useRef("");
   const previousTimelineEventCountRef = useRef(0);
   const previousTraceFilterRef = useRef("");
@@ -309,9 +316,19 @@ export function App(): JSX.Element {
     () => sortTimelineItems(visibleTimelineEvents, timelineSortDirection),
     [visibleTimelineEvents, timelineSortDirection],
   );
+  const renderedTimelineEvents = useMemo(() => {
+    const limit = Math.max(1, timelineEventRenderLimit);
+    if (timelineEvents.length <= limit) return timelineEvents;
+    return timelineEvents.slice(0, limit);
+  }, [timelineEventRenderLimit, timelineEvents]);
+  const renderedTocRows = useMemo(() => {
+    const limit = Math.max(1, timelineEventRenderLimit);
+    if (tocRows.length <= limit) return tocRows;
+    return tocRows.slice(0, limit);
+  }, [timelineEventRenderLimit, tocRows]);
   const timelineStripEvents = useMemo(() => buildTimelineStripSegments(visibleTimelineEvents), [visibleTimelineEvents]);
-  const tocRowIds = useMemo(() => tocRows.map((row) => row.eventId), [tocRows]);
-  const timelineEventIds = useMemo(() => timelineEvents.map((event) => event.eventId), [timelineEvents]);
+  const tocRowIds = useMemo(() => renderedTocRows.map((row) => row.eventId), [renderedTocRows]);
+  const timelineEventIds = useMemo(() => renderedTimelineEvents.map((event) => event.eventId), [renderedTimelineEvents]);
   const filteredTraceIds = useMemo(() => filteredTraces.map((trace) => trace.id), [filteredTraces]);
   const timelineStripShowsRightGlow =
     timelineStripHasOverflow && timelineOffscreenAppendCount > 0 && !timelineStripPinnedToLatest;
@@ -391,13 +408,41 @@ export function App(): JSX.Element {
     resetKey: selectedId,
   });
 
+  const growTimelineRenderWindow = useCallback((): void => {
+    setTimelineEventRenderLimit((prev) => {
+      if (prev >= timelineEvents.length) return prev;
+      return Math.min(prev + TIMELINE_EVENT_RENDER_STEP, timelineEvents.length);
+    });
+  }, [timelineEvents.length]);
+
+  const maybeGrowTimelineRenderWindow = useCallback(
+    (target: HTMLDivElement): void => {
+      if (timelineEventRenderLimit >= timelineEvents.length) return;
+      const distanceToBottom = target.scrollHeight - (target.scrollTop + target.clientHeight);
+      if (distanceToBottom <= TIMELINE_EVENT_RENDER_PREFETCH_PX) {
+        growTimelineRenderWindow();
+      }
+    },
+    [growTimelineRenderWindow, timelineEventRenderLimit, timelineEvents.length],
+  );
+
+  useEffect(() => {
+    setTimelineEventRenderLimit(TIMELINE_EVENT_INITIAL_RENDER_LIMIT);
+  }, [selectedId, timelineSortDirection, tocQuery]);
+
   const applyTimelineStripViewport = useCallback(
     (nextViewport: { hasOverflow: boolean; atLatest: boolean }, clearOffscreenWhenPinned = true): void => {
-      setTimelineStripHasOverflow(nextViewport.hasOverflow);
+      if (timelineHasOverflowRef.current !== nextViewport.hasOverflow) {
+        timelineHasOverflowRef.current = nextViewport.hasOverflow;
+        setTimelineStripHasOverflow(nextViewport.hasOverflow);
+      }
       timelinePinnedToLatestRef.current = nextViewport.atLatest;
-      setTimelineStripPinnedToLatest(nextViewport.atLatest);
+      if (timelinePinnedStateRef.current !== nextViewport.atLatest) {
+        timelinePinnedStateRef.current = nextViewport.atLatest;
+        setTimelineStripPinnedToLatest(nextViewport.atLatest);
+      }
       if (clearOffscreenWhenPinned && (nextViewport.atLatest || !nextViewport.hasOverflow)) {
-        setTimelineOffscreenAppendCount(0);
+        setTimelineOffscreenAppendCount((value) => (value === 0 ? value : 0));
       }
     },
     [],
@@ -539,8 +584,9 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       setClockNowMs(Date.now());
-    }, 1_000);
+    }, CLOCK_TICK_MS);
     return () => {
       window.clearInterval(intervalId);
     };
@@ -771,9 +817,11 @@ export function App(): JSX.Element {
       setExpandedEventIds(new Set());
       setEnteringEventIds(new Set());
       setVisibleEventIds(new Set());
-      setTimelineStripHasOverflow(false);
-      setTimelineStripPinnedToLatest(true);
-      setTimelineOffscreenAppendCount(0);
+      timelineHasOverflowRef.current = false;
+      timelinePinnedStateRef.current = true;
+      setTimelineStripHasOverflow((value) => (value ? false : value));
+      setTimelineStripPinnedToLatest((value) => (value ? value : true));
+      setTimelineOffscreenAppendCount((value) => (value === 0 ? value : 0));
       timelinePinnedToLatestRef.current = true;
       previousTimelineTraceIdRef.current = "";
       previousTimelineEventCountRef.current = 0;
@@ -860,11 +908,11 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (!autoFollow) return;
-    if (visibleTimelineEvents.length === 0) return;
-    const last = visibleTimelineEvents[visibleTimelineEvents.length - 1];
+    if (timelineEvents.length === 0) return;
+    const last = timelineEvents[timelineEvents.length - 1];
     if (!last) return;
     setSelectedEventId(last.eventId);
-  }, [autoFollow, visibleTimelineEvents]);
+  }, [autoFollow, timelineEvents]);
 
   useEffect(() => {
     const scroller = timelineStripRef.current;
@@ -873,9 +921,11 @@ export function App(): JSX.Element {
     if (!selectedId || !page || !scroller) {
       previousTimelineTraceIdRef.current = selectedId;
       previousTimelineEventCountRef.current = currentCount;
-      setTimelineStripHasOverflow(false);
-      setTimelineStripPinnedToLatest(true);
-      setTimelineOffscreenAppendCount(0);
+      timelineHasOverflowRef.current = false;
+      timelinePinnedStateRef.current = true;
+      setTimelineStripHasOverflow((value) => (value ? false : value));
+      setTimelineStripPinnedToLatest((value) => (value ? value : true));
+      setTimelineOffscreenAppendCount((value) => (value === 0 ? value : 0));
       timelinePinnedToLatestRef.current = true;
       return;
     }
@@ -907,10 +957,13 @@ export function App(): JSX.Element {
       } else {
         scroller.scrollLeft = scroller.scrollWidth;
       }
-      setTimelineStripHasOverflow(scroller.scrollWidth > scroller.clientWidth + 1);
-      setTimelineStripPinnedToLatest(true);
-      setTimelineOffscreenAppendCount(0);
-      timelinePinnedToLatestRef.current = true;
+      applyTimelineStripViewport(
+        {
+          hasOverflow: scroller.scrollWidth > scroller.clientWidth + 1,
+          atLatest: true,
+        },
+        true,
+      );
       return;
     }
 
@@ -989,10 +1042,7 @@ export function App(): JSX.Element {
     }
   }, [clearEventAppendQueue, enqueueEventsForAppendReveal, page, selectedId]);
 
-  const jumpToEvent = (eventId: string): void => {
-    setSelectedEventId(eventId);
-    const target = document.getElementById(domIdForEvent(eventId));
-    if (!target) return;
+  const centerEventInView = (target: HTMLElement): void => {
     const scroller = target.closest(".events-scroll");
     if (!(scroller instanceof HTMLElement)) return;
     const targetRect = target.getBoundingClientRect();
@@ -1001,6 +1051,27 @@ export function App(): JSX.Element {
     const centeredOffset = (scroller.clientHeight - targetRect.height) / 2;
     const top = scroller.scrollTop + relativeTop - centeredOffset;
     scroller.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  };
+
+  const jumpToEvent = (eventId: string): void => {
+    setSelectedEventId(eventId);
+    const target = document.getElementById(domIdForEvent(eventId));
+    if (target) {
+      centerEventInView(target);
+      return;
+    }
+
+    const eventIndex = timelineEvents.findIndex((event) => event.eventId === eventId);
+    if (eventIndex < 0) return;
+    setTimelineEventRenderLimit((prev) => {
+      const needed = eventIndex + TIMELINE_EVENT_RENDER_STEP;
+      return Math.min(Math.max(prev, needed), timelineEvents.length);
+    });
+    window.setTimeout(() => {
+      const delayedTarget = document.getElementById(domIdForEvent(eventId));
+      if (!delayedTarget) return;
+      centerEventInView(delayedTarget);
+    }, 0);
   };
 
   const toggleExpanded = (eventId: string): void => {
@@ -1151,7 +1222,7 @@ export function App(): JSX.Element {
               {headerStatus}
             </div>
           </div>
-          <p>Live observability for Codex, Claude, Cursor, and OpenCode traces.</p>
+          <p>Live observability for your Codex, Claude, Cursor, Gemini and OpenCode agent sessions.</p>
         </div>
         <div className="hero-metrics">
           <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
@@ -1281,8 +1352,11 @@ export function App(): JSX.Element {
               onChange={(event) => setTocQuery(event.target.value)}
             />
           </div>
-          <div className="toc-scroll">
-            {tocRows.map((row) => {
+          <div
+            className="toc-scroll"
+            onScroll={(event: UIEvent<HTMLDivElement>) => maybeGrowTimelineRenderWindow(event.currentTarget)}
+          >
+            {renderedTocRows.map((row) => {
               const isActive = row.eventId === selectedEventId;
               return (
                 <button
@@ -1299,6 +1373,11 @@ export function App(): JSX.Element {
                 </button>
               );
             })}
+            {renderedTocRows.length < tocRows.length && (
+              <button type="button" className="load-more mono" onClick={growTimelineRenderWindow}>
+                {`Load ${Math.min(TIMELINE_EVENT_RENDER_STEP, tocRows.length - renderedTocRows.length)} more`}
+              </button>
+            )}
             {tocRows.length === 0 && <div className="empty">No timeline rows</div>}
           </div>
         </section>
@@ -1386,8 +1465,11 @@ export function App(): JSX.Element {
                   </article>
                 </section>
 
-                <div className="events-scroll">
-                  {timelineEvents.map((event) => {
+                <div
+                  className="events-scroll"
+                  onScroll={(event: UIEvent<HTMLDivElement>) => maybeGrowTimelineRenderWindow(event.currentTarget)}
+                >
+                  {renderedTimelineEvents.map((event) => {
                     const agentBadges = buildAgentBadges(event);
                     return (
                       <article
@@ -1426,6 +1508,11 @@ export function App(): JSX.Element {
                       </article>
                     );
                   })}
+                  {renderedTimelineEvents.length < timelineEvents.length && (
+                    <button type="button" className="load-more mono" onClick={growTimelineRenderWindow}>
+                      {`Load ${Math.min(TIMELINE_EVENT_RENDER_STEP, timelineEvents.length - renderedTimelineEvents.length)} more`}
+                    </button>
+                  )}
                 </div>
               </>
             ) : (

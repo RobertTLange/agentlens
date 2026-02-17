@@ -25,6 +25,7 @@ sessionLogDirectories = [
   { directory = "~/.codex", logType = "codex" },
   { directory = "~/.claude", logType = "claude" },
   { directory = "~/.cursor", logType = "cursor" },
+  { directory = "~/.gemini", logType = "gemini" },
   { directory = "~/.local/share/opencode", logType = "opencode" }
 ]
 
@@ -72,6 +73,15 @@ includeGlobs = ["**/*.json"]
 excludeGlobs = []
 maxDepth = 8
 agentHint = "opencode"
+
+[sources.gemini_tmp]
+name = "gemini_tmp"
+enabled = false
+roots = ["~/.gemini/tmp"]
+includeGlobs = ["**/chats/session-*.json", "**/*.jsonl"]
+excludeGlobs = []
+maxDepth = 8
+agentHint = "gemini"
 
 [traceInspector]
 includeMetaDefault = false

@@ -5,13 +5,17 @@ import { describe, expect, it, vi } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 import {
   createServer,
+  geminiProjectHashFromTracePath,
+  geminiProjectHashesFromCwd,
   matchesCurrentUser,
   parseTmuxClients,
   resolveDefaultWebDistPath,
+  selectAgentProcessPidsBySessionId,
   selectPreferredTmuxClient,
   selectAgentProjectProcessPids,
   selectClaudeProjectProcessPids,
   selectCursorProjectProcessPids,
+  selectGeminiProjectProcessPids,
 } from "./app.js";
 
 function buildTraceLog(sessionId: string, sequence: number, withToolEvents: boolean): string {
@@ -353,6 +357,32 @@ describe("server api", () => {
     expect(selected).toEqual([6201]);
   });
 
+  it("selects gemini fallback process by matching project cwd", async () => {
+    const selected = selectAgentProjectProcessPids(
+      "/Users/rob/Dropbox/2026_sakana/agentlens",
+      "50641617-dd96-45e6-9649-0b711b8073ae",
+      "gemini",
+      [
+        {
+          pid: 6211,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini --resume 50641617-dd96-45e6-9649-0b711b8073ae",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 6212,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/another-project",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([6211]);
+  });
+
   it("ignores opencode serve daemons when selecting fallback agent process", async () => {
     const sessionId = "ses_opencode_123";
     const selected = selectAgentProjectProcessPids(
@@ -378,6 +408,30 @@ describe("server api", () => {
     );
 
     expect(selected).toEqual([6302]);
+  });
+
+  it("falls back to gemini session-id matching when cwd is unavailable", async () => {
+    const sessionId = "50641617-dd96-45e6-9649-0b711b8073ae";
+    const selected = selectAgentProcessPidsBySessionId(
+      sessionId,
+      "gemini",
+      [
+        {
+          pid: 6321,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+        },
+        {
+          pid: 6322,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini --resume 50641617-dd96-45e6-9649-0b711b8073ae",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([6322]);
   });
 
   it("selects cursor fallback process by matching cursor transcript project key", async () => {
@@ -434,6 +488,73 @@ describe("server api", () => {
     );
 
     expect(selected).toEqual([53122]);
+  });
+
+  it("derives gemini project hash from trace path and cwd", async () => {
+    const projectCwd = "/Users/rob/Dropbox/Mac (2)/Desktop";
+    const projectHash = "31961e5d2f9bdd62bbd56b581966e1a817d9d362afc8a1be751cf476cfdb454d";
+    expect(
+      geminiProjectHashFromTracePath(
+        `/Users/rob/.gemini/tmp/${projectHash}/chats/session-2026-02-17T01-07-50641617.json`,
+      ),
+    ).toBe(projectHash);
+    expect(geminiProjectHashesFromCwd(projectCwd)).toContain(projectHash);
+  });
+
+  it("selects gemini fallback process by matching gemini project hash", async () => {
+    const sessionId = "50641617-dd96-45e6-9649-0b711b8073ae";
+    const selected = selectGeminiProjectProcessPids(
+      {
+        path: `/Users/rob/.gemini/tmp/31961e5d2f9bdd62bbd56b581966e1a817d9d362afc8a1be751cf476cfdb454d/chats/session-2026-02-17T01-07-50641617.json`,
+        sessionId,
+      },
+      [
+        {
+          pid: 64100,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+        {
+          pid: 64101,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([64100]);
+  });
+
+  it("prefers gemini hash-matched process whose args include selected session id", async () => {
+    const sessionId = "50641617-dd96-45e6-9649-0b711b8073ae";
+    const selected = selectGeminiProjectProcessPids(
+      {
+        path: `/Users/rob/.gemini/tmp/31961e5d2f9bdd62bbd56b581966e1a817d9d362afc8a1be751cf476cfdb454d/chats/session-2026-02-17T01-07-50641617.json`,
+        sessionId,
+      },
+      [
+        {
+          pid: 64110,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+        {
+          pid: 64111,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini --resume 50641617-dd96-45e6-9649-0b711b8073ae",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([64111]);
   });
 
   it("prefers monorepo web dist when both monorepo and packaged builds exist", async () => {
