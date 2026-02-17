@@ -99,6 +99,7 @@ describe("web view model", () => {
   it("maps known agents to icon assets and unknown to fallback", () => {
     expect(iconForAgent("codex")).toBe("/icons/openai.svg");
     expect(iconForAgent("claude")).toBe("/icons/claude.svg");
+    expect(iconForAgent("cursor")).toBe("/icons/cursor.jpeg");
     expect(iconForAgent("opencode")).toBe("/icons/opencode.png");
     expect(iconForAgent("unknown")).toBeNull();
   });

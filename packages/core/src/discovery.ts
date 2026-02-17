@@ -74,6 +74,15 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
     if (logType === "claude") {
       return hasPathSegment(root, "projects") ? ["**/*.jsonl"] : ["projects/**/*.jsonl"];
     }
+    if (logType === "cursor") {
+      if (hasPathSegment(root, "agent-transcripts")) {
+        return ["**/*.txt"];
+      }
+      if (hasPathSegment(root, "projects")) {
+        return ["**/agent-transcripts/*.txt"];
+      }
+      return ["projects/**/agent-transcripts/*.txt"];
+    }
     if (logType === "opencode") {
       if (hasPathSegment(root, "storage")) {
         return hasPathSegment(root, "session") ? ["**/*.json"] : ["session/**/*.json"];

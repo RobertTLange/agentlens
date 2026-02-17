@@ -595,6 +595,7 @@ function commandMatchesAgent(command: string, agent: TraceSummary["agent"]): boo
   if (!normalized) return false;
   if (agent === "codex") return /\bcodex\b/.test(normalized);
   if (agent === "claude") return /\bclaude\b/.test(normalized);
+  if (agent === "cursor") return /\bcursor\b/.test(normalized);
   if (agent === "opencode") return /\bopencode\b/.test(normalized);
   return false;
 }
@@ -615,6 +616,26 @@ export function claudeProjectKeyFromCwd(cwd: string): string {
   if (!normalized) return "";
   const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
   return absolute.replace(/[^A-Za-z0-9]+/g, "-");
+}
+
+export function cursorProjectKeyFromTracePath(tracePath: string): string {
+  const normalizedPath = tracePath.replace(/\\/g, "/");
+  const marker = "/.cursor/projects/";
+  const markerIndex = normalizedPath.indexOf(marker);
+  if (markerIndex < 0) return "";
+  const tail = normalizedPath.slice(markerIndex + marker.length);
+  const projectKey = tail.split("/", 1)[0] ?? "";
+  return projectKey.trim().toLowerCase();
+}
+
+export function cursorProjectKeyFromCwd(cwd: string): string {
+  const normalized = cwd.trim().replace(/\\/g, "/");
+  if (!normalized) return "";
+  return normalized
+    .replace(/^\/+/, "")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
 }
 
 interface ClaudeCandidateProcess {
@@ -704,6 +725,40 @@ export function selectAgentProjectProcessPids(
   return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
 }
 
+export function selectCursorProjectProcessPids(
+  summary: Pick<TraceSummary, "path" | "sessionId">,
+  processes: AgentCandidateProcess[],
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): number[] {
+  const projectKey = cursorProjectKeyFromTracePath(summary.path);
+  if (!projectKey) return [];
+
+  const sameUserCursorCandidates = processes.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, "cursor");
+  });
+  if (sameUserCursorCandidates.length === 0) return [];
+
+  const projectCandidates = sameUserCursorCandidates.filter(
+    (processInfo) => cursorProjectKeyFromCwd(processInfo.cwd) === projectKey,
+  );
+  if (projectCandidates.length === 0) return [];
+
+  const normalizedSessionId = summary.sessionId.trim().toLowerCase();
+  if (normalizedSessionId) {
+    const sessionCandidates = projectCandidates.filter((processInfo) =>
+      normalizeCommand(processInfo.args).includes(normalizedSessionId),
+    );
+    if (sessionCandidates.length > 0) {
+      return uniquePids(sessionCandidates.map((processInfo) => processInfo.pid));
+    }
+  }
+
+  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+}
+
 async function findClaudeProjectProcessPids(
   summary: TraceSummary,
   identity: CurrentUserIdentity,
@@ -759,6 +814,31 @@ async function findAgentProjectProcessPids(
   return selectAgentProjectProcessPids(sessionCwd, sessionId, agent, withCwd, identity, requesterPid);
 }
 
+async function findCursorProjectProcessPids(
+  summary: TraceSummary,
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const projectKey = cursorProjectKeyFromTracePath(summary.path);
+  if (!projectKey) return [];
+
+  const runningProcesses = await listRunningProcesses();
+  const cursorProcesses = runningProcesses.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, "cursor");
+  });
+  if (cursorProcesses.length === 0) return [];
+
+  const withCwd: AgentCandidateProcess[] = await Promise.all(
+    cursorProcesses.map(async (processInfo) => ({
+      ...processInfo,
+      cwd: await listProcessCwd(processInfo.pid),
+    })),
+  );
+  return selectCursorProjectProcessPids(summary, withCwd, identity, requesterPid);
+}
+
 async function excludeOpenCodeServePids(pids: number[]): Promise<number[]> {
   if (pids.length === 0) return [];
   try {
@@ -795,6 +875,9 @@ async function resolveSessionProcessPids(
   }
   if (matchedPids.length === 0 && summary.agent === "claude") {
     matchedPids = await findClaudeProjectProcessPids(summary, identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "cursor") {
+    matchedPids = await findCursorProjectProcessPids(summary, identity, requesterPid);
   }
   if (matchedPids.length === 0 && sessionCwd) {
     matchedPids = await findAgentProjectProcessPids(

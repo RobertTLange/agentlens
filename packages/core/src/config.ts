@@ -38,7 +38,7 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
 type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
 
 function isAgentKind(value: string): value is AgentKind {
-  return value === "claude" || value === "codex" || value === "opencode" || value === "unknown";
+  return value === "claude" || value === "codex" || value === "cursor" || value === "opencode" || value === "unknown";
 }
 
 function cloneDefaultSessionLogDirectories(): SessionLogDirectoryConfig[] {
@@ -61,6 +61,34 @@ function normalizeSessionLogDirectory(value: unknown): SessionLogDirectoryConfig
   return { directory, logType: logTypeRaw };
 }
 
+function ensureCursorSessionLogDirectory(entries: SessionLogDirectoryConfig[]): SessionLogDirectoryConfig[] {
+  if (entries.some((entry) => entry.logType === "cursor")) {
+    return entries;
+  }
+
+  const hasKnownLegacyAgents = entries.some(
+    (entry) =>
+      (entry.logType === "codex" || entry.logType === "claude" || entry.logType === "opencode") &&
+      entry.directory.trim().startsWith("~/"),
+  );
+  if (!hasKnownLegacyAgents) {
+    return entries;
+  }
+
+  const defaultCursorEntry = DEFAULT_CONFIG.sessionLogDirectories.find((entry) => entry.logType === "cursor");
+  if (!defaultCursorEntry) {
+    return entries;
+  }
+
+  return [
+    ...entries,
+    {
+      directory: defaultCursorEntry.directory,
+      logType: "cursor",
+    },
+  ];
+}
+
 function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[]): SessionLogDirectoryConfig[] {
   if (Array.isArray(input)) {
     const dedup = new Map<string, SessionLogDirectoryConfig>();
@@ -69,7 +97,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
       if (!normalized) continue;
       dedup.set(`${normalized.directory}::${normalized.logType}`, normalized);
     }
-    return Array.from(dedup.values());
+    return ensureCursorSessionLogDirectory(Array.from(dedup.values()));
   }
 
   if (Array.isArray(legacyDirectories)) {
@@ -82,6 +110,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
         let logType: AgentKind = "unknown";
         if (normalized.includes(".codex")) logType = "codex";
         else if (normalized.includes(".claude")) logType = "claude";
+        else if (normalized.includes(".cursor")) logType = "cursor";
         else if (normalized.includes("opencode")) logType = "opencode";
         return { directory, logType };
       })
@@ -91,7 +120,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
         dedup.add(key);
         return true;
       });
-    return legacy;
+    return ensureCursorSessionLogDirectory(legacy);
   }
 
   return cloneDefaultSessionLogDirectories();
