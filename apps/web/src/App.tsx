@@ -74,26 +74,33 @@ function fmtTimeAgo(ms: number | null, nowMs: number): string {
 
 function buildAgentBadges(event: TracePage["events"][number]): string[] {
   const badges: string[] = [];
+  const addBadge = (badge: string): void => {
+    if (!badge) return;
+    if (!badges.includes(badge)) badges.push(badge);
+  };
   const raw = event.raw;
   const rawType = typeof raw.type === "string" ? raw.type : "";
+
+  const directModel = typeof raw.model === "string" ? raw.model.trim() : "";
+  if (directModel) addBadge(`model:${directModel}`);
 
   if (rawType === "turn_context") {
     const payload = raw.payload as Record<string, unknown> | undefined;
     const model = typeof payload?.model === "string" ? payload.model : "";
     const approval = typeof payload?.approval_policy === "string" ? payload.approval_policy : "";
-    if (model) badges.push(`model:${model}`);
-    if (approval) badges.push(`approval:${approval}`);
+    if (model) addBadge(`model:${model}`);
+    if (approval) addBadge(`approval:${approval}`);
   }
 
   if (rawType === "progress") {
     const data = raw.data as Record<string, unknown> | undefined;
     const hookEvent = typeof data?.hookEvent === "string" ? data.hookEvent : "";
-    if (hookEvent) badges.push(`hook:${hookEvent}`);
+    if (hookEvent) addBadge(`hook:${hookEvent}`);
   }
 
   if (rawType === "system") {
     const subtype = typeof raw.subtype === "string" ? raw.subtype : "";
-    if (subtype) badges.push(`system:${subtype}`);
+    if (subtype) addBadge(`system:${subtype}`);
   }
 
   return badges.slice(0, 3);
@@ -107,8 +114,50 @@ function limitRecentTraces(traces: TraceSummary[]): TraceSummary[] {
   return sortTraces(traces).slice(0, RECENT_TRACE_LIMIT);
 }
 
-function buildTraceSummaryStamp(summary: Pick<TraceSummary, "eventCount" | "mtimeMs" | "lastEventTs">): string {
-  return `${summary.eventCount}:${summary.mtimeMs}:${summary.lastEventTs ?? 0}`;
+function summaryNumberStamp(value: number | null | undefined, digits = 6): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "na";
+}
+
+function buildTraceSummaryStamp(
+  summary: Pick<
+    TraceSummary,
+    | "eventCount"
+    | "mtimeMs"
+    | "lastEventTs"
+    | "costEstimateUsd"
+    | "contextWindowPct"
+    | "tokenTotals"
+    | "modelTokenSharesTop"
+    | "modelTokenSharesEstimated"
+  >,
+): string {
+  const tokenTotals = summary.tokenTotals;
+  const tokenStamp = tokenTotals
+    ? [
+        tokenTotals.inputTokens,
+        tokenTotals.cachedReadTokens,
+        tokenTotals.cachedCreateTokens,
+        tokenTotals.outputTokens,
+        tokenTotals.reasoningOutputTokens,
+        tokenTotals.totalTokens,
+      ]
+        .map((value) => summaryNumberStamp(value, 0))
+        .join(",")
+    : "na";
+  const modelStamp =
+    (summary.modelTokenSharesTop ?? [])
+      .map((row) => `${row.model}:${summaryNumberStamp(row.tokens, 0)}:${summaryNumberStamp(row.percent)}`)
+      .join("|") || "na";
+  return [
+    summary.eventCount,
+    summary.mtimeMs,
+    summary.lastEventTs ?? 0,
+    summaryNumberStamp(summary.costEstimateUsd),
+    summaryNumberStamp(summary.contextWindowPct),
+    tokenStamp,
+    modelStamp,
+    summary.modelTokenSharesEstimated ? "estimated" : "exact",
+  ].join(":");
 }
 
 function buildTracePageCacheKey(traceId: string, includeMeta: boolean): string {
@@ -1102,7 +1151,7 @@ export function App(): JSX.Element {
               {headerStatus}
             </div>
           </div>
-          <p>Live observability for Codex, Claude, and OpenCode traces.</p>
+          <p>Live observability for Codex, Claude, Cursor, and OpenCode traces.</p>
         </div>
         <div className="hero-metrics">
           <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>

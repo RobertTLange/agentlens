@@ -15,6 +15,7 @@ describe("trace index", () => {
     expect(config.sessionLogDirectories).toEqual([
       { directory: "~/.codex", logType: "codex" },
       { directory: "~/.claude", logType: "claude" },
+      { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.local/share/opencode", logType: "opencode" },
     ]);
   });
@@ -29,6 +30,21 @@ describe("trace index", () => {
     expect(config.sessionLogDirectories).toEqual([
       { directory: "~/.codex", logType: "codex" },
       { directory: "~/custom-logs", logType: "unknown" },
+      { directory: "~/.cursor", logType: "cursor" },
+    ]);
+  });
+
+  it("auto-injects cursor session directory for legacy typed configs missing cursor", () => {
+    const config = mergeConfig({
+      sessionLogDirectories: [
+        { directory: "~/.codex", logType: "codex" },
+        { directory: "~/.claude", logType: "claude" },
+      ],
+    });
+    expect(config.sessionLogDirectories).toEqual([
+      { directory: "~/.codex", logType: "codex" },
+      { directory: "~/.claude", logType: "claude" },
+      { directory: "~/.cursor", logType: "cursor" },
     ]);
   });
 
@@ -152,6 +168,95 @@ describe("trace index", () => {
       | undefined;
     expect(toolResultEvent?.toolCallId).toBe("call_1");
     expect(toolResultEvent?.toolType).toBe("bash");
+  });
+
+  it("parses cursor agent transcripts from .cursor projects", async () => {
+    const root = await createTempRoot();
+    const transcriptDir = path.join(root, ".cursor", "projects", "project-a", "agent-transcripts");
+    await mkdir(transcriptDir, { recursive: true });
+
+    const transcriptPath = path.join(transcriptDir, "cursor-session-1.txt");
+    const transcript = [
+      "user:",
+      "<user_query>",
+      "add cursor parser",
+      "</user_query>",
+      "",
+      "assistant:",
+      "[Thinking] Need parser + discovery updates.",
+      "[Tool call] Read",
+      "  path: packages/core/src/parsers/index.ts",
+      "[Tool result] Read",
+      "",
+      "Implemented parser wiring and tests.",
+    ].join("\n");
+    await writeFile(transcriptPath, transcript, "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_agent_transcripts: {
+          name: "cursor_agent_transcripts",
+          enabled: true,
+          roots: [path.join(root, ".cursor", "projects")],
+          includeGlobs: ["**/agent-transcripts/*.txt"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summaries = index.getSummaries();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.agent).toBe("cursor");
+    expect(summaries[0]?.parser).toBe("cursor");
+    expect(summaries[0]?.sessionId).toBe("cursor-session-1");
+    expect(summaries[0]?.eventCount).toBeGreaterThanOrEqual(4);
+    expect(summaries[0]?.toolUseCount).toBe(1);
+    expect(summaries[0]?.toolResultCount).toBe(1);
+    expect((summaries[0]?.tokenTotals?.inputTokens ?? 0) > 0).toBe(true);
+    expect((summaries[0]?.tokenTotals?.outputTokens ?? 0) > 0).toBe(true);
+    expect((summaries[0]?.tokenTotals?.totalTokens ?? 0) > 0).toBe(true);
   });
 
   it("parses opencode storage sessions with tool events and token metrics", async () => {
@@ -1685,6 +1790,181 @@ describe("trace index", () => {
       const perf = index.getPerformanceStats();
       expect(perf.incrementalAppendCount).toBeGreaterThan(0);
       expect(perf.fullReparseCount).toBeGreaterThan(0);
+    } finally {
+      index.stop();
+    }
+  });
+
+  it("keeps codex model and cost metrics on incremental appends with strict redaction", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+    const codexPath = path.join(codexDir, "rollout-incremental-metrics.jsonl");
+
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T11:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-incremental-metrics", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T11:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.3-codex" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T11:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 100,
+                cached_input_tokens: 0,
+                output_tokens: 20,
+                reasoning_output_tokens: 0,
+                total_tokens: 120,
+              },
+              last_token_usage: {
+                input_tokens: 90,
+                cached_input_tokens: 0,
+                output_tokens: 10,
+                reasoning_output_tokens: 0,
+                total_tokens: 100,
+              },
+              model_context_window: 1000,
+            },
+          },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      scan: {
+        mode: "adaptive",
+        intervalSeconds: 1,
+        intervalMinMs: 60,
+        intervalMaxMs: 200,
+        fullRescanIntervalMs: 600_000,
+        batchDebounceMs: 40,
+        recentEventWindow: 400,
+        includeMetaDefault: true,
+        statusRunningTtlMs: 300_000,
+        statusWaitingTtlMs: 900_000,
+      },
+      retention: {
+        strategy: "aggressive_recency",
+        hotTraceCount: 5,
+        warmTraceCount: 0,
+        maxResidentEventsPerHotTrace: 1000,
+        maxResidentEventsPerWarmTrace: 50,
+        detailLoadMode: "lazy_from_disk",
+      },
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.3-codex",
+            inputPer1MUsd: 1,
+            outputPer1MUsd: 1,
+            cachedReadPer1MUsd: 1,
+            cachedCreatePer1MUsd: 1,
+            reasoningOutputPer1MUsd: 1,
+          },
+        ],
+      },
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.start();
+    try {
+      const baselineDeadline = Date.now() + 4000;
+      while (Date.now() < baselineDeadline) {
+        const summary = index.getSummaries()[0];
+        if ((summary?.eventCount ?? 0) >= 3 && (summary?.costEstimateUsd ?? null) !== null) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      await appendFile(
+        codexPath,
+        `${JSON.stringify({
+          timestamp: "2026-02-13T11:00:03.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 150,
+                cached_input_tokens: 0,
+                output_tokens: 50,
+                reasoning_output_tokens: 0,
+                total_tokens: 200,
+              },
+              last_token_usage: {
+                input_tokens: 50,
+                cached_input_tokens: 0,
+                output_tokens: 30,
+                reasoning_output_tokens: 0,
+                total_tokens: 80,
+              },
+              model_context_window: 1000,
+            },
+          },
+        })}\n`,
+        "utf8",
+      );
+
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        const summary = index.getSummaries()[0];
+        if ((summary?.eventCount ?? 0) >= 4 && (summary?.tokenTotals?.totalTokens ?? 0) === 200) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      const summary = index.getSummaries()[0];
+      expect(summary?.eventCount).toBe(4);
+      expect(summary?.tokenTotals?.totalTokens).toBe(200);
+      expect((summary?.modelTokenSharesTop ?? []).some((row) => row.model === "gpt-5.3-codex")).toBe(true);
+      expect(summary?.costEstimateUsd).not.toBeNull();
+      expect((summary?.costEstimateUsd ?? 0) > 0).toBe(true);
+
+      const perf = index.getPerformanceStats();
+      expect(perf.incrementalAppendCount).toBeGreaterThan(0);
     } finally {
       index.stop();
     }

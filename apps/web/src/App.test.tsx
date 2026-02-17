@@ -452,6 +452,51 @@ describe("App sessions list live motion", () => {
     expect(countTraceDetailRequests("trace-a")).toBe(1);
   });
 
+  it("refreshes cached trace detail when summary metrics change without new events", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c fixture");
+
+    const missingMetricsSummary: TraceSummary = {
+      ...selectedTrace,
+      modelTokenSharesTop: [],
+      modelTokenSharesEstimated: false,
+      costEstimateUsd: null,
+    };
+    tracesById["trace-c"] = missingMetricsSummary;
+    tracePagesById["trace-c"] = makeTracePage(missingMetricsSummary);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
+    let cards = Array.from(document.querySelectorAll(".detail-summary-card"));
+    expect(cards[0]?.textContent).toContain("cost N/A");
+    expect(cards[1]?.textContent).toContain("0 shown");
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    const restoredMetricsSummary: TraceSummary = {
+      ...missingMetricsSummary,
+      modelTokenSharesTop: [{ model: "gpt-5.3-codex", tokens: 2020, percent: 100 }],
+      modelTokenSharesEstimated: true,
+      costEstimateUsd: 0.00123,
+    };
+    tracesById["trace-c"] = restoredMetricsSummary;
+    tracePagesById["trace-c"] = makeTracePage(restoredMetricsSummary);
+
+    act(() => {
+      source.emit("trace_updated", { summary: restoredMetricsSummary });
+    });
+
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(2));
+    await waitFor(() => {
+      cards = Array.from(document.querySelectorAll(".detail-summary-card"));
+      expect(cards[0]?.textContent).not.toContain("cost N/A");
+      expect(cards[1]?.textContent).toContain("gpt-5.3-codex");
+    });
+  });
+
   it("renders trace inspector summary cards with token/model/tool data", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
@@ -908,6 +953,28 @@ describe("App sessions list live motion", () => {
 
     const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
     expect(toolCallsCard?.textContent).toContain("bash 1");
+  });
+
+  it("renders model badge from event raw.model metadata", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const modeledEvent: NormalizedEvent = {
+      ...makeEvent("event-model-badge", { model: "claude-4.6-opus-high-thinking" }),
+      rawType: "cursor_assistant",
+      preview: "assistant response",
+      tocLabel: "assistant response",
+      searchText: "assistant response",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [modeledEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+
+    const badgeTexts = Array.from(document.querySelectorAll(".event-card .event-agent-badge")).map((node) =>
+      node.textContent?.trim(),
+    );
+    expect(badgeTexts).toContain("model:claude-4.6-opus-high-thinking");
   });
 
   it("counts tool calls by type including web-search events", async () => {
