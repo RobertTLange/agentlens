@@ -3,6 +3,7 @@ import type { AppConfig, SessionLogDirectoryConfig, SourceProfileConfig } from "
 export const DEFAULT_SESSION_LOG_DIRECTORIES: SessionLogDirectoryConfig[] = [
   { directory: "~/.codex", logType: "codex" },
   { directory: "~/.claude", logType: "claude" },
+  { directory: "~/.local/share/opencode", logType: "opencode" },
 ];
 
 export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
@@ -32,6 +33,15 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
     excludeGlobs: [],
     maxDepth: 2,
     agentHint: "claude",
+  },
+  opencode_storage_session: {
+    name: "opencode_storage_session",
+    enabled: false,
+    roots: ["~/.local/share/opencode/storage/session"],
+    includeGlobs: ["**/*.json"],
+    excludeGlobs: [],
+    maxDepth: 8,
+    agentHint: "opencode",
   },
 };
 

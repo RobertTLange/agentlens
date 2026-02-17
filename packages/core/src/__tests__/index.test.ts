@@ -15,6 +15,7 @@ describe("trace index", () => {
     expect(config.sessionLogDirectories).toEqual([
       { directory: "~/.codex", logType: "codex" },
       { directory: "~/.claude", logType: "claude" },
+      { directory: "~/.local/share/opencode", logType: "opencode" },
     ]);
   });
 
@@ -151,6 +152,480 @@ describe("trace index", () => {
       | undefined;
     expect(toolResultEvent?.toolCallId).toBe("call_1");
     expect(toolResultEvent?.toolType).toBe("bash");
+  });
+
+  it("parses opencode storage sessions with tool events and token metrics", async () => {
+    const root = await createTempRoot();
+    const storageRoot = path.join(root, ".local", "share", "opencode", "storage");
+    const sessionId = "ses_opencode_1";
+    const sessionDir = path.join(storageRoot, "session", "global");
+    const messageDir = path.join(storageRoot, "message", sessionId);
+    const userPartDir = path.join(storageRoot, "part", "msg_user_1");
+    const assistantPartDir = path.join(storageRoot, "part", "msg_assistant_1");
+    await mkdir(sessionDir, { recursive: true });
+    await mkdir(messageDir, { recursive: true });
+    await mkdir(userPartDir, { recursive: true });
+    await mkdir(assistantPartDir, { recursive: true });
+
+    await writeFile(
+      path.join(sessionDir, `${sessionId}.json`),
+      JSON.stringify({
+        id: sessionId,
+        slug: "steady-ridge",
+        version: "1.2.0",
+        projectID: "global",
+        directory: "/tmp/opencode-proj",
+        title: "OpenCode trace test",
+        time: { created: 1_771_200_000_000, updated: 1_771_200_005_000 },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(messageDir, "msg_user_1.json"),
+      JSON.stringify({
+        id: "msg_user_1",
+        sessionID: sessionId,
+        role: "user",
+        time: { created: 1_771_200_000_100 },
+        agent: "build",
+        model: { providerID: "openai", modelID: "gpt-5.3-codex" },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(messageDir, "msg_assistant_1.json"),
+      JSON.stringify({
+        id: "msg_assistant_1",
+        sessionID: sessionId,
+        role: "assistant",
+        time: { created: 1_771_200_000_200, completed: 1_771_200_000_900 },
+        parentID: "msg_user_1",
+        modelID: "gpt-5.3-codex",
+        providerID: "openai",
+        cost: 0.001,
+        tokens: {
+          total: 600,
+          input: 250,
+          output: 220,
+          reasoning: 30,
+          cache: { read: 100, write: 0 },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(userPartDir, "prt_user_text_1.json"),
+      JSON.stringify({
+        id: "prt_user_text_1",
+        sessionID: sessionId,
+        messageID: "msg_user_1",
+        type: "text",
+        text: "run tests",
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(assistantPartDir, "prt_reasoning_1.json"),
+      JSON.stringify({
+        id: "prt_reasoning_1",
+        sessionID: sessionId,
+        messageID: "msg_assistant_1",
+        type: "reasoning",
+        text: "Need to run the suite first",
+        time: { start: 1_771_200_000_250, end: 1_771_200_000_300 },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(assistantPartDir, "prt_tool_1.json"),
+      JSON.stringify({
+        id: "prt_tool_1",
+        sessionID: sessionId,
+        messageID: "msg_assistant_1",
+        type: "tool",
+        callID: "call_opencode_1",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: { command: "npm test --silent" },
+          output: "ok",
+          title: "npm test --silent",
+          metadata: {},
+          time: { start: 1_771_200_000_350, end: 1_771_200_000_700 },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.3-codex",
+            inputPer1MUsd: 1.5,
+            outputPer1MUsd: 6,
+            cachedReadPer1MUsd: 0.375,
+            cachedCreatePer1MUsd: 0.375,
+            reasoningOutputPer1MUsd: 0,
+          },
+        ],
+      },
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: true,
+          roots: [path.join(storageRoot, "session")],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.agent).toBe("opencode");
+    expect(summary?.parser).toBe("opencode");
+    expect(summary?.sessionId).toBe(sessionId);
+    expect(summary?.toolUseCount).toBe(1);
+    expect(summary?.toolResultCount).toBe(1);
+    expect(summary?.tokenTotals?.inputTokens).toBe(250);
+    expect(summary?.tokenTotals?.cachedReadTokens).toBe(100);
+    expect(summary?.tokenTotals?.outputTokens).toBe(220);
+    expect(summary?.costEstimateUsd).not.toBeNull();
+
+    const detail = index.getSessionDetail(summary!.id);
+    expect(detail.events.map((event) => event.eventKind)).toEqual(["meta", "user", "reasoning", "tool_use", "tool_result"]);
+    const toolUseEvent = detail.events.find((event) => event.eventKind === "tool_use");
+    expect(toolUseEvent?.toolType).toBe("bash");
+    expect(toolUseEvent?.toolArgsText).toContain("npm test");
+  });
+
+  it("indexes opencode session_diff entries when session files are absent", async () => {
+    const root = await createTempRoot();
+    const opencodeHome = path.join(root, ".local", "share", "opencode");
+    const sessionId = "ses_opencode_diff_only";
+    const sessionDiffDir = path.join(opencodeHome, "storage", "session_diff");
+    await mkdir(sessionDiffDir, { recursive: true });
+    await writeFile(path.join(sessionDiffDir, `${sessionId}.json`), "[]", "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: opencodeHome, logType: "opencode" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+    const summaries = index.getSummaries();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.agent).toBe("opencode");
+    expect(summaries[0]?.parser).toBe("opencode");
+    expect(summaries[0]?.sessionId).toBe(sessionId);
+    expect(summaries[0]?.path.includes("/storage/session_diff/")).toBe(true);
+    expect(summaries[0]?.parseError).toBe("");
+    expect(summaries[0]?.eventCount).toBe(1);
+  });
+
+  it("prefers opencode session files over duplicate session_diff placeholders", async () => {
+    const root = await createTempRoot();
+    const opencodeHome = path.join(root, ".local", "share", "opencode");
+    const storageRoot = path.join(opencodeHome, "storage");
+    const sessionId = "ses_opencode_session_preferred";
+    const sessionDir = path.join(storageRoot, "session", "global");
+    const sessionDiffDir = path.join(storageRoot, "session_diff");
+    await mkdir(sessionDir, { recursive: true });
+    await mkdir(sessionDiffDir, { recursive: true });
+
+    await writeFile(
+      path.join(sessionDir, `${sessionId}.json`),
+      JSON.stringify({
+        id: sessionId,
+        slug: "steady-ridge",
+        version: "1.2.0",
+        projectID: "global",
+        directory: "/tmp/opencode-proj",
+        title: "OpenCode session file",
+        time: { created: 1_771_200_000_000, updated: 1_771_200_001_000 },
+      }),
+      "utf8",
+    );
+    await writeFile(path.join(sessionDiffDir, `${sessionId}.json`), "[]", "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: opencodeHome, logType: "opencode" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+    const summaries = index.getSummaries();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.sessionId).toBe(sessionId);
+    expect(summaries[0]?.path.includes("/storage/session/")).toBe(true);
+    expect(summaries[0]?.path.includes("/storage/session_diff/")).toBe(false);
+  });
+
+  it("reparses opencode sessions when message/part files change without session mtime updates", async () => {
+    const root = await createTempRoot();
+    const opencodeHome = path.join(root, ".local", "share", "opencode");
+    const storageRoot = path.join(opencodeHome, "storage");
+    const sessionId = "ses_opencode_live";
+    const sessionDir = path.join(storageRoot, "session", "global");
+    const messageDir = path.join(storageRoot, "message", sessionId);
+    const userPartDir = path.join(storageRoot, "part", "msg_user_live");
+    await mkdir(sessionDir, { recursive: true });
+    await mkdir(messageDir, { recursive: true });
+    await mkdir(userPartDir, { recursive: true });
+
+    await writeFile(
+      path.join(sessionDir, `${sessionId}.json`),
+      JSON.stringify({
+        id: sessionId,
+        slug: "live-session",
+        version: "1.2.0",
+        projectID: "global",
+        directory: "/tmp/opencode-live",
+        title: "OpenCode live session test",
+        time: { created: 1_771_200_100_000, updated: 1_771_200_100_500 },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(messageDir, "msg_user_live.json"),
+      JSON.stringify({
+        id: "msg_user_live",
+        sessionID: sessionId,
+        role: "user",
+        time: { created: 1_771_200_100_100 },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(userPartDir, "prt_user_live_1.json"),
+      JSON.stringify({
+        id: "prt_user_live_1",
+        sessionID: sessionId,
+        messageID: "msg_user_live",
+        type: "text",
+        text: "start live run",
+      }),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      scan: {
+        mode: "adaptive",
+        intervalSeconds: 1,
+        intervalMinMs: 60,
+        intervalMaxMs: 200,
+        fullRescanIntervalMs: 600_000,
+        batchDebounceMs: 40,
+        recentEventWindow: 400,
+        includeMetaDefault: true,
+        statusRunningTtlMs: 300_000,
+        statusWaitingTtlMs: 900_000,
+      },
+      sessionLogDirectories: [{ directory: opencodeHome, logType: "opencode" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.start();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const initialSummary = index.getSummaries()[0];
+      expect(initialSummary?.agent).toBe("opencode");
+      expect(initialSummary?.eventCount).toBe(2);
+      const initialLastEventTs = initialSummary?.lastEventTs ?? 0;
+
+      const assistantMessageId = "msg_assistant_live";
+      const assistantPartDir = path.join(storageRoot, "part", assistantMessageId);
+      await mkdir(assistantPartDir, { recursive: true });
+      await writeFile(
+        path.join(messageDir, `${assistantMessageId}.json`),
+        JSON.stringify({
+          id: assistantMessageId,
+          sessionID: sessionId,
+          role: "assistant",
+          parentID: "msg_user_live",
+          time: { created: 1_771_200_100_800, completed: 1_771_200_101_000 },
+        }),
+        "utf8",
+      );
+      await writeFile(
+        path.join(assistantPartDir, "prt_assistant_live_1.json"),
+        JSON.stringify({
+          id: "prt_assistant_live_1",
+          sessionID: sessionId,
+          messageID: assistantMessageId,
+          type: "text",
+          text: "live response received",
+          time: { start: 1_771_200_100_850, end: 1_771_200_100_950 },
+        }),
+        "utf8",
+      );
+
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        const summary = index.getSummaries()[0];
+        if ((summary?.eventCount ?? 0) >= 3 && (summary?.lastEventTs ?? 0) > initialLastEventTs) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      const summary = index.getSummaries()[0];
+      expect(summary?.eventCount).toBe(3);
+      expect(summary?.lastEventTs).toBeGreaterThan(initialLastEventTs);
+      const detail = index.getSessionDetail(summary!.id);
+      expect(detail.events.map((event) => event.eventKind)).toEqual(["meta", "user", "assistant"]);
+    } finally {
+      index.stop();
+    }
   });
 
   it("normalizes web_search_call actions into toolType tags", async () => {
