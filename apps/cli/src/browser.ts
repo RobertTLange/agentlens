@@ -10,7 +10,8 @@ const require = createRequire(import.meta.url);
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
-const DEFAULT_STARTUP_TIMEOUT_MS = 15000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 45000;
+const STARTUP_TIMEOUT_GRACE_MS = 5000;
 
 export interface LaunchBrowserOptions {
   host?: string;
@@ -251,13 +252,16 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   });
 
   const ready = await waitForServer(healthUrl, startupTimeoutMs);
-  if (!ready) {
+  const readyWithGrace = ready ? true : await waitForServer(healthUrl, STARTUP_TIMEOUT_GRACE_MS);
+  if (!readyWithGrace) {
     try {
       process.kill(pid, "SIGTERM");
     } catch {
       // no-op
     }
-    throw new Error(`timeout waiting for AgentLens server at ${url}. log: ${logPath}`);
+    throw new Error(
+      `timeout waiting for AgentLens server at ${url}. log: ${logPath}. hint: increase AGENTLENS_STARTUP_TIMEOUT_MS for large trace indexes`,
+    );
   }
 
   if (!skipOpen) {
