@@ -202,6 +202,16 @@ function traceIdFromOpenUrl(url: string): string {
   return decodeURIComponent(match?.[1] ?? "");
 }
 
+function countTraceDetailRequests(traceId: string): number {
+  const detailUrlFragment = `/api/trace/${traceId}`;
+  return requestedUrls.filter((url) => {
+    if (!url.includes(detailUrlFragment)) return false;
+    if (url.includes("/stop")) return false;
+    if (url.includes("/open")) return false;
+    return true;
+  }).length;
+}
+
 function getTraceRow(id: string): HTMLDivElement {
   const row = document.querySelector(`[data-trace-id="${id}"]`);
   if (!row) throw new Error(`missing row for ${id}`);
@@ -417,6 +427,29 @@ describe("App sessions list live motion", () => {
     expect(includeMetaInput.checked).toBe(false);
     const traceRequestUrl = requestedUrls.find((url) => url.includes("/api/trace/"));
     expect(traceRequestUrl).toContain("include_meta=0");
+  });
+
+  it("reuses cached trace detail when switching back to a previous session", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
+
+    act(() => {
+      getTraceRow("trace-a").click();
+    });
+    await waitFor(() => expect(countTraceDetailRequests("trace-a")).toBe(1));
+
+    act(() => {
+      getTraceRow("trace-c").click();
+    });
+    await waitFor(() => expect(getTraceRow("trace-c").className).toContain("active"));
+    expect(countTraceDetailRequests("trace-c")).toBe(1);
+
+    act(() => {
+      getTraceRow("trace-a").click();
+    });
+    await waitFor(() => expect(getTraceRow("trace-a").className).toContain("active"));
+    expect(countTraceDetailRequests("trace-a")).toBe(1);
   });
 
   it("renders trace inspector summary cards with token/model/tool data", async () => {
