@@ -13,44 +13,63 @@ import {
   selectClaudeProjectProcessPids,
 } from "./app.js";
 
-async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; sessionId: string }> {
+function buildTraceLog(sessionId: string, sequence: number, withToolEvents: boolean): string {
+  const firstTs = new Date(Date.UTC(2026, 1, 11, 10, 0, sequence)).toISOString();
+  const secondTs = new Date(Date.UTC(2026, 1, 11, 10, 0, sequence + 1)).toISOString();
+  const thirdTs = new Date(Date.UTC(2026, 1, 11, 10, 0, sequence + 2)).toISOString();
+
+  const rows: string[] = [
+    JSON.stringify({
+      timestamp: firstTs,
+      type: "session_meta",
+      payload: { id: sessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
+    }),
+  ];
+
+  if (withToolEvents) {
+    rows.push(
+      JSON.stringify({
+        timestamp: secondTs,
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          id: `fc_${sequence}`,
+          name: "run_command",
+          call_id: `call_${sequence}`,
+          arguments: "{\"command\":\"echo hi\"}",
+        },
+      }),
+    );
+    rows.push(
+      JSON.stringify({
+        timestamp: thirdTs,
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: `call_${sequence}`,
+          output: "hi",
+        },
+      }),
+    );
+  }
+
+  return rows.join("\n");
+}
+
+async function buildFixtureWithTraceCount(
+  traceCount: number,
+): Promise<{ configPath: string; index: TraceIndex; sessionIds: string[] }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-server-"));
   const codexRoot = path.join(root, ".codex", "sessions", "2026", "02", "11");
   await mkdir(codexRoot, { recursive: true });
 
-  const sessionId = "server-session-1";
-  const tracePath = path.join(codexRoot, "rollout.jsonl");
-  await writeFile(
-    tracePath,
-    [
-      JSON.stringify({
-        timestamp: "2026-02-11T10:00:00.000Z",
-        type: "session_meta",
-        payload: { id: sessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
-      }),
-      JSON.stringify({
-        timestamp: "2026-02-11T10:00:01.000Z",
-        type: "response_item",
-        payload: {
-          type: "function_call",
-          id: "fc_1",
-          name: "run_command",
-          call_id: "call_1",
-          arguments: "{\"command\":\"echo hi\"}",
-        },
-      }),
-      JSON.stringify({
-        timestamp: "2026-02-11T10:00:02.000Z",
-        type: "response_item",
-        payload: {
-          type: "function_call_output",
-          call_id: "call_1",
-          output: "hi",
-        },
-      }),
-    ].join("\n"),
-    "utf8",
-  );
+  const sessionIds: string[] = [];
+  for (let traceIndex = 1; traceIndex <= traceCount; traceIndex += 1) {
+    const sessionId = `server-session-${traceIndex}`;
+    const tracePath = path.join(codexRoot, `rollout-${String(traceIndex).padStart(3, "0")}.jsonl`);
+    sessionIds.push(sessionId);
+    await writeFile(tracePath, buildTraceLog(sessionId, traceIndex, traceIndex === 1), "utf8");
+  }
 
   const config = mergeConfig({
     scan: {
@@ -118,7 +137,20 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
   const index = new TraceIndex(config);
   await index.refresh();
 
-  return { configPath, index, sessionId };
+  return { configPath, index, sessionIds };
+}
+
+async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; sessionId: string }> {
+  const fixture = await buildFixtureWithTraceCount(1);
+  const sessionId = fixture.sessionIds[0];
+  if (!sessionId) {
+    throw new Error("failed to build fixture session");
+  }
+  return {
+    configPath: fixture.configPath,
+    index: fixture.index,
+    sessionId,
+  };
 }
 
 describe("server api", () => {
@@ -320,6 +352,33 @@ describe("server api", () => {
     expect(selected).toEqual([6201]);
   });
 
+  it("ignores opencode serve daemons when selecting fallback agent process", async () => {
+    const sessionId = "ses_opencode_123";
+    const selected = selectAgentProjectProcessPids(
+      "/Users/rob/Dropbox/2026_sakana/agentlens",
+      sessionId,
+      "opencode",
+      [
+        {
+          pid: 6301,
+          user: "rob",
+          args: "/usr/local/bin/opencode serve --port 49957",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 6302,
+          user: "rob",
+          args: "/usr/local/bin/opencode --resume ses_opencode_123",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([6302]);
+  });
+
   it("prefers monorepo web dist when both monorepo and packaged builds exist", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-web-dist-"));
     const packagedWebDistPath = path.join(root, "packaged-web-dist");
@@ -328,6 +387,37 @@ describe("server api", () => {
     await mkdir(monorepoWebDistPath, { recursive: true });
 
     expect(resolveDefaultWebDistPath(packagedWebDistPath, monorepoWebDistPath)).toBe(monorepoWebDistPath);
+  });
+
+  it("limits trace listing to 50 by default and respects explicit limits", async () => {
+    const fixture = await buildFixtureWithTraceCount(75);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const defaultRes = await server.inject({ method: "GET", url: "/api/traces" });
+    expect(defaultRes.statusCode).toBe(200);
+    const defaultPayload = defaultRes.json() as { traces: Array<{ id: string; sessionId: string }> };
+    expect(defaultPayload.traces).toHaveLength(50);
+
+    const explicitRes = await server.inject({ method: "GET", url: "/api/traces?limit=12" });
+    expect(explicitRes.statusCode).toBe(200);
+    const explicitPayload = explicitRes.json() as { traces: Array<{ id: string; sessionId: string }> };
+    expect(explicitPayload.traces).toHaveLength(12);
+
+    const invalidRes = await server.inject({ method: "GET", url: "/api/traces?limit=0" });
+    expect(invalidRes.statusCode).toBe(200);
+    const invalidPayload = invalidRes.json() as { traces: Array<{ id: string; sessionId: string }> };
+    expect(invalidPayload.traces).toHaveLength(50);
+
+    const largeRes = await server.inject({ method: "GET", url: "/api/traces?limit=200" });
+    expect(largeRes.statusCode).toBe(200);
+    const largePayload = largeRes.json() as { traces: Array<{ id: string; sessionId: string }> };
+    expect(largePayload.traces).toHaveLength(75);
+
+    await server.close();
   });
 
   it("serves overview, trace listing, trace details, stop/open controls, and config updates", async () => {

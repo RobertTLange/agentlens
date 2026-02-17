@@ -13,6 +13,8 @@ const execFileAsync = promisify(execFile);
 const STOP_SIGNAL_WAIT_MS = 1_200;
 const STOP_FORCE_WAIT_MS = 700;
 const STOP_WAIT_POLL_MS = 120;
+const DEFAULT_RECENT_TRACE_LIMIT = 50;
+const MAX_RECENT_TRACE_LIMIT = 5000;
 
 type StopSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
 
@@ -135,6 +137,23 @@ function delay(ms: number): Promise<void> {
 
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function parsePositiveInt(rawValue: string | undefined, fallback: number): number {
+  if (!rawValue) return fallback;
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.min(MAX_RECENT_TRACE_LIMIT, parsed));
+}
+
+function listRecentTraceSummaries(
+  traceIndex: TraceIndex,
+  options: { agent?: string; limit?: string },
+): TraceSummary[] {
+  const agent = options.agent?.trim().toLowerCase();
+  const limit = parsePositiveInt(options.limit, DEFAULT_RECENT_TRACE_LIMIT);
+  const filtered = traceIndex.getSummaries().filter((summary) => (agent ? summary.agent === agent : true));
+  return filtered.slice(0, limit);
 }
 
 function asSessionCwd(value: unknown): string {
@@ -559,11 +578,24 @@ function normalizeCommand(command: string): string {
   return command.trim().toLowerCase();
 }
 
+function isOpenCodeServeCommand(command: string): boolean {
+  const normalized = normalizeCommand(command);
+  if (!normalized) return false;
+  if (!/\bopencode\b/.test(normalized)) return false;
+  return /\bserve\b/.test(normalized);
+}
+
+function isExcludedAgentCommand(command: string, agent: TraceSummary["agent"]): boolean {
+  if (agent !== "opencode") return false;
+  return isOpenCodeServeCommand(command);
+}
+
 function commandMatchesAgent(command: string, agent: TraceSummary["agent"]): boolean {
   const normalized = normalizeCommand(command);
   if (!normalized) return false;
   if (agent === "codex") return /\bcodex\b/.test(normalized);
   if (agent === "claude") return /\bclaude\b/.test(normalized);
+  if (agent === "opencode") return /\bopencode\b/.test(normalized);
   return false;
 }
 
@@ -648,7 +680,9 @@ export function selectAgentProjectProcessPids(
   const sameUserAgentCandidates = processes.filter((processInfo) => {
     if (processInfo.pid === requesterPid) return false;
     if (!matchesCurrentUser(processInfo.user, identity)) return false;
-    return commandMatchesAgent(processInfo.args, agent);
+    if (!commandMatchesAgent(processInfo.args, agent)) return false;
+    if (isExcludedAgentCommand(processInfo.args, agent)) return false;
+    return true;
   });
   if (sameUserAgentCandidates.length === 0) return [];
 
@@ -709,7 +743,9 @@ async function findAgentProjectProcessPids(
   const agentProcesses = runningProcesses.filter((processInfo) => {
     if (processInfo.pid === requesterPid) return false;
     if (!matchesCurrentUser(processInfo.user, identity)) return false;
-    return commandMatchesAgent(processInfo.args, agent);
+    if (!commandMatchesAgent(processInfo.args, agent)) return false;
+    if (isExcludedAgentCommand(processInfo.args, agent)) return false;
+    return true;
   });
   if (agentProcesses.length === 0) return [];
 
@@ -721,6 +757,21 @@ async function findAgentProjectProcessPids(
   );
 
   return selectAgentProjectProcessPids(sessionCwd, sessionId, agent, withCwd, identity, requesterPid);
+}
+
+async function excludeOpenCodeServePids(pids: number[]): Promise<number[]> {
+  if (pids.length === 0) return [];
+  try {
+    const runningProcesses = await listRunningProcesses();
+    const argsByPid = new Map<number, string>();
+    for (const processInfo of runningProcesses) {
+      argsByPid.set(processInfo.pid, processInfo.args);
+    }
+    return pids.filter((pid) => !isOpenCodeServeCommand(argsByPid.get(pid) ?? ""));
+  } catch {
+    // If process listing fails, keep original candidates to avoid false negatives.
+    return pids;
+  }
 }
 
 async function resolveSessionProcessPids(
@@ -739,6 +790,9 @@ async function resolveSessionProcessPids(
   );
   const chosenCandidates = agentScopedCandidates.length > 0 ? agentScopedCandidates : sameUserCandidates;
   let matchedPids = uniquePids(chosenCandidates.map((candidate) => candidate.pid));
+  if (summary.agent === "opencode" && matchedPids.length > 0) {
+    matchedPids = await excludeOpenCodeServePids(matchedPids);
+  }
   if (matchedPids.length === 0 && summary.agent === "claude") {
     matchedPids = await findClaudeProjectProcessPids(summary, identity, requesterPid);
   }
@@ -750,6 +804,9 @@ async function resolveSessionProcessPids(
       identity,
       requesterPid,
     );
+    if (summary.agent === "opencode" && matchedPids.length > 0) {
+      matchedPids = await excludeOpenCodeServePids(matchedPids);
+    }
   }
   const alivePids = matchedPids.filter((pid) => isProcessAlive(pid));
   return {
@@ -1052,11 +1109,8 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   server.get("/api/perf", async () => ({ perf: traceIndex.getPerformanceStats() }));
 
   server.get("/api/traces", async (request) => {
-    const query = request.query as { agent?: string };
-    const agent = query.agent?.trim().toLowerCase();
-    const traces = traceIndex
-      .getSummaries()
-      .filter((summary) => (agent ? summary.agent === agent : true));
+    const query = request.query as { agent?: string; limit?: string };
+    const traces = listRecentTraceSummaries(traceIndex, query);
     return { traces };
   });
 
@@ -1200,6 +1254,9 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   });
 
   server.get("/api/stream", async (request, reply) => {
+    const query = request.query as { agent?: string; limit?: string };
+    const traces = listRecentTraceSummaries(traceIndex, query);
+
     reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
     reply.raw.setHeader("Connection", "keep-alive");
@@ -1211,7 +1268,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         type: "snapshot",
         version: 0,
         payload: {
-          traces: traceIndex.getSummaries(),
+          traces,
           overview: traceIndex.getOverview(),
         },
       })}\n\n`,
