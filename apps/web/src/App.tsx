@@ -908,11 +908,11 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (!autoFollow) return;
-    if (timelineEvents.length === 0) return;
-    const last = timelineEvents[timelineEvents.length - 1];
+    if (timelineStripEvents.length === 0) return;
+    const last = timelineStripEvents[timelineStripEvents.length - 1];
     if (!last) return;
     setSelectedEventId(last.eventId);
-  }, [autoFollow, timelineEvents]);
+  }, [autoFollow, timelineStripEvents]);
 
   useEffect(() => {
     const scroller = timelineStripRef.current;

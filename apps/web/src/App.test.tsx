@@ -1536,6 +1536,41 @@ describe("App sessions list live motion", () => {
     expect(panel.className).not.toContain("timeline-strip-has-right-glow");
   });
 
+  it("updates strip active segment to newest appended event while auto-follow is enabled", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-strip-active-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(1));
+    await waitFor(() => expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#4"));
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-strip-active-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, appendedEvent]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: 1 });
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#5"));
+  });
+
   it("keeps strip position and shows right glow cue when new events append off-screen", async () => {
     const selectedTrace = tracesById["trace-c"];
     if (!selectedTrace) throw new Error("missing trace-c test fixture");
