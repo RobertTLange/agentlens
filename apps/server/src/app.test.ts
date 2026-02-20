@@ -5,17 +5,25 @@ import { describe, expect, it, vi } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 import {
   createServer,
+  extractCursorSessionIdsFromOpenPaths,
+  extractOpenCodeSessionIdsFromLogContent,
+  geminiLogsContainSessionId,
   geminiProjectHashFromTracePath,
   geminiProjectHashesFromCwd,
+  geminiProjectKeyFromTracePath,
+  geminiProjectSlugsFromCwd,
   matchesCurrentUser,
   parseTmuxClients,
   resolveDefaultWebDistPath,
+  extractClaudeDebugProcessPid,
   selectAgentProcessPidsBySessionId,
   selectPreferredTmuxClient,
+  selectOpenFileProcessPids,
   selectAgentProjectProcessPids,
   selectClaudeProjectProcessPids,
   selectCursorProjectProcessPids,
   selectGeminiProjectProcessPids,
+  selectPidGroupByNearestTimestamp,
 } from "./app.js";
 
 function buildTraceLog(sessionId: string, sequence: number, withToolEvents: boolean): string {
@@ -165,6 +173,83 @@ describe("server api", () => {
     expect(matchesCurrentUser("other", { username: "rob", uid: "501" })).toBe(false);
   });
 
+  it("selects tty pid group nearest to a target timestamp", async () => {
+    const selected = selectPidGroupByNearestTimestamp(
+      [
+        { pid: 22125, tty: "/dev/ttys062", startedAtMs: Date.UTC(2026, 1, 20, 14, 33, 13) },
+        { pid: 22268, tty: "/dev/ttys062", startedAtMs: Date.UTC(2026, 1, 20, 14, 33, 24) },
+        { pid: 12511, tty: "/dev/ttys043", startedAtMs: Date.UTC(2026, 1, 20, 15, 29, 19) },
+        { pid: 12653, tty: "/dev/ttys043", startedAtMs: Date.UTC(2026, 1, 20, 15, 29, 23) },
+      ],
+      Date.UTC(2026, 1, 20, 14, 30, 7),
+    );
+    expect(selected).toEqual([22125, 22268]);
+  });
+
+  it("returns empty nearest-timestamp selection on tie distances", async () => {
+    const selected = selectPidGroupByNearestTimestamp(
+      [
+        { pid: 1, tty: "/dev/ttys001", startedAtMs: Date.UTC(2026, 1, 20, 14, 30, 0) },
+        { pid: 2, tty: "/dev/ttys002", startedAtMs: Date.UTC(2026, 1, 20, 14, 34, 0) },
+      ],
+      Date.UTC(2026, 1, 20, 14, 32, 0),
+    );
+    expect(selected).toEqual([]);
+  });
+
+  it("extracts cursor session ids from open cursor chat sqlite paths", async () => {
+    const sessionIds = extractCursorSessionIdsFromOpenPaths([
+      "/Users/rob/.cursor/chats/6495969ecf39864527998827d28315cf/61ebb431-fb1e-4f54-95ae-37fd618dcd7b/store.db",
+      "/Users/rob/.cursor/chats/6495969ecf39864527998827d28315cf/61ebb431-fb1e-4f54-95ae-37fd618dcd7b/store.db-wal",
+      "/Users/rob/.cursor/chats/6495969ecf39864527998827d28315cf/00000000-0000-0000-0000-000000000000/store.db-shm",
+      "/Users/rob/.cursor/ai-tracking/ai-code-tracking.db",
+    ]);
+
+    expect(sessionIds).toEqual([
+      "61ebb431-fb1e-4f54-95ae-37fd618dcd7b",
+      "00000000-0000-0000-0000-000000000000",
+    ]);
+  });
+
+  it("extracts opencode session ids from runtime logs", async () => {
+    const sessionIds = extractOpenCodeSessionIdsFromLogContent(
+      [
+        "INFO service=llm sessionID=ses_384b9485fffe16L9n0yOcy6UP2 stream",
+        "INFO service=session.prompt sessionID=ses_384b9485fffe16L9n0yOcy6UP2 loop",
+        "INFO service=session.prompt sessionID=ses_38dea287bffeJsge8iSz4N9Lal loop",
+      ].join("\n"),
+    );
+
+    expect(sessionIds).toEqual([
+      "ses_384b9485fffe16L9n0yOcy6UP2",
+      "ses_38dea287bffeJsge8iSz4N9Lal",
+    ]);
+  });
+
+  it("checks gemini logs for session ids across json and fallback text modes", async () => {
+    expect(
+      geminiLogsContainSessionId(
+        JSON.stringify([
+          { sessionId: "54bc8ff5-57e7-4741-8bbc-18125dc656d0", messageId: 0, type: "user" },
+          { sessionId: "another-session", messageId: 1, type: "user" },
+        ]),
+        "54bc8ff5-57e7-4741-8bbc-18125dc656d0",
+      ),
+    ).toBe(true);
+    expect(
+      geminiLogsContainSessionId(
+        "line with sessionId 54bc8ff5-57e7-4741-8bbc-18125dc656d0 in malformed payload",
+        "54bc8ff5-57e7-4741-8bbc-18125dc656d0",
+      ),
+    ).toBe(true);
+    expect(
+      geminiLogsContainSessionId(
+        JSON.stringify([{ sessionId: "different-session", messageId: 0, type: "user" }]),
+        "54bc8ff5-57e7-4741-8bbc-18125dc656d0",
+      ),
+    ).toBe(false);
+  });
+
   it("parses tmux clients and prioritizes focused clients", async () => {
     const clients = parseTmuxClients(
       [
@@ -249,6 +334,100 @@ describe("server api", () => {
     });
   });
 
+  it("extracts the most recent claude process pid from debug log lines", async () => {
+    const pid = extractClaudeDebugProcessPid(
+      [
+        "2026-02-20T13:18:11.060Z [DEBUG] Writing to temp file: /Users/rob/.claude.json.tmp.2440.1771593491060",
+        "2026-02-20T13:18:25.075Z [DEBUG] Writing to temp file: /Users/rob/.claude.json.tmp.2493.1771593505075",
+      ].join("\n"),
+    );
+    expect(pid).toBe(2493);
+  });
+
+  it("falls back to acquired pid lock when no temp-write pid lines exist", async () => {
+    const pid = extractClaudeDebugProcessPid(
+      [
+        "2026-02-20T13:18:11.060Z [DEBUG] Acquired PID lock for 2.1.49 (PID 2440)",
+        "2026-02-20T13:18:25.075Z [DEBUG] Acquired PID lock for 2.1.49 (PID 2493)",
+      ].join("\n"),
+    );
+    expect(pid).toBe(2493);
+  });
+
+  it("matches open-file candidates by full process args when lsof command is generic", async () => {
+    const selected = selectOpenFileProcessPids({
+      summary: {
+        agent: "claude",
+        sessionId: "2356bd53-2142-4bad-a14f-a04e50069f51",
+      },
+      openFileProcesses: [
+        {
+          pid: 9101,
+          command: "node",
+          user: "rob",
+        },
+      ],
+      argsByPid: new Map<number, string>([
+        [9101, "node /usr/local/bin/claude --dangerously-skip-permissions"],
+      ]),
+      identity: { username: "rob", uid: "501" },
+      requesterPid: 1000,
+    });
+
+    expect(selected).toEqual([9101]);
+  });
+
+  it("prefers open-file candidate whose args include selected session id", async () => {
+    const sessionId = "2356bd53-2142-4bad-a14f-a04e50069f51";
+    const selected = selectOpenFileProcessPids({
+      summary: {
+        agent: "claude",
+        sessionId,
+      },
+      openFileProcesses: [
+        {
+          pid: 9102,
+          command: "node",
+          user: "rob",
+        },
+        {
+          pid: 9103,
+          command: "node",
+          user: "rob",
+        },
+      ],
+      argsByPid: new Map<number, string>([
+        [9102, "node /usr/local/bin/claude --dangerously-skip-permissions"],
+        [9103, `node /usr/local/bin/claude --resume ${sessionId}`],
+      ]),
+      identity: { username: "rob", uid: "501" },
+      requesterPid: 1000,
+    });
+
+    expect(selected).toEqual([9103]);
+  });
+
+  it("falls back to a single same-user open-file process when args are unavailable", async () => {
+    const selected = selectOpenFileProcessPids({
+      summary: {
+        agent: "claude",
+        sessionId: "2356bd53-2142-4bad-a14f-a04e50069f51",
+      },
+      openFileProcesses: [
+        {
+          pid: 9104,
+          command: "node",
+          user: "rob",
+        },
+      ],
+      argsByPid: new Map<number, string>(),
+      identity: { username: "rob", uid: "501" },
+      requesterPid: 1000,
+    });
+
+    expect(selected).toEqual([9104]);
+  });
+
   it("selects claude fallback process by matching project cwd", async () => {
     const selected = selectClaudeProjectProcessPids(
       {
@@ -304,6 +483,34 @@ describe("server api", () => {
     expect(selected).toEqual([7001]);
   });
 
+  it("returns no claude fallback process when project match is ambiguous and args lack session id", async () => {
+    const sessionId = "2356bd53-2142-4bad-a14f-a04e50069f51";
+    const selected = selectClaudeProjectProcessPids(
+      {
+        path: `/Users/rob/.claude/projects/-Users-rob-Dropbox-2026-sakana-agentlens/${sessionId}.jsonl`,
+        sessionId,
+      },
+      [
+        {
+          pid: 7011,
+          user: "rob",
+          args: "claude --dangerously-skip-permissions",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 7012,
+          user: "rob",
+          args: "claude --dangerously-skip-permissions",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([]);
+  });
+
   it("selects codex fallback process by matching project cwd", async () => {
     const selected = selectAgentProjectProcessPids(
       "/Users/rob/Dropbox/2026_sakana/agentlens",
@@ -355,6 +562,33 @@ describe("server api", () => {
     );
 
     expect(selected).toEqual([6201]);
+  });
+
+  it("returns no agent fallback process when project match is ambiguous and args lack session id", async () => {
+    const sessionId = "codex-session-123";
+    const selected = selectAgentProjectProcessPids(
+      "/Users/rob/Dropbox/2026_sakana/agentlens",
+      sessionId,
+      "codex",
+      [
+        {
+          pid: 6221,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/codex --dangerously-bypass-approvals-and-sandbox",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+        {
+          pid: 6222,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/codex --dangerously-bypass-approvals-and-sandbox",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([]);
   });
 
   it("selects gemini fallback process by matching project cwd", async () => {
@@ -490,6 +724,34 @@ describe("server api", () => {
     expect(selected).toEqual([53122]);
   });
 
+  it("returns no cursor fallback process when project match is ambiguous and args lack session id", async () => {
+    const sessionId = "81907d70-7e5c-45d8-bbbb-22f66e9878f0";
+    const selected = selectCursorProjectProcessPids(
+      {
+        path: `/Users/rob/.cursor/projects/Users-rob-Dropbox-Mac-2-Desktop/agent-transcripts/${sessionId}.txt`,
+        sessionId,
+      },
+      [
+        {
+          pid: 53131,
+          user: "rob",
+          args: "/Users/rob/.local/bin/agent --use-system-ca /Users/rob/.local/share/cursor-agent/versions/2026.01.28-fd13201/index.js",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+        {
+          pid: 53132,
+          user: "rob",
+          args: "/Users/rob/.local/bin/agent --use-system-ca /Users/rob/.local/share/cursor-agent/versions/2026.01.28-fd13201/index.js",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([]);
+  });
+
   it("derives gemini project hash from trace path and cwd", async () => {
     const projectCwd = "/Users/rob/Dropbox/Mac (2)/Desktop";
     const projectHash = "31961e5d2f9bdd62bbd56b581966e1a817d9d362afc8a1be751cf476cfdb454d";
@@ -499,6 +761,44 @@ describe("server api", () => {
       ),
     ).toBe(projectHash);
     expect(geminiProjectHashesFromCwd(projectCwd)).toContain(projectHash);
+  });
+
+  it("derives gemini project key and cwd slug for non-hash tmp directories", async () => {
+    const projectCwd = "/Users/rob/Dropbox/2026_sakana/robs_homepage";
+    expect(
+      geminiProjectKeyFromTracePath(
+        "/Users/rob/.gemini/tmp/robs-homepage/chats/session-2026-02-20T14-29-cb0f65b5.json",
+      ),
+    ).toBe("robs-homepage");
+    expect(geminiProjectSlugsFromCwd(projectCwd)).toContain("robs-homepage");
+  });
+
+  it("selects gemini fallback process by matching gemini project slug cwd", async () => {
+    const sessionId = "cb0f65b5-35fe-4588-9b44-47b7316204fa";
+    const selected = selectGeminiProjectProcessPids(
+      {
+        path: "/Users/rob/.gemini/tmp/robs-homepage/chats/session-2026-02-20T14-29-cb0f65b5.json",
+        sessionId,
+      },
+      [
+        {
+          pid: 22125,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/2026_sakana/robs_homepage",
+        },
+        {
+          pid: 22126,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([22125]);
   });
 
   it("selects gemini fallback process by matching gemini project hash", async () => {
@@ -557,6 +857,34 @@ describe("server api", () => {
     expect(selected).toEqual([64111]);
   });
 
+  it("returns no gemini fallback process when hash match is ambiguous and args lack session id", async () => {
+    const sessionId = "50641617-dd96-45e6-9649-0b711b8073ae";
+    const selected = selectGeminiProjectProcessPids(
+      {
+        path: `/Users/rob/.gemini/tmp/31961e5d2f9bdd62bbd56b581966e1a817d9d362afc8a1be751cf476cfdb454d/chats/session-2026-02-17T01-07-50641617.json`,
+        sessionId,
+      },
+      [
+        {
+          pid: 64121,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+        {
+          pid: 64122,
+          user: "rob",
+          args: "node /Users/rob/.local/bin/gemini",
+          cwd: "/Users/rob/Dropbox/Mac (2)/Desktop",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([]);
+  });
+
   it("prefers monorepo web dist when both monorepo and packaged builds exist", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-web-dist-"));
     const packagedWebDistPath = path.join(root, "packaged-web-dist");
@@ -602,6 +930,7 @@ describe("server api", () => {
     const fixture = await buildFixture();
     const stopTraceSession = vi.fn();
     const openTraceSession = vi.fn();
+    const sendTraceInput = vi.fn();
     stopTraceSession.mockResolvedValue({
       status: "terminated" as const,
       reason: "session process terminated with SIGINT",
@@ -622,12 +951,26 @@ describe("server api", () => {
       matchedPids: [4242],
       alivePids: [4242],
     });
+    sendTraceInput.mockResolvedValue({
+      status: "sent_tmux" as const,
+      reason: "sent input to tmux pane",
+      pid: 4242,
+      tty: "/dev/ttys018",
+      target: {
+        tmuxSession: "main",
+        windowIndex: 2,
+        paneIndex: 1,
+      },
+      matchedPids: [4242],
+      alivePids: [4242],
+    });
     const server = await createServer({
       traceIndex: fixture.index,
       configPath: fixture.configPath,
       enableStatic: false,
       stopTraceSession,
       openTraceSession,
+      sendTraceInput,
     });
 
     const health = await server.inject({ method: "GET", url: "/api/healthz" });
@@ -711,6 +1054,82 @@ describe("server api", () => {
       expect.objectContaining({ requesterPid: expect.any(Number), sessionCwd: "/tmp/proj" }),
     );
 
+    const inputRes = await server.inject({
+      method: "POST",
+      url: `/api/trace/${traceId}/input`,
+      payload: { text: "Continue", submit: true },
+    });
+    expect(inputRes.statusCode).toBe(200);
+    expect(inputRes.json()).toMatchObject({
+      ok: true,
+      status: "sent_tmux",
+      pid: 4242,
+      tty: "/dev/ttys018",
+      target: {
+        tmuxSession: "main",
+        windowIndex: 2,
+        paneIndex: 1,
+      },
+      pids: [4242],
+      alivePids: [4242],
+    });
+    expect(sendTraceInput).toHaveBeenCalledTimes(1);
+    expect(sendTraceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: fixture.sessionId }),
+      expect.objectContaining({
+        requesterPid: expect.any(Number),
+        sessionCwd: "/tmp/proj",
+        text: "Continue",
+        submit: true,
+      }),
+    );
+
+    const inputTooLong = await server.inject({
+      method: "POST",
+      url: `/api/trace/${traceId}/input`,
+      payload: { text: "x".repeat(2001) },
+    });
+    expect(inputTooLong.statusCode).toBe(400);
+    expect(inputTooLong.json()).toMatchObject({
+      ok: false,
+      error: "input text too long (max 2000 chars)",
+    });
+    expect(sendTraceInput).toHaveBeenCalledTimes(1);
+
+    const inputEmpty = await server.inject({
+      method: "POST",
+      url: `/api/trace/${traceId}/input`,
+      payload: { text: "   " },
+    });
+    expect(inputEmpty.statusCode).toBe(400);
+    expect(inputEmpty.json()).toMatchObject({
+      ok: false,
+      error: "input text is required",
+    });
+    expect(sendTraceInput).toHaveBeenCalledTimes(1);
+
+    sendTraceInput.mockResolvedValueOnce({
+      status: "not_resolvable",
+      reason: "no active session process found",
+      pid: null,
+      tty: "",
+      target: null,
+      matchedPids: [],
+      alivePids: [],
+    });
+    const inputNotResolvable = await server.inject({
+      method: "POST",
+      url: `/api/trace/${traceId}/input`,
+      payload: { text: "Continue" },
+    });
+    expect(inputNotResolvable.statusCode).toBe(409);
+    expect(inputNotResolvable.json()).toMatchObject({
+      ok: false,
+      status: "not_resolvable",
+      error: "no active session process found",
+    });
+    expect(sendTraceInput).toHaveBeenCalledTimes(2);
+
     openTraceSession.mockResolvedValueOnce({
       status: "not_resolvable",
       reason: "no active session process found",
@@ -746,6 +1165,17 @@ describe("server api", () => {
     const openUnknown = await server.inject({ method: "POST", url: "/api/trace/unknown/open" });
     expect(openUnknown.statusCode).toBe(404);
     expect(openUnknown.json()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("unknown trace/session"),
+    });
+
+    const inputUnknown = await server.inject({
+      method: "POST",
+      url: "/api/trace/unknown/input",
+      payload: { text: "Continue" },
+    });
+    expect(inputUnknown.statusCode).toBe(404);
+    expect(inputUnknown.json()).toMatchObject({
       ok: false,
       error: expect.stringContaining("unknown trace/session"),
     });

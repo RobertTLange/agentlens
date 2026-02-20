@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,7 @@ const STOP_FORCE_WAIT_MS = 700;
 const STOP_WAIT_POLL_MS = 120;
 const DEFAULT_RECENT_TRACE_LIMIT = 50;
 const MAX_RECENT_TRACE_LIMIT = 5000;
+const MAX_TRACE_INPUT_TEXT_LENGTH = 2000;
 
 type StopSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
 
@@ -64,6 +65,28 @@ type OpenTraceSessionHandler = (
   options: OpenTraceSessionOptions,
 ) => Promise<OpenTraceSessionResult>;
 
+interface SendTraceInputOptions {
+  requesterPid?: number;
+  sessionCwd?: string;
+  text: string;
+  submit?: boolean;
+}
+
+interface SendTraceInputResult {
+  status: "sent_tmux" | "not_resolvable" | "failed";
+  reason: string;
+  pid: number | null;
+  tty: string;
+  target: TmuxPaneTarget | null;
+  matchedPids: number[];
+  alivePids: number[];
+}
+
+type SendTraceInputHandler = (
+  summary: TraceSummary,
+  options: SendTraceInputOptions,
+) => Promise<SendTraceInputResult>;
+
 interface OpenFileProcess {
   pid: number;
   command: string;
@@ -111,6 +134,7 @@ export interface CreateServerOptions {
   enableStatic?: boolean;
   stopTraceSession?: StopTraceSessionHandler;
   openTraceSession?: OpenTraceSessionHandler;
+  sendTraceInput?: SendTraceInputHandler;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -138,6 +162,10 @@ function delay(ms: number): Promise<void> {
 
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeTraceInputText(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
 function parsePositiveInt(rawValue: string | undefined, fallback: number): number {
@@ -229,6 +257,17 @@ function parseRunningProcesses(output: string): RunningProcess[] {
   return processes;
 }
 
+function parseProcessOpenFilePaths(output: string): string[] {
+  const openPaths: string[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (!line || line[0] !== "n") continue;
+    const openPath = line.slice(1).trim();
+    if (!openPath) continue;
+    openPaths.push(openPath);
+  }
+  return openPaths;
+}
+
 async function listOpenFileProcesses(filePath: string): Promise<OpenFileProcess[]> {
   try {
     const { stdout } = await execFileAsync("lsof", ["-n", "-Fpcu", "--", filePath], {
@@ -269,6 +308,17 @@ async function listProcessCwd(pid: number): Promise<string> {
   }
 }
 
+async function listProcessOpenFilePaths(pid: number): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-n", "-Fn", "-p", String(pid)], {
+      maxBuffer: 2 * 1_024 * 1_024,
+    });
+    return parseProcessOpenFilePaths(stdout);
+  } catch {
+    return [];
+  }
+}
+
 function normalizeTtyPath(value: string): string {
   const trimmed = value.trim();
   if (!trimmed || trimmed === "?") return "";
@@ -283,6 +333,18 @@ async function listProcessTty(pid: number): Promise<string> {
     return normalizeTtyPath(stdout);
   } catch {
     return "";
+  }
+}
+
+async function listProcessStartMs(pid: number): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="], {
+      maxBuffer: 64 * 1_024,
+    });
+    const parsed = Date.parse(stdout.trim());
+    return Number.isFinite(parsed) ? parsed : 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -602,6 +664,120 @@ function commandMatchesAgent(command: string, agent: TraceSummary["agent"]): boo
   return false;
 }
 
+interface OpenFileProcessSelectionInput {
+  summary: Pick<TraceSummary, "agent" | "sessionId">;
+  openFileProcesses: OpenFileProcess[];
+  argsByPid: Map<number, string>;
+  identity: CurrentUserIdentity;
+  requesterPid: number;
+}
+
+export function selectOpenFileProcessPids(input: OpenFileProcessSelectionInput): number[] {
+  const sameUserCandidates = input.openFileProcesses.filter((candidate) => {
+    if (candidate.pid === input.requesterPid) return false;
+    return matchesCurrentUser(candidate.user, input.identity);
+  });
+  if (sameUserCandidates.length === 0) return [];
+
+  const normalizedSessionId = input.summary.sessionId.trim().toLowerCase();
+  const agentCandidates = sameUserCandidates.filter((candidate) => {
+    const resolvedCommand = input.argsByPid.get(candidate.pid) ?? candidate.command;
+    if (!commandMatchesAgent(resolvedCommand, input.summary.agent)) return false;
+    if (isExcludedAgentCommand(resolvedCommand, input.summary.agent)) return false;
+    return true;
+  });
+
+  if (agentCandidates.length > 0) {
+    if (normalizedSessionId) {
+      const sessionCandidates = agentCandidates.filter((candidate) => {
+        const resolvedCommand = input.argsByPid.get(candidate.pid) ?? candidate.command;
+        return normalizeCommand(resolvedCommand).includes(normalizedSessionId);
+      });
+      if (sessionCandidates.length > 0) {
+        return uniquePids(sessionCandidates.map((candidate) => candidate.pid));
+      }
+    }
+    if (agentCandidates.length === 1) {
+      return uniquePids([agentCandidates[0]?.pid ?? 0]);
+    }
+    return uniquePids(agentCandidates.map((candidate) => candidate.pid));
+  }
+
+  if (sameUserCandidates.length === 1) {
+    return uniquePids([sameUserCandidates[0]?.pid ?? 0]);
+  }
+  return [];
+}
+
+export function extractClaudeDebugProcessPid(logContent: string): number {
+  let resolvedPid = 0;
+  for (const line of logContent.split(/\r?\n/)) {
+    if (!line) continue;
+    const tmpWriteMatch = line.match(/\.claude\.json\.tmp\.(\d+)\./);
+    if (tmpWriteMatch) {
+      const parsed = Number.parseInt(tmpWriteMatch[1] ?? "", 10);
+      if (Number.isInteger(parsed) && parsed > 0) {
+        resolvedPid = parsed;
+      }
+      continue;
+    }
+    if (!line.includes("Acquired PID lock")) continue;
+    const lockMatch = line.match(/\(PID\s+(\d+)\)/);
+    if (!lockMatch) continue;
+    const parsed = Number.parseInt(lockMatch[1] ?? "", 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      resolvedPid = parsed;
+    }
+  }
+  return resolvedPid;
+}
+
+async function readClaudeDebugTail(sessionId: string): Promise<string> {
+  const filePath = path.join(os.homedir(), ".claude", "debug", `${sessionId}.txt`);
+  if (!existsSync(filePath)) return "";
+  try {
+    const { stdout } = await execFileAsync("tail", ["-n", "500", filePath], {
+      maxBuffer: 512 * 1_024,
+    });
+    if (stdout.trim()) return stdout;
+  } catch {
+    // Fall through to full-file read below.
+  }
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+async function findClaudeProcessPidByDebugLog(
+  summary: TraceSummary,
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const sessionId = summary.sessionId.trim();
+  if (!sessionId) return [];
+  const debugTail = await readClaudeDebugTail(sessionId);
+  if (!debugTail) return [];
+  const debugPid = extractClaudeDebugProcessPid(debugTail);
+  if (!debugPid || debugPid === requesterPid) return [];
+  if (!isProcessAlive(debugPid)) return [];
+
+  const runningProcesses = await listRunningProcesses();
+  const matchedProcess = runningProcesses.find((processInfo) => processInfo.pid === debugPid);
+  if (!matchedProcess) return [];
+  if (!matchesCurrentUser(matchedProcess.user, identity)) return [];
+  if (!commandMatchesAgent(matchedProcess.args, "claude")) return [];
+
+  const projectKey = claudeProjectKeyFromTracePath(summary.path);
+  if (projectKey) {
+    const processCwd = await listProcessCwd(debugPid);
+    if (claudeProjectKeyFromCwd(processCwd) !== projectKey) return [];
+  }
+
+  return [debugPid];
+}
+
 export function claudeProjectKeyFromTracePath(tracePath: string): string {
   const normalizedPath = tracePath.replace(/\\/g, "/");
   const marker = "/.claude/projects/";
@@ -641,14 +817,20 @@ export function cursorProjectKeyFromCwd(cwd: string): string {
 }
 
 export function geminiProjectHashFromTracePath(tracePath: string): string {
+  const projectHash = geminiProjectKeyFromTracePath(tracePath);
+  if (!/^[a-f0-9]{64}$/.test(projectHash)) return "";
+  return projectHash;
+}
+
+export function geminiProjectKeyFromTracePath(tracePath: string): string {
   const normalizedPath = tracePath.replace(/\\/g, "/");
   const marker = "/.gemini/tmp/";
   const markerIndex = normalizedPath.indexOf(marker);
   if (markerIndex < 0) return "";
   const tail = normalizedPath.slice(markerIndex + marker.length);
-  const projectHash = (tail.split("/", 1)[0] ?? "").trim().toLowerCase();
-  if (!/^[a-f0-9]{64}$/.test(projectHash)) return "";
-  return projectHash;
+  const projectKey = (tail.split("/", 1)[0] ?? "").trim().toLowerCase();
+  if (!projectKey) return "";
+  return projectKey;
 }
 
 export function geminiProjectHashesFromCwd(cwd: string): string[] {
@@ -658,6 +840,77 @@ export function geminiProjectHashesFromCwd(cwd: string): string[] {
   const candidates = [trimmed, normalized].map((value) => value.trim()).filter((value) => value.length > 0);
   const uniqueValues = Array.from(new Set(candidates));
   return uniqueValues.map((value) => createHash("sha256").update(value).digest("hex"));
+}
+
+export function geminiProjectSlugsFromCwd(cwd: string): string[] {
+  const trimmed = cwd.trim();
+  if (!trimmed) return [];
+  const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/g, "");
+  if (!normalized) return [];
+
+  const basename = normalized.split("/").filter(Boolean).at(-1) ?? "";
+  const slugify = (value: string): string =>
+    value
+      .trim()
+      .replace(/[^A-Za-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase();
+
+  const slugs = [slugify(basename), slugify(normalized)].filter((value) => value.length > 0);
+  return Array.from(new Set(slugs));
+}
+
+function geminiProjectKeyMatchesCwd(projectKey: string, cwd: string): boolean {
+  const normalizedKey = projectKey.trim().toLowerCase();
+  if (!normalizedKey) return false;
+  if (/^[a-f0-9]{64}$/.test(normalizedKey)) {
+    return geminiProjectHashesFromCwd(cwd).includes(normalizedKey);
+  }
+  return geminiProjectSlugsFromCwd(cwd).includes(normalizedKey);
+}
+
+export function extractCursorSessionIdsFromOpenPaths(openPaths: string[]): string[] {
+  const sessionIds = new Set<string>();
+  for (const openPath of openPaths) {
+    const normalizedPath = openPath.replace(/\\/g, "/");
+    const match = normalizedPath.match(
+      /\/\.cursor\/chats\/[^/]+\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/store\.db(?:-wal|-shm)?$/i,
+    );
+    if (!match || !match[1]) continue;
+    sessionIds.add(match[1].toLowerCase());
+  }
+  return Array.from(sessionIds.values());
+}
+
+export function extractOpenCodeSessionIdsFromLogContent(logContent: string): string[] {
+  const sessionIds = new Set<string>();
+  const matcher = /sessionID=(ses_[A-Za-z0-9]+)/g;
+  for (;;) {
+    const match = matcher.exec(logContent);
+    if (!match) break;
+    const sessionId = (match[1] ?? "").trim();
+    if (!sessionId) continue;
+    sessionIds.add(sessionId);
+  }
+  return Array.from(sessionIds.values());
+}
+
+export function geminiLogsContainSessionId(logContent: string, sessionId: string): boolean {
+  const normalizedSessionId = sessionId.trim().toLowerCase();
+  if (!normalizedSessionId) return false;
+  try {
+    const parsed = JSON.parse(logContent) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.some((entry) => {
+        if (!entry || typeof entry !== "object") return false;
+        const candidate = (entry as { sessionId?: unknown }).sessionId;
+        return typeof candidate === "string" && candidate.trim().toLowerCase() === normalizedSessionId;
+      });
+    }
+  } catch {
+    // Fall through to string matching for malformed logs.
+  }
+  return logContent.toLowerCase().includes(normalizedSessionId);
 }
 
 interface ClaudeCandidateProcess {
@@ -706,7 +959,10 @@ export function selectClaudeProjectProcessPids(
     }
   }
 
-  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+  if (projectCandidates.length === 1) {
+    return uniquePids([projectCandidates[0]?.pid ?? 0]);
+  }
+  return [];
 }
 
 export function selectAgentProjectProcessPids(
@@ -744,7 +1000,10 @@ export function selectAgentProjectProcessPids(
     }
   }
 
-  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+  if (projectCandidates.length === 1) {
+    return uniquePids([projectCandidates[0]?.pid ?? 0]);
+  }
+  return [];
 }
 
 export function selectAgentProcessPidsBySessionId(
@@ -810,7 +1069,10 @@ export function selectCursorProjectProcessPids(
     }
   }
 
-  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+  if (projectCandidates.length === 1) {
+    return uniquePids([projectCandidates[0]?.pid ?? 0]);
+  }
+  return [];
 }
 
 export function selectGeminiProjectProcessPids(
@@ -819,8 +1081,8 @@ export function selectGeminiProjectProcessPids(
   identity: CurrentUserIdentity,
   requesterPid: number,
 ): number[] {
-  const projectHash = geminiProjectHashFromTracePath(summary.path);
-  if (!projectHash) return [];
+  const projectKey = geminiProjectKeyFromTracePath(summary.path);
+  if (!projectKey) return [];
 
   const sameUserGeminiCandidates = processes.filter((processInfo) => {
     if (processInfo.pid === requesterPid) return false;
@@ -830,7 +1092,7 @@ export function selectGeminiProjectProcessPids(
   if (sameUserGeminiCandidates.length === 0) return [];
 
   const projectCandidates = sameUserGeminiCandidates.filter((processInfo) =>
-    geminiProjectHashesFromCwd(processInfo.cwd).includes(projectHash),
+    geminiProjectKeyMatchesCwd(projectKey, processInfo.cwd),
   );
   if (projectCandidates.length === 0) return [];
 
@@ -844,7 +1106,10 @@ export function selectGeminiProjectProcessPids(
     }
   }
 
-  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+  if (projectCandidates.length === 1) {
+    return uniquePids([projectCandidates[0]?.pid ?? 0]);
+  }
+  return [];
 }
 
 async function findClaudeProjectProcessPids(
@@ -942,8 +1207,8 @@ async function findGeminiProjectProcessPids(
   identity: CurrentUserIdentity,
   requesterPid: number,
 ): Promise<number[]> {
-  const projectHash = geminiProjectHashFromTracePath(summary.path);
-  if (!projectHash) return [];
+  const projectKey = geminiProjectKeyFromTracePath(summary.path);
+  if (!projectKey) return [];
 
   const runningProcesses = await listRunningProcesses();
   const geminiProcesses = runningProcesses.filter((processInfo) => {
@@ -962,6 +1227,152 @@ async function findGeminiProjectProcessPids(
   return selectGeminiProjectProcessPids(summary, withCwd, identity, requesterPid);
 }
 
+function isOpenCodeLogPath(openPath: string): boolean {
+  const normalizedPath = openPath.replace(/\\/g, "/");
+  return normalizedPath.includes("/.local/share/opencode/log/") && normalizedPath.endsWith(".log");
+}
+
+async function readTextFileTail(filePath: string, lines: number): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("tail", ["-n", String(Math.max(1, lines)), filePath], {
+      maxBuffer: 512 * 1_024,
+    });
+    if (stdout.trim()) return stdout;
+  } catch {
+    // Fall through to whole-file read.
+  }
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+async function findCursorProcessPidsByChatStoreSession(
+  summary: TraceSummary,
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const normalizedSessionId = summary.sessionId.trim().toLowerCase();
+  if (!normalizedSessionId) return [];
+
+  const runningProcesses = await listRunningProcesses();
+  const cursorCandidates = runningProcesses.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, "cursor");
+  });
+  if (cursorCandidates.length === 0) return [];
+
+  const matchedPids: number[] = [];
+  await Promise.all(
+    cursorCandidates.map(async (processInfo) => {
+      const openPaths = await listProcessOpenFilePaths(processInfo.pid);
+      const sessionIds = extractCursorSessionIdsFromOpenPaths(openPaths);
+      if (sessionIds.includes(normalizedSessionId)) {
+        matchedPids.push(processInfo.pid);
+      }
+    }),
+  );
+  return uniquePids(matchedPids);
+}
+
+async function findOpenCodeProcessPidsByLogSession(
+  summary: TraceSummary,
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const sessionId = summary.sessionId.trim();
+  if (!sessionId) return [];
+
+  const runningProcesses = await listRunningProcesses();
+  const openCodeCandidates = runningProcesses.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    if (!commandMatchesAgent(processInfo.args, "opencode")) return false;
+    if (isExcludedAgentCommand(processInfo.args, "opencode")) return false;
+    return true;
+  });
+  if (openCodeCandidates.length === 0) return [];
+
+  const matchedPids: number[] = [];
+  await Promise.all(
+    openCodeCandidates.map(async (processInfo) => {
+      const openPaths = await listProcessOpenFilePaths(processInfo.pid);
+      const logPaths = openPaths.filter((openPath) => isOpenCodeLogPath(openPath));
+      if (logPaths.length === 0) return;
+      for (const logPath of logPaths) {
+        const logTail = await readTextFileTail(logPath, 800);
+        if (!logTail) continue;
+        if (extractOpenCodeSessionIdsFromLogContent(logTail).includes(sessionId)) {
+          matchedPids.push(processInfo.pid);
+          return;
+        }
+        let fullContent = "";
+        try {
+          fullContent = readFileSync(logPath, "utf8");
+        } catch {
+          fullContent = "";
+        }
+        if (fullContent && extractOpenCodeSessionIdsFromLogContent(fullContent).includes(sessionId)) {
+          matchedPids.push(processInfo.pid);
+          return;
+        }
+      }
+    }),
+  );
+  return uniquePids(matchedPids);
+}
+
+async function findGeminiProcessPidsByProjectLog(
+  summary: TraceSummary,
+  identity: CurrentUserIdentity,
+  requesterPid: number,
+): Promise<number[]> {
+  const projectKey = geminiProjectKeyFromTracePath(summary.path);
+  const sessionId = summary.sessionId.trim();
+  if (!projectKey || !sessionId) return [];
+
+  const logsPath = path.join(os.homedir(), ".gemini", "tmp", projectKey, "logs.json");
+  if (!existsSync(logsPath)) return [];
+
+  let content = await readTextFileTail(logsPath, 500);
+  if (!content || !geminiLogsContainSessionId(content, sessionId)) {
+    try {
+      content = readFileSync(logsPath, "utf8");
+    } catch {
+      content = "";
+    }
+  }
+  if (!content || !geminiLogsContainSessionId(content, sessionId)) return [];
+
+  const runningProcesses = await listRunningProcesses();
+  const geminiCandidates = runningProcesses.filter((processInfo) => {
+    if (processInfo.pid === requesterPid) return false;
+    if (!matchesCurrentUser(processInfo.user, identity)) return false;
+    return commandMatchesAgent(processInfo.args, "gemini");
+  });
+  if (geminiCandidates.length === 0) return [];
+
+  const withCwd: AgentCandidateProcess[] = await Promise.all(
+    geminiCandidates.map(async (processInfo) => ({
+      ...processInfo,
+      cwd: await listProcessCwd(processInfo.pid),
+    })),
+  );
+  const projectCandidates = withCwd.filter((processInfo) => geminiProjectKeyMatchesCwd(projectKey, processInfo.cwd));
+  if (projectCandidates.length === 0) return [];
+
+  const normalizedSessionId = sessionId.toLowerCase();
+  const sessionArgCandidates = projectCandidates.filter((processInfo) =>
+    normalizeCommand(processInfo.args).includes(normalizedSessionId),
+  );
+  if (sessionArgCandidates.length > 0) {
+    return uniquePids(sessionArgCandidates.map((processInfo) => processInfo.pid));
+  }
+  return uniquePids(projectCandidates.map((processInfo) => processInfo.pid));
+}
+
 async function excludeOpenCodeServePids(pids: number[]): Promise<number[]> {
   if (pids.length === 0) return [];
   try {
@@ -977,6 +1388,107 @@ async function excludeOpenCodeServePids(pids: number[]): Promise<number[]> {
   }
 }
 
+interface TimedPidCandidate {
+  pid: number;
+  tty: string;
+  startedAtMs: number;
+}
+
+export function selectPidGroupByNearestTimestamp(candidates: TimedPidCandidate[], targetTimestampMs: number): number[] {
+  if (!Number.isFinite(targetTimestampMs) || targetTimestampMs <= 0) return [];
+  const byTty = new Map<string, TimedPidCandidate[]>();
+  for (const candidate of candidates) {
+    if (!candidate.tty || candidate.startedAtMs <= 0) continue;
+    const current = byTty.get(candidate.tty) ?? [];
+    current.push(candidate);
+    byTty.set(candidate.tty, current);
+  }
+  if (byTty.size === 0) return [];
+
+  const scored = Array.from(byTty.values()).map((group) => {
+    const anchor = Math.min(...group.map((item) => item.startedAtMs));
+    return {
+      group,
+      distance: Math.abs(anchor - targetTimestampMs),
+      anchor,
+    };
+  });
+  scored.sort((left, right) => {
+    if (left.distance !== right.distance) return left.distance - right.distance;
+    if (left.anchor !== right.anchor) return left.anchor - right.anchor;
+    return left.group[0]?.tty.localeCompare(right.group[0]?.tty ?? "") ?? 0;
+  });
+  const best = scored[0];
+  const second = scored[1];
+  if (!best) return [];
+  if (second && second.distance === best.distance) return [];
+  return uniquePids(best.group.map((item) => item.pid));
+}
+
+function geminiSessionAnchorTimestampMs(tracePath: string): number {
+  try {
+    const content = readFileSync(tracePath, "utf8");
+    const parsed = JSON.parse(content) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return 0;
+    const record = parsed as {
+      startTime?: unknown;
+      lastUpdated?: unknown;
+      messages?: unknown;
+    };
+    const parseCandidate = (value: unknown): number => {
+      if (typeof value !== "string") return 0;
+      const parsedValue = Date.parse(value);
+      return Number.isFinite(parsedValue) ? parsedValue : 0;
+    };
+    const startTimeMs = parseCandidate(record.startTime);
+    if (startTimeMs > 0) return startTimeMs;
+    const messages = Array.isArray(record.messages) ? record.messages : [];
+    const firstMessage = (messages[0] ?? {}) as { timestamp?: unknown };
+    const firstMessageTimestampMs = parseCandidate(firstMessage.timestamp);
+    if (firstMessageTimestampMs > 0) return firstMessageTimestampMs;
+    return parseCandidate(record.lastUpdated);
+  } catch {
+    return 0;
+  }
+}
+
+async function disambiguateGeminiMatchedPids(summary: TraceSummary, pids: number[]): Promise<number[]> {
+  const unique = uniquePids(pids);
+  if (unique.length <= 1) return unique;
+  const targetTimestampMs = geminiSessionAnchorTimestampMs(summary.path);
+  if (targetTimestampMs <= 0) return unique;
+
+  const timedCandidates: TimedPidCandidate[] = await Promise.all(
+    unique.map(async (pid) => ({
+      pid,
+      tty: await listProcessTty(pid),
+      startedAtMs: await listProcessStartMs(pid),
+    })),
+  );
+  const selected = selectPidGroupByNearestTimestamp(timedCandidates, targetTimestampMs);
+  if (selected.length === 0) return unique;
+  return selected;
+}
+
+async function disambiguateMatchedPidsByTty(pids: number[]): Promise<number[]> {
+  const unique = uniquePids(pids);
+  if (unique.length <= 1) return unique;
+  const ttyPairs = await Promise.all(
+    unique.map(async (pid) => ({
+      pid,
+      tty: await listProcessTty(pid),
+    })),
+  );
+  if (ttyPairs.some((pair) => !pair.tty)) {
+    return [];
+  }
+  const uniqueTtys = new Set(ttyPairs.map((pair) => pair.tty));
+  if (uniqueTtys.size !== 1) {
+    return [];
+  }
+  return unique;
+}
+
 async function resolveSessionProcessPids(
   summary: TraceSummary,
   requesterPid: number,
@@ -984,29 +1496,57 @@ async function resolveSessionProcessPids(
 ): Promise<SessionProcessResolution> {
   const openFileProcesses = await listOpenFileProcesses(summary.path);
   const identity = currentUserIdentity();
-  const sameUserCandidates = openFileProcesses.filter((candidate) => {
-    if (candidate.pid === requesterPid) return false;
-    return matchesCurrentUser(candidate.user, identity);
+  let argsByPid = new Map<number, string>();
+  if (openFileProcesses.length > 0) {
+    try {
+      const runningProcesses = await listRunningProcesses();
+      argsByPid = new Map<number, string>(runningProcesses.map((processInfo) => [processInfo.pid, processInfo.args]));
+    } catch {
+      argsByPid = new Map<number, string>();
+    }
+  }
+  let matchedPids = selectOpenFileProcessPids({
+    summary,
+    openFileProcesses,
+    argsByPid,
+    identity,
+    requesterPid,
   });
-  const agentScopedCandidates = sameUserCandidates.filter((candidate) =>
-    commandMatchesAgent(candidate.command, summary.agent),
-  );
-  const chosenCandidates = agentScopedCandidates.length > 0 ? agentScopedCandidates : sameUserCandidates;
-  let matchedPids = uniquePids(chosenCandidates.map((candidate) => candidate.pid));
   if (summary.agent === "opencode" && matchedPids.length > 0) {
     matchedPids = await excludeOpenCodeServePids(matchedPids);
+  }
+  if (matchedPids.length === 0 && summary.agent === "claude") {
+    matchedPids = await findClaudeProcessPidByDebugLog(summary, identity, requesterPid);
   }
   if (matchedPids.length === 0 && summary.agent === "claude") {
     matchedPids = await findClaudeProjectProcessPids(summary, identity, requesterPid);
   }
   if (matchedPids.length === 0 && summary.agent === "cursor") {
+    matchedPids = await findCursorProcessPidsByChatStoreSession(summary, identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "cursor") {
     matchedPids = await findCursorProjectProcessPids(summary, identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "cursor") {
+    matchedPids = await findAgentProcessPidsBySessionId(summary.sessionId, "cursor", identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "gemini") {
+    matchedPids = await findGeminiProcessPidsByProjectLog(summary, identity, requesterPid);
   }
   if (matchedPids.length === 0 && summary.agent === "gemini") {
     matchedPids = await findGeminiProjectProcessPids(summary, identity, requesterPid);
   }
   if (matchedPids.length === 0 && summary.agent === "gemini") {
     matchedPids = await findAgentProcessPidsBySessionId(summary.sessionId, "gemini", identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "opencode") {
+    matchedPids = await findOpenCodeProcessPidsByLogSession(summary, identity, requesterPid);
+  }
+  if (matchedPids.length === 0 && summary.agent === "opencode") {
+    matchedPids = await findAgentProcessPidsBySessionId(summary.sessionId, "opencode", identity, requesterPid);
+    if (matchedPids.length > 0) {
+      matchedPids = await excludeOpenCodeServePids(matchedPids);
+    }
   }
   if (matchedPids.length === 0 && sessionCwd) {
     matchedPids = await findAgentProjectProcessPids(
@@ -1019,6 +1559,12 @@ async function resolveSessionProcessPids(
     if (summary.agent === "opencode" && matchedPids.length > 0) {
       matchedPids = await excludeOpenCodeServePids(matchedPids);
     }
+  }
+  if (summary.agent === "gemini" && matchedPids.length > 1) {
+    matchedPids = await disambiguateGeminiMatchedPids(summary, matchedPids);
+  }
+  if (matchedPids.length > 1) {
+    matchedPids = await disambiguateMatchedPidsByTty(matchedPids);
   }
   const alivePids = matchedPids.filter((pid) => isProcessAlive(pid));
   return {
@@ -1153,28 +1699,15 @@ async function openTraceSessionProcess(
   const requesterPid = options.requesterPid ?? process.pid;
   const { matchedPids, alivePids } = await resolveSessionProcessPids(summary, requesterPid, options.sessionCwd ?? "");
   if (matchedPids.length === 0) {
-    try {
-      const activation = await activateGhostty();
-      return {
-        status: "ghostty_activated",
-        reason: `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; session process not resolved)`,
-        pid: null,
-        tty: "",
-        target: null,
-        matchedPids: [],
-        alivePids: [],
-      };
-    } catch (error) {
-      return {
-        status: "not_resolvable",
-        reason: `failed to open terminal: ${asErrorMessage(error)}`,
-        pid: null,
-        tty: "",
-        target: null,
-        matchedPids: [],
-        alivePids: [],
-      };
-    }
+    return {
+      status: "not_resolvable",
+      reason: "no active session process found",
+      pid: null,
+      tty: "",
+      target: null,
+      matchedPids: [],
+      alivePids: [],
+    };
   }
 
   const pid = alivePids[0] ?? matchedPids[0] ?? null;
@@ -1226,58 +1759,119 @@ async function openTraceSessionProcess(
           alivePids,
         };
       } catch (error) {
-        const reason = asErrorMessage(error);
-        try {
-          const activation = await activateGhostty();
-          return {
-            status: "ghostty_activated",
-            reason: `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; tmux focus failed: ${reason})`,
-            pid,
-            tty,
-            target: null,
-            matchedPids,
-            alivePids,
-          };
-        } catch {
-          // Fall through to generic fallback below.
-        }
-      }
-    } else {
-      const scanned = tmuxLookup.scannedSockets.join(", ") || "default socket";
-      try {
-        const activation = await activateGhostty();
         return {
-          status: "ghostty_activated",
-          reason: `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; pane focus unavailable: tty ${tty} not found in tmux sockets ${scanned})`,
+          status: "not_resolvable",
+          reason: `failed to focus tmux pane: ${asErrorMessage(error)}`,
           pid,
           tty,
           target: null,
           matchedPids,
           alivePids,
         };
-      } catch {
-        // Fall back to app-level focus below.
       }
+    } else {
+      const scanned = tmuxLookup.scannedSockets.join(", ") || "default socket";
+      return {
+        status: "not_resolvable",
+        reason: `pane focus unavailable: tty ${tty} not found in tmux sockets ${scanned}`,
+        pid,
+        tty,
+        target: null,
+        matchedPids,
+        alivePids,
+      };
     }
   }
 
-  try {
-    const activation = await activateGhostty();
+  return {
+    status: "not_resolvable",
+    reason: "session process has no resolvable tmux tty",
+    pid,
+    tty,
+    target: null,
+    matchedPids,
+    alivePids,
+  };
+}
+
+async function sendTraceSessionInput(
+  summary: TraceSummary,
+  options: SendTraceInputOptions,
+): Promise<SendTraceInputResult> {
+  const requesterPid = options.requesterPid ?? process.pid;
+  const text = normalizeTraceInputText(options.text);
+  const submit = options.submit ?? true;
+  const { matchedPids, alivePids } = await resolveSessionProcessPids(summary, requesterPid, options.sessionCwd ?? "");
+
+  if (matchedPids.length === 0) {
     return {
-      status: "ghostty_activated",
-      reason: tty
-        ? `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp}; pane focus unavailable)`
-        : `activated Ghostty via ${activation.method} (frontmost ${activation.frontmostApp})`,
-      pid,
-      tty,
+      status: "not_resolvable",
+      reason: "no active session process found",
+      pid: null,
+      tty: "",
+      target: null,
+      matchedPids: [],
+      alivePids: [],
+    };
+  }
+
+  const pid = alivePids[0] ?? matchedPids[0] ?? null;
+  if (!pid) {
+    return {
+      status: "not_resolvable",
+      reason: "no session process target found",
+      pid: null,
+      tty: "",
       target: null,
       matchedPids,
       alivePids,
     };
-  } catch (error) {
+  }
+
+  const tty = await listProcessTty(pid);
+  if (tty) {
+    const tmuxLookup = await listTmuxPanes(currentUserIdentity());
+    const paneMatch = tmuxLookup.panes.find((pane) => pane.paneTty === tty);
+    if (paneMatch) {
+      const targetName = `${paneMatch.tmuxSession}:${paneMatch.windowIndex}.${paneMatch.paneIndex}`;
+      try {
+        await runTmux(paneMatch.socketPath, ["send-keys", "-t", targetName, "-l", text], 256 * 1_024);
+        if (submit) {
+          await runTmux(paneMatch.socketPath, ["send-keys", "-t", targetName, "Enter"]);
+        }
+        return {
+          status: "sent_tmux",
+          reason: `sent input via tmux send-keys to ${targetName}${submit ? " + Enter" : ""}`,
+          pid,
+          tty,
+          target: {
+            tmuxSession: paneMatch.tmuxSession,
+            windowIndex: paneMatch.windowIndex,
+            paneIndex: paneMatch.paneIndex,
+          },
+          matchedPids,
+          alivePids,
+        };
+      } catch (error) {
+        return {
+          status: "failed",
+          reason: `failed tmux input send: ${asErrorMessage(error)}`,
+          pid,
+          tty,
+          target: {
+            tmuxSession: paneMatch.tmuxSession,
+            windowIndex: paneMatch.windowIndex,
+            paneIndex: paneMatch.paneIndex,
+          },
+          matchedPids,
+          alivePids,
+        };
+      }
+    }
+    const scanned = tmuxLookup.scannedSockets.join(", ") || "default socket";
     return {
       status: "not_resolvable",
-      reason: `failed to open terminal: ${asErrorMessage(error)}`,
+      reason: `input requires tmux pane match; tty ${tty} not found in tmux sockets ${scanned}`,
       pid,
       tty,
       target: null,
@@ -1285,6 +1879,16 @@ async function openTraceSessionProcess(
       alivePids,
     };
   }
+
+  return {
+    status: "not_resolvable",
+    reason: "input requires tmux pane targeting; session process has no resolvable tmux tty",
+    pid,
+    tty,
+    target: null,
+    matchedPids,
+    alivePids,
+  };
 }
 
 export function resolveDefaultWebDistPath(packagedWebDistPath: string, monorepoWebDistPath: string): string {
@@ -1303,6 +1907,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   const configPath = options.configPath ?? DEFAULT_CONFIG_PATH;
   const stopTraceSession = options.stopTraceSession ?? stopTraceSessionProcess;
   const openTraceSession = options.openTraceSession ?? openTraceSessionProcess;
+  const sendTraceInput = options.sendTraceInput ?? sendTraceSessionInput;
   const packagedWebDistPath = fileURLToPath(new URL("./web", import.meta.url));
   const monorepoWebDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
   const defaultWebDistPath = resolveDefaultWebDistPath(packagedWebDistPath, monorepoWebDistPath);
@@ -1409,6 +2014,78 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       const sessionCwd = inferSessionCwd(detail);
       const result = await openTraceSession(summary, { requesterPid: process.pid, sessionCwd });
       if (result.status === "focused_pane" || result.status === "ghostty_activated") {
+        return {
+          ok: true,
+          status: result.status,
+          traceId: summary.id,
+          sessionId: summary.sessionId,
+          pid: result.pid,
+          tty: result.tty,
+          target: result.target,
+          pids: result.matchedPids,
+          alivePids: result.alivePids,
+          message: result.reason,
+        };
+      }
+      if (result.status === "not_resolvable") {
+        reply.code(409);
+      } else {
+        reply.code(500);
+      }
+      return {
+        ok: false,
+        status: result.status,
+        traceId: summary.id,
+        sessionId: summary.sessionId,
+        pid: result.pid,
+        tty: result.tty,
+        target: result.target,
+        pids: result.matchedPids,
+        alivePids: result.alivePids,
+        error: result.reason,
+      };
+    } catch (error) {
+      const message = asErrorMessage(error);
+      if (message.startsWith("unknown trace/session:")) {
+        reply.code(404);
+      } else {
+        reply.code(500);
+      }
+      return { ok: false, error: message };
+    }
+  });
+
+  server.post("/api/trace/:id/input", async (request, reply) => {
+    const params = request.params as { id: string };
+    const body = (request.body ?? {}) as { text?: unknown; submit?: unknown };
+    const textRaw = typeof body.text === "string" ? body.text : "";
+    const text = normalizeTraceInputText(textRaw);
+    const submit = body.submit === false ? false : true;
+
+    if (!text.trim()) {
+      reply.code(400);
+      return { ok: false, error: "input text is required" };
+    }
+    if (text.length > MAX_TRACE_INPUT_TEXT_LENGTH) {
+      reply.code(400);
+      return {
+        ok: false,
+        error: `input text too long (max ${MAX_TRACE_INPUT_TEXT_LENGTH} chars)`,
+      };
+    }
+
+    try {
+      const resolvedId = traceIndex.resolveId(params.id);
+      const detail = traceIndex.getSessionDetail(resolvedId);
+      const summary = detail.summary;
+      const sessionCwd = inferSessionCwd(detail);
+      const result = await sendTraceInput(summary, {
+        requesterPid: process.pid,
+        sessionCwd,
+        text,
+        submit,
+      });
+      if (result.status === "sent_tmux") {
         return {
           ok: true,
           status: result.status,
