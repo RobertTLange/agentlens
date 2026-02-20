@@ -22,6 +22,10 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RobertTLange/agentlens"
+  },
   "dependencies": {
     "@agentlens/contracts": "0.1.0",
     "@agentlens/core": "0.1.0",
