@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (must match apps/cli/package.json)"
+        required: true
+        type: string
+
+jobs:
+  release:
+    name: Publish npm + create GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify workspace gate
+        run: |
+          npm run build
+          npm run typecheck
+          npm test
+
+      - name: Validate version and release state
+        id: release_info
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "Release workflow must run from main. Current ref: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+          PKG_VERSION="$(node -e 'const fs=require("node:fs");const pkg=JSON.parse(fs.readFileSync("apps/cli/package.json","utf8"));process.stdout.write(pkg.version);')"
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          if [[ "${PKG_VERSION}" != "${INPUT_VERSION}" ]]; then
+            echo "Version mismatch: apps/cli/package.json=${PKG_VERSION}, input=${INPUT_VERSION}"
+            exit 1
+          fi
+
+          TAG="v${PKG_VERSION}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag already exists on origin: ${TAG}"
+            exit 1
+          fi
+
+          if npm view "@roberttlange/agentlens@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "Version already published on npm: @roberttlange/agentlens@${PKG_VERSION}"
+            exit 1
+          fi
+
+          echo "pkg_version=${PKG_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish to npm
+        run: npm publish -w apps/cli --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.release_info.outputs.tag }}" \
+            --target "${GITHUB_SHA}" \
+            --title "${{ steps.release_info.outputs.tag }}" \
+            --generate-notes
