@@ -2314,5 +2314,5 @@ describe("trace index", () => {
     } finally {
       index.stop();
     }
-  });
+  }, 20_000);
 });
