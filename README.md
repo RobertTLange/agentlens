@@ -97,7 +97,20 @@ Local agent logs (~/.codex, ~/.claude, ~/.cursor, ~/.gemini, ~/.local/share/open
 - Node.js 18+.
 - npm (workspace-aware install/build/test flow).
 
-### Option A: Run from source (no global install)
+### Option A: Install from npm
+
+```bash
+npm install -g @roberttlange/agentlens
+agentlens --browser
+```
+
+Or run without installing globally:
+
+```bash
+npx -y @roberttlange/agentlens --browser
+```
+
+### Option B: Run from source (no global install)
 
 ```bash
 npm install
@@ -105,7 +118,7 @@ npm run build
 node apps/cli/dist/main.js --browser
 ```
 
-### Option B: Link `agentlens` globally from this repo
+### Option C: Link `agentlens` globally from this repo
 
 ```bash
 npm install
@@ -126,8 +139,6 @@ Optional args are forwarded:
 ```bash
 ./build.sh --host 127.0.0.1 --port 8787
 ```
-
-Note: `npm install -g agentlens` currently resolves to an unrelated registry package.
 
 ## CLI Reference
 
