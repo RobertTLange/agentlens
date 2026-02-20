@@ -1,7 +1,7 @@
 /* @vitest-environment happy-dom */
 
 import { act, cleanup, render, waitFor } from "@testing-library/react";
-import type { NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
+import type { EventKind, NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.js";
 
@@ -202,14 +202,23 @@ function traceIdFromOpenUrl(url: string): string {
   return decodeURIComponent(match?.[1] ?? "");
 }
 
+function traceIdFromInputUrl(url: string): string {
+  const match = url.match(/\/api\/trace\/([^/]+)\/input(?:\?|$)/);
+  return decodeURIComponent(match?.[1] ?? "");
+}
+
 function countTraceDetailRequests(traceId: string): number {
+  return getTraceDetailRequests(traceId).length;
+}
+
+function getTraceDetailRequests(traceId: string): string[] {
   const detailUrlFragment = `/api/trace/${traceId}`;
   return requestedUrls.filter((url) => {
     if (!url.includes(detailUrlFragment)) return false;
     if (url.includes("/stop")) return false;
     if (url.includes("/open")) return false;
     return true;
-  }).length;
+  });
 }
 
 function getTraceRow(id: string): HTMLDivElement {
@@ -230,6 +239,22 @@ function getTraceOpenButton(id: string): HTMLButtonElement {
   const button = getTraceRow(id).querySelector(".trace-open-button");
   if (!(button instanceof HTMLButtonElement)) {
     throw new Error(`missing open button for ${id}`);
+  }
+  return button;
+}
+
+function getTraceInputField(id: string): HTMLInputElement {
+  const field = getTraceRow(id).querySelector(".trace-input-field");
+  if (!(field instanceof HTMLInputElement)) {
+    throw new Error(`missing input field for ${id}`);
+  }
+  return field;
+}
+
+function getTraceInputSendButton(id: string): HTMLButtonElement {
+  const button = getTraceRow(id).querySelector(".trace-input-send-button");
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`missing input send button for ${id}`);
   }
   return button;
 }
@@ -259,6 +284,22 @@ function getTocTimestampByIndex(index: number): string {
     throw new Error(`missing toc timestamp for row #${index}`);
   }
   return value;
+}
+
+function getEventTypeFilterTrigger(): HTMLButtonElement {
+  const button = document.querySelector(".event-kind-filter-trigger");
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error("missing event kind filter trigger");
+  }
+  return button;
+}
+
+function getEventTypeOptionInput(eventKind: EventKind): HTMLInputElement {
+  const input = document.querySelector(`.event-kind-option[data-event-kind="${eventKind}"] input[type="checkbox"]`);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`missing event kind option input for ${eventKind}`);
+  }
+  return input;
 }
 
 function setTimelineStripMetrics(
@@ -295,6 +336,8 @@ let rafQueue: FrameRequestCallback[];
 let requestedUrls: string[];
 let stopResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let openResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
+let inputResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
+let inputRequests: Array<{ traceId: string; text: string; submit: boolean }>;
 
 beforeEach(() => {
   tracesById = {
@@ -310,6 +353,8 @@ beforeEach(() => {
   requestedUrls = [];
   stopResponsesByTraceId = {};
   openResponsesByTraceId = {};
+  inputResponsesByTraceId = {};
+  inputRequests = [];
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
   vi.stubGlobal(
@@ -344,6 +389,26 @@ beforeEach(() => {
         const custom = openResponsesByTraceId[traceId];
         const status = custom?.status ?? 200;
         const body = custom?.body ?? { ok: true, status: "ghostty_activated" };
+        return new Response(JSON.stringify(body), { status });
+      }
+      if (method === "POST" && url.includes("/api/trace/") && url.includes("/input")) {
+        const traceId = traceIdFromInputUrl(url);
+        let parsedBody: { text?: unknown; submit?: unknown } = {};
+        if (typeof init?.body === "string" && init.body.trim()) {
+          try {
+            parsedBody = JSON.parse(init.body) as { text?: unknown; submit?: unknown };
+          } catch {
+            parsedBody = {};
+          }
+        }
+        inputRequests.push({
+          traceId,
+          text: typeof parsedBody.text === "string" ? parsedBody.text : "",
+          submit: parsedBody.submit !== false,
+        });
+        const custom = inputResponsesByTraceId[traceId];
+        const status = custom?.status ?? 200;
+        const body = custom?.body ?? { ok: true, status: "sent_tmux", message: "sent input to tmux pane" };
         return new Response(JSON.stringify(body), { status });
       }
       if (url.includes("/api/trace/")) {
@@ -409,24 +474,247 @@ describe("App sessions list live motion", () => {
     });
   });
 
-  it("defaults include meta toggle to off in trace inspector", async () => {
+  it("defaults event type filter to all except meta and requests include_meta=0", async () => {
     render(<App />);
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/"))).toBe(true));
 
-    const includeMetaLabel = Array.from(document.querySelectorAll(".detail-controls .checkbox")).find((node) =>
-      node.textContent?.includes("include meta"),
+    expect(getEventTypeFilterTrigger().textContent).toContain("event types 6/7");
+
+    act(() => {
+      getEventTypeFilterTrigger().click();
+    });
+
+    const metaInput = getEventTypeOptionInput("meta");
+    expect(metaInput.checked).toBe(false);
+    const traceRequestUrl = getTraceDetailRequests("trace-c")[0];
+    expect(traceRequestUrl).toContain("include_meta=0");
+  });
+
+  it("requests include_meta=1 when enabling meta event kind", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c fixture");
+    const assistantEvent: NormalizedEvent = {
+      ...makeEvent("event-assistant-only", { signature: "assistant only" }),
+      index: 1,
+      offset: 1,
+      timestampMs: 1_000,
+      preview: "assistant only",
+      tocLabel: "assistant only",
+    };
+    const metaEvent: NormalizedEvent = {
+      ...makeEvent("event-meta-kind", { type: "session_meta" }),
+      index: 2,
+      offset: 2,
+      timestampMs: 2_000,
+      eventKind: "meta",
+      rawType: "session_meta",
+      role: "meta",
+      preview: "meta event",
+      tocLabel: "meta event",
+      searchText: "meta event",
+      textBlocks: ["meta event"],
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [assistantEvent, metaEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
+
+    act(() => {
+      getEventTypeFilterTrigger().click();
+    });
+    const metaInput = getEventTypeOptionInput("meta");
+    act(() => {
+      metaInput.click();
+    });
+
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(2));
+    const traceRequests = getTraceDetailRequests("trace-c");
+    const lastRequest = traceRequests[traceRequests.length - 1];
+    expect(lastRequest).toContain("include_meta=1");
+  });
+
+  it("hides unchecked event kinds from TOC and event cards", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c fixture");
+    const assistantEvent: NormalizedEvent = {
+      ...makeEvent("event-kind-assistant", { signature: "assistant kind" }),
+      index: 1,
+      offset: 1,
+      timestampMs: 1_000,
+      preview: "assistant visible",
+      tocLabel: "assistant visible",
+      searchText: "assistant visible",
+      textBlocks: ["assistant visible"],
+    };
+    const userEvent: NormalizedEvent = {
+      ...makeEvent("event-kind-user", { signature: "user kind" }),
+      index: 2,
+      offset: 2,
+      timestampMs: 2_000,
+      eventKind: "user",
+      role: "user",
+      preview: "user visible",
+      tocLabel: "user visible",
+      searchText: "user visible",
+      textBlocks: ["user visible"],
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [assistantEvent, userEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(2));
+
+    act(() => {
+      getEventTypeFilterTrigger().click();
+    });
+    const assistantInput = getEventTypeOptionInput("assistant");
+    act(() => {
+      assistantInput.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
+    expect(document.querySelector(".events-scroll")?.textContent).not.toContain("assistant visible");
+    expect(document.querySelector(".events-scroll")?.textContent).toContain("user visible");
+  });
+
+  it("falls back selected event when hidden by event type filter", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c fixture");
+    const userEvent: NormalizedEvent = {
+      ...makeEvent("event-fallback-user", { signature: "fallback user" }),
+      index: 1,
+      offset: 1,
+      timestampMs: 1_000,
+      eventKind: "user",
+      role: "user",
+      preview: "fallback user",
+      tocLabel: "fallback user",
+      searchText: "fallback user",
+      textBlocks: ["fallback user"],
+    };
+    const assistantEvent: NormalizedEvent = {
+      ...makeEvent("event-fallback-assistant", { signature: "fallback assistant" }),
+      index: 2,
+      offset: 2,
+      timestampMs: 2_000,
+      preview: "fallback assistant",
+      tocLabel: "fallback assistant",
+      searchText: "fallback assistant",
+      textBlocks: ["fallback assistant"],
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [userEvent, assistantEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+
+    const autoFollowLabel = Array.from(document.querySelectorAll(".detail-controls .checkbox")).find((node) =>
+      node.textContent?.includes("auto follow"),
     );
-    if (!(includeMetaLabel instanceof HTMLLabelElement)) {
-      throw new Error("missing include meta checkbox label");
+    if (!(autoFollowLabel instanceof HTMLLabelElement)) {
+      throw new Error("missing auto follow checkbox");
     }
-    const includeMetaInput = includeMetaLabel.querySelector('input[type="checkbox"]');
-    if (!(includeMetaInput instanceof HTMLInputElement)) {
-      throw new Error("missing include meta checkbox input");
+    const autoFollowInput = autoFollowLabel.querySelector('input[type="checkbox"]');
+    if (!(autoFollowInput instanceof HTMLInputElement)) {
+      throw new Error("missing auto follow input");
+    }
+    if (autoFollowInput.checked) {
+      act(() => {
+        autoFollowInput.click();
+      });
     }
 
-    expect(includeMetaInput.checked).toBe(false);
-    const traceRequestUrl = requestedUrls.find((url) => url.includes("/api/trace/"));
-    expect(traceRequestUrl).toContain("include_meta=0");
+    const assistantTocRow = Array.from(document.querySelectorAll(".toc-row")).find((row) => {
+      const indexLabel = row.querySelector(".toc-index")?.textContent?.trim();
+      return indexLabel === "#2" && row.textContent?.includes("assistant");
+    });
+    if (!(assistantTocRow instanceof HTMLButtonElement)) {
+      throw new Error("missing assistant toc row");
+    }
+    act(() => {
+      assistantTocRow.click();
+    });
+
+    await waitFor(() =>
+      expect(document.querySelector(".event-card.selected h3")?.textContent).toContain("fallback assistant"),
+    );
+
+    act(() => {
+      getEventTypeFilterTrigger().click();
+    });
+    const assistantInput = getEventTypeOptionInput("assistant");
+    act(() => {
+      assistantInput.click();
+    });
+
+    await waitFor(() =>
+      expect(document.querySelector(".event-card.selected h3")?.textContent).toContain("fallback user"),
+    );
+  });
+
+  it("supports event type quick actions show all and default hide meta", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c fixture");
+    const assistantEvent: NormalizedEvent = {
+      ...makeEvent("event-quick-assistant", { signature: "quick assistant" }),
+      index: 1,
+      offset: 1,
+      timestampMs: 1_000,
+      preview: "quick assistant",
+      tocLabel: "quick assistant",
+      searchText: "quick assistant",
+      textBlocks: ["quick assistant"],
+    };
+    const metaEvent: NormalizedEvent = {
+      ...makeEvent("event-quick-meta", { type: "session_meta" }),
+      index: 2,
+      offset: 2,
+      timestampMs: 2_000,
+      eventKind: "meta",
+      rawType: "session_meta",
+      role: "meta",
+      preview: "quick meta",
+      tocLabel: "quick meta",
+      searchText: "quick meta",
+      textBlocks: ["quick meta"],
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [assistantEvent, metaEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+
+    act(() => {
+      getEventTypeFilterTrigger().click();
+    });
+    const showAllButton = Array.from(document.querySelectorAll(".event-kind-filter-action")).find((node) =>
+      node.textContent?.includes("show all"),
+    );
+    if (!(showAllButton instanceof HTMLButtonElement)) {
+      throw new Error("missing show all button");
+    }
+    act(() => {
+      showAllButton.click();
+    });
+
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(2));
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    const traceRequestsAfterShowAll = getTraceDetailRequests("trace-c");
+    expect(traceRequestsAfterShowAll[traceRequestsAfterShowAll.length - 1]).toContain("include_meta=1");
+
+    const resetButton = Array.from(document.querySelectorAll(".event-kind-filter-action")).find((node) =>
+      node.textContent?.includes("default (hide meta)"),
+    );
+    if (!(resetButton instanceof HTMLButtonElement)) {
+      throw new Error("missing default hide meta button");
+    }
+    act(() => {
+      resetButton.click();
+    });
+
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(3));
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+    const traceRequestsAfterReset = getTraceDetailRequests("trace-c");
+    expect(traceRequestsAfterReset[traceRequestsAfterReset.length - 1]).toContain("include_meta=0");
   });
 
   it("reuses cached trace detail when switching back to a previous session", async () => {
@@ -786,6 +1074,59 @@ describe("App sessions list live motion", () => {
       ),
     );
     await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Open failed"));
+  });
+
+  it("sends text input to waiting sessions on Enter", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const inputField = getTraceInputField("trace-c");
+    act(() => {
+      inputField.value = "Continue";
+      inputField.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      inputField.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/trace-c/input"))).toBe(true));
+    await waitFor(() =>
+      expect(inputRequests).toContainEqual({
+        traceId: "trace-c",
+        text: "Continue",
+        submit: true,
+      }),
+    );
+    await waitFor(() => expect(getTraceInputField("trace-c").value).toBe(""));
+    await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Input sent_tmux"));
+  });
+
+  it("shows input error in the session row when input endpoint rejects", async () => {
+    inputResponsesByTraceId["trace-c"] = {
+      status: 409,
+      body: { ok: false, error: "no active session process found" },
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const inputField = getTraceInputField("trace-c");
+    act(() => {
+      inputField.value = "Continue";
+      inputField.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const sendButton = getTraceInputSendButton("trace-c");
+    act(() => {
+      sendButton.click();
+    });
+
+    await waitFor(() =>
+      expect(getTraceRow("trace-c").querySelector(".trace-input-error")?.textContent).toContain(
+        "no active session process found",
+      ),
+    );
+    await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Input failed"));
   });
 
   it("renders session rows with single-line name element and start/updated fields", async () => {

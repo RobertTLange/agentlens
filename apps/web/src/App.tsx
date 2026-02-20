@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
-import type { OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
+import type { EventKind, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import {
   buildTimelineStripSegments,
   classForKind,
@@ -28,8 +28,19 @@ const CLOCK_TICK_MS = 5_000;
 const TIMELINE_EVENT_INITIAL_RENDER_LIMIT = 240;
 const TIMELINE_EVENT_RENDER_STEP = 240;
 const TIMELINE_EVENT_RENDER_PREFETCH_PX = 320;
-const RECENT_TRACE_LIMIT = 50;
+const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
+const EVENT_KIND_OPTIONS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "meta"];
+const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
+  system: "system",
+  assistant: "assistant",
+  user: "user",
+  tool_use: "tool use",
+  tool_result: "tool result",
+  reasoning: "reasoning",
+  meta: "meta",
+};
+const DEFAULT_VISIBLE_EVENT_KINDS: EventKind[] = EVENT_KIND_OPTIONS.filter((kind) => kind !== "meta");
 
 interface StopTraceResponse {
   ok?: boolean;
@@ -49,6 +60,13 @@ interface OpenTraceResponse {
     windowIndex?: number;
     paneIndex?: number;
   } | null;
+}
+
+interface InputTraceResponse {
+  ok?: boolean;
+  error?: string;
+  status?: string;
+  message?: string;
 }
 
 interface TracePageCacheEntry {
@@ -207,6 +225,10 @@ function readTimelineStripViewport(scroller: HTMLElement): { hasOverflow: boolea
   return { hasOverflow: true, atLatest };
 }
 
+function createDefaultVisibleEventKinds(): Set<EventKind> {
+  return new Set(DEFAULT_VISIBLE_EVENT_KINDS);
+}
+
 export function App(): JSX.Element {
   const [overview, setOverview] = useState<OverviewStats | null>(null);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
@@ -217,7 +239,8 @@ export function App(): JSX.Element {
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
   const [query, setQuery] = useState("");
-  const [includeMeta, setIncludeMeta] = useState(false);
+  const [visibleEventKinds, setVisibleEventKinds] = useState<Set<EventKind>>(() => createDefaultVisibleEventKinds());
+  const [isEventTypeFilterMenuOpen, setIsEventTypeFilterMenuOpen] = useState(false);
   const [tocQuery, setTocQuery] = useState("");
   const [selectedEventId, setSelectedEventId] = useState("");
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
@@ -235,21 +258,27 @@ export function App(): JSX.Element {
   const [openErrorByTraceId, setOpenErrorByTraceId] = useState<Record<string, string>>({});
   const [stoppingTraceIds, setStoppingTraceIds] = useState<Set<string>>(new Set());
   const [stopErrorByTraceId, setStopErrorByTraceId] = useState<Record<string, string>>({});
+  const [sendingInputTraceIds, setSendingInputTraceIds] = useState<Set<string>>(new Set());
+  const [traceInputByTraceId, setTraceInputByTraceId] = useState<Record<string, string>>({});
+  const [inputErrorByTraceId, setInputErrorByTraceId] = useState<Record<string, string>>({});
   const [timelineStripHasOverflow, setTimelineStripHasOverflow] = useState(false);
   const [timelineStripPinnedToLatest, setTimelineStripPinnedToLatest] = useState(true);
   const [timelineOffscreenAppendCount, setTimelineOffscreenAppendCount] = useState(0);
   const selectedIdRef = useRef("");
+  const eventTypeFilterRef = useRef<HTMLDivElement | null>(null);
   const timelineStripRef = useRef<HTMLDivElement | null>(null);
   const timelinePinnedToLatestRef = useRef(true);
   const timelineHasOverflowRef = useRef(false);
   const timelinePinnedStateRef = useRef(true);
   const previousTimelineTraceIdRef = useRef("");
+  const previousTimelineFilterKeyRef = useRef("");
   const previousTimelineEventCountRef = useRef(0);
   const previousTraceFilterRef = useRef("");
   const traceEnterAnimationInitializedRef = useRef(false);
   const previousVisibleTraceIdsRef = useRef<Set<string>>(new Set());
   const previousSelectedTraceIdRef = useRef("");
   const previousAnimatedTraceIdRef = useRef("");
+  const previousAnimatedEventFilterKeyRef = useRef("");
   const previousPageEventIdsRef = useRef<Set<string>>(new Set());
   const queuedEventIdsRef = useRef<string[]>([]);
   const queuedEventTimerRef = useRef<number | null>(null);
@@ -293,15 +322,30 @@ export function App(): JSX.Element {
       return search.includes(q);
     });
   }, [traces, query]);
+  const includeMeta = visibleEventKinds.has("meta");
+  const visibleEventKindKey = useMemo(
+    () => EVENT_KIND_OPTIONS.filter((kind) => visibleEventKinds.has(kind)).join(","),
+    [visibleEventKinds],
+  );
+  const filteredPageEvents = useMemo(() => {
+    if (!page) return [];
+    return page.events.filter((event) => visibleEventKinds.has(event.eventKind));
+  }, [page, visibleEventKinds]);
+  const filteredPageEventIdSet = useMemo(() => new Set(filteredPageEvents.map((event) => event.eventId)), [filteredPageEvents]);
+  const visibleEventKindCount = visibleEventKinds.size;
+  const eventTypeFilterLabel =
+    visibleEventKindCount === EVENT_KIND_OPTIONS.length
+      ? "event types all"
+      : `event types ${visibleEventKindCount}/${EVENT_KIND_OPTIONS.length}`;
 
   const visibleTimelineEvents = useMemo(() => {
-    if (!page || visibleEventIds.size === 0) return [];
-    return page.events.filter((event) => visibleEventIds.has(event.eventId));
-  }, [page, visibleEventIds]);
+    if (filteredPageEvents.length === 0 || visibleEventIds.size === 0) return [];
+    return filteredPageEvents.filter((event) => visibleEventIds.has(event.eventId));
+  }, [filteredPageEvents, visibleEventIds]);
 
   const tocRows = useMemo(() => {
     const rows = sortTimelineItems(
-      (page?.toc ?? []).filter((row) => visibleEventIds.has(row.eventId)),
+      (page?.toc ?? []).filter((row) => filteredPageEventIdSet.has(row.eventId) && visibleEventIds.has(row.eventId)),
       timelineSortDirection,
     );
     const q = tocQuery.trim().toLowerCase();
@@ -310,7 +354,7 @@ export function App(): JSX.Element {
       const search = `${row.index}\n${row.eventKind}\n${row.toolType}\n${row.label}`.toLowerCase();
       return search.includes(q);
     });
-  }, [page, tocQuery, timelineSortDirection, visibleEventIds]);
+  }, [filteredPageEventIdSet, page, tocQuery, timelineSortDirection, visibleEventIds]);
 
   const timelineEvents = useMemo(
     () => sortTimelineItems(visibleTimelineEvents, timelineSortDirection),
@@ -361,10 +405,10 @@ export function App(): JSX.Element {
     return counts;
   }, [filteredTraces]);
   const toolCallTypeCounts = useMemo(() => {
-    if (!page) return [];
+    if (filteredPageEvents.length === 0) return [];
     const countedCallKeys = new Set<string>();
     const counts = new Map<string, number>();
-    for (const event of page.events) {
+    for (const event of filteredPageEvents) {
       const normalizedToolType = event.toolType.trim();
       if (!normalizedToolType) continue;
       const normalizedToolCallId = event.toolCallId.trim();
@@ -376,7 +420,7 @@ export function App(): JSX.Element {
     return [...counts.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([toolType, count]) => ({ toolType, count }));
-  }, [page]);
+  }, [filteredPageEvents]);
   const toolCallTypeCountsPreview = toolCallTypeCounts.slice(0, 4);
   const hiddenToolCallTypeCount = Math.max(0, toolCallTypeCounts.length - toolCallTypeCountsPreview.length);
   const toolCallCountTotal = toolCallTypeCounts.reduce((sum, row) => sum + row.count, 0);
@@ -561,9 +605,48 @@ export function App(): JSX.Element {
     applyTimelineStripViewport(readTimelineStripViewport(scroller));
   }, [applyTimelineStripViewport]);
 
+  const toggleEventKindVisibility = useCallback((eventKind: EventKind): void => {
+    setVisibleEventKinds((prev) => {
+      const next = new Set(prev);
+      if (next.has(eventKind)) next.delete(eventKind);
+      else next.add(eventKind);
+      return next;
+    });
+  }, []);
+
+  const showAllEventKinds = useCallback((): void => {
+    setVisibleEventKinds(new Set(EVENT_KIND_OPTIONS));
+  }, []);
+
+  const resetEventKindsToDefault = useCallback((): void => {
+    setVisibleEventKinds(createDefaultVisibleEventKinds());
+  }, []);
+
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!isEventTypeFilterMenuOpen) return;
+
+    const onMouseDown = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (eventTypeFilterRef.current?.contains(target)) return;
+      setIsEventTypeFilterMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      setIsEventTypeFilterMenuOpen(false);
+    };
+
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isEventTypeFilterMenuOpen]);
 
   useEffect(() => {
     if (selectedId && traces.some((trace) => trace.id === selectedId)) return;
@@ -767,6 +850,12 @@ export function App(): JSX.Element {
         next.delete(id);
         return next;
       });
+      setSendingInputTraceIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       setStopErrorByTraceId((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
@@ -774,6 +863,18 @@ export function App(): JSX.Element {
         return next;
       });
       setOpenErrorByTraceId((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setInputErrorByTraceId((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setTraceInputByTraceId((prev) => {
         if (!(id in prev)) return prev;
         const next = { ...prev };
         delete next[id];
@@ -915,11 +1016,21 @@ export function App(): JSX.Element {
   }, [autoFollow, timelineStripEvents]);
 
   useEffect(() => {
+    if (!page) return;
+    setSelectedEventId((prev) => {
+      if (timelineEvents.length === 0) return "";
+      if (prev && timelineEvents.some((event) => event.eventId === prev)) return prev;
+      return timelineEvents[0]?.eventId ?? "";
+    });
+  }, [page, timelineEvents]);
+
+  useEffect(() => {
     const scroller = timelineStripRef.current;
     const currentCount = visibleTimelineEvents.length;
-    const hiddenCount = Math.max(0, (page?.events.length ?? 0) - currentCount);
+    const hiddenCount = Math.max(0, filteredPageEvents.length - currentCount);
     if (!selectedId || !page || !scroller) {
       previousTimelineTraceIdRef.current = selectedId;
+      previousTimelineFilterKeyRef.current = visibleEventKindKey;
       previousTimelineEventCountRef.current = currentCount;
       timelineHasOverflowRef.current = false;
       timelinePinnedStateRef.current = true;
@@ -930,13 +1041,15 @@ export function App(): JSX.Element {
       return;
     }
 
-    const isTraceChanged = previousTimelineTraceIdRef.current !== selectedId;
+    const isFilterChanged = previousTimelineFilterKeyRef.current !== visibleEventKindKey;
+    const isTraceChanged = previousTimelineTraceIdRef.current !== selectedId || isFilterChanged;
     const previousCount = isTraceChanged ? currentCount : previousTimelineEventCountRef.current;
     const appendedCount = isTraceChanged ? 0 : Math.max(0, currentCount - previousCount);
     const shouldAutoFollowToLatest = timelinePinnedToLatestRef.current;
     const nextViewport = readTimelineStripViewport(scroller);
 
     previousTimelineTraceIdRef.current = selectedId;
+    previousTimelineFilterKeyRef.current = visibleEventKindKey;
     previousTimelineEventCountRef.current = currentCount;
 
     if (isTraceChanged) {
@@ -973,11 +1086,12 @@ export function App(): JSX.Element {
     } else {
       setTimelineOffscreenAppendCount(0);
     }
-  }, [applyTimelineStripViewport, page, selectedId, visibleTimelineEvents.length]);
+  }, [applyTimelineStripViewport, filteredPageEvents.length, page, selectedId, visibleEventKindKey, visibleTimelineEvents.length]);
 
   useEffect(() => {
     if (!selectedId || !page) {
       previousAnimatedTraceIdRef.current = "";
+      previousAnimatedEventFilterKeyRef.current = visibleEventKindKey;
       previousPageEventIdsRef.current = new Set();
       clearEventAppendQueue();
       setVisibleEventIds(new Set());
@@ -985,12 +1099,14 @@ export function App(): JSX.Element {
       return;
     }
 
-    const currentEventIds = page.events.map((event) => event.eventId);
+    const currentEventIds = filteredPageEvents.map((event) => event.eventId);
     const currentEventIdSet = new Set(currentEventIds);
+    const isEventFilterChanged = previousAnimatedEventFilterKeyRef.current !== visibleEventKindKey;
     const isTraceChanged = previousAnimatedTraceIdRef.current !== selectedId;
     previousAnimatedTraceIdRef.current = selectedId;
+    previousAnimatedEventFilterKeyRef.current = visibleEventKindKey;
 
-    if (isTraceChanged) {
+    if (isTraceChanged || isEventFilterChanged) {
       previousPageEventIdsRef.current = currentEventIdSet;
       clearEventAppendQueue();
       setVisibleEventIds(currentEventIdSet);
@@ -1040,7 +1156,7 @@ export function App(): JSX.Element {
     if (appendedEventIds.length > 0) {
       enqueueEventsForAppendReveal(appendedEventIds);
     }
-  }, [clearEventAppendQueue, enqueueEventsForAppendReveal, page, selectedId]);
+  }, [clearEventAppendQueue, enqueueEventsForAppendReveal, filteredPageEvents, page, selectedId, visibleEventKindKey]);
 
   const centerEventInView = (target: HTMLElement): void => {
     const scroller = target.closest(".events-scroll");
@@ -1212,6 +1328,91 @@ export function App(): JSX.Element {
     }
   }, [flashHeaderStatus]);
 
+  const setTraceInput = useCallback((traceId: string, value: string): void => {
+    setTraceInputByTraceId((prev) => {
+      const current = prev[traceId] ?? "";
+      if (current === value) return prev;
+      return { ...prev, [traceId]: value };
+    });
+    setInputErrorByTraceId((prev) => {
+      if (!(traceId in prev)) return prev;
+      const next = { ...prev };
+      delete next[traceId];
+      return next;
+    });
+  }, []);
+
+  const sendTraceInput = useCallback(
+    async (traceId: string, inputValue: string): Promise<void> => {
+      const text = inputValue.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      if (!text.trim()) {
+        const errorMessage = "input text is required";
+        setInputErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
+        flashHeaderStatus(`Input failed: ${errorMessage}`);
+        return;
+      }
+
+      setSendingInputTraceIds((prev) => {
+        if (prev.has(traceId)) return prev;
+        const next = new Set(prev);
+        next.add(traceId);
+        return next;
+      });
+      setInputErrorByTraceId((prev) => {
+        if (!(traceId in prev)) return prev;
+        const next = { ...prev };
+        delete next[traceId];
+        return next;
+      });
+
+      try {
+        const response = await fetch(`${API}/api/trace/${encodeURIComponent(traceId)}/input`, {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            text,
+            submit: true,
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as InputTraceResponse;
+        if (!response.ok || payload.ok !== true) {
+          const errorMessage = payload.error?.trim() ? payload.error : `HTTP ${response.status}`;
+          setInputErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
+          flashHeaderStatus(`Input failed: ${errorMessage}`);
+          return;
+        }
+        const sentAtMs = Date.now();
+        setTraceInputByTraceId((prev) => {
+          if (!(traceId in prev)) return prev;
+          const latestValue = prev[traceId] ?? "";
+          if (latestValue !== inputValue) return prev;
+          const next = { ...prev };
+          delete next[traceId];
+          return next;
+        });
+        const inputStatus = payload.status?.trim() ?? "sent";
+        const detail = payload.message?.trim() ?? traceId;
+        flashHeaderStatus(`Input ${inputStatus}: ${detail}`);
+        setLastLiveUpdateMs(sentAtMs);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        setInputErrorByTraceId((prev) => ({ ...prev, [traceId]: errorMessage }));
+        flashHeaderStatus(`Input failed: ${errorMessage}`);
+      } finally {
+        setSendingInputTraceIds((prev) => {
+          if (!prev.has(traceId)) return prev;
+          const next = new Set(prev);
+          next.delete(traceId);
+          return next;
+        });
+      }
+    },
+    [flashHeaderStatus],
+  );
+
   return (
     <main className="shell">
       <header className="hero">
@@ -1313,12 +1514,17 @@ export function App(): JSX.Element {
                   isEntering={enteringTraceIds.has(trace.id)}
                   isOpening={openingTraceIds.has(trace.id)}
                   isStopping={stoppingTraceIds.has(trace.id)}
+                  isSendingInput={sendingInputTraceIds.has(trace.id)}
+                  inputValue={traceInputByTraceId[trace.id] ?? ""}
                   openError={openErrorByTraceId[trace.id] ?? ""}
                   stopError={stopErrorByTraceId[trace.id] ?? ""}
+                  inputError={inputErrorByTraceId[trace.id] ?? ""}
                   pulseSeq={pulseSeq}
                   nowMs={clockNowMs}
                   onSelect={setSelectedId}
                   onOpen={openTraceSession}
+                  onInputChange={setTraceInput}
+                  onInputSubmit={sendTraceInput}
                   onTogglePath={toggleTracePathExpanded}
                   onStop={stopTraceSession}
                   rowRef={bindTraceRowRef(trace.id)}
@@ -1394,14 +1600,43 @@ export function App(): JSX.Element {
                 </div>
               </div>
               <div className="detail-controls">
-                <label className="mono checkbox">
-                  <input
-                    type="checkbox"
-                    checked={includeMeta}
-                    onChange={(event) => setIncludeMeta(event.target.checked)}
-                  />
-                  include meta
-                </label>
+                <div className="event-kind-filter" ref={eventTypeFilterRef}>
+                  <button
+                    type="button"
+                    className="mono event-kind-filter-trigger"
+                    aria-haspopup="menu"
+                    aria-expanded={isEventTypeFilterMenuOpen}
+                    aria-controls="event-type-filter-menu"
+                    onClick={() => setIsEventTypeFilterMenuOpen((prev) => !prev)}
+                  >
+                    {eventTypeFilterLabel}
+                  </button>
+                  {isEventTypeFilterMenuOpen && (
+                    <div id="event-type-filter-menu" className="event-kind-filter-menu" role="menu">
+                      <div className="event-kind-filter-actions">
+                        <button type="button" className="mono event-kind-filter-action" onClick={showAllEventKinds}>
+                          show all
+                        </button>
+                        <button type="button" className="mono event-kind-filter-action" onClick={resetEventKindsToDefault}>
+                          default (hide meta)
+                        </button>
+                      </div>
+                      <div className="event-kind-filter-options">
+                        {EVENT_KIND_OPTIONS.map((eventKind) => (
+                          <label key={eventKind} className="mono checkbox event-kind-option" data-event-kind={eventKind}>
+                            <input
+                              type="checkbox"
+                              checked={visibleEventKinds.has(eventKind)}
+                              onChange={() => toggleEventKindVisibility(eventKind)}
+                            />
+                            <span className={`toc-dot kind-${kindClassSuffix(eventKind)}`} aria-hidden="true" />
+                            <span>{EVENT_KIND_LABEL_BY_KIND[eventKind]}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <label className="mono checkbox">
                   <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
                   auto follow

@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import type { SessionActivityStatus, TraceSummary } from "@agentlens/contracts";
 import { iconForAgent, pathTail } from "./view-model.js";
 
@@ -17,12 +18,17 @@ interface SessionTraceRowProps {
   isEntering: boolean;
   isOpening: boolean;
   isStopping: boolean;
+  isSendingInput: boolean;
+  inputValue: string;
   openError: string;
   stopError: string;
+  inputError: string;
   pulseSeq: number;
   nowMs: number;
   onSelect: (traceId: string) => void;
   onOpen: (traceId: string) => void;
+  onInputChange: (traceId: string, value: string) => void;
+  onInputSubmit: (traceId: string, value: string) => void;
   onTogglePath: (traceId: string) => void;
   onStop: (traceId: string) => void;
   rowRef: (node: HTMLDivElement | null) => void;
@@ -419,12 +425,17 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
     isEntering,
     isOpening,
     isStopping,
+    isSendingInput,
+    inputValue,
     openError,
     stopError,
+    inputError,
     pulseSeq,
     nowMs,
     onSelect,
     onOpen,
+    onInputChange,
+    onInputSubmit,
     onTogglePath,
     onStop,
     rowRef,
@@ -447,6 +458,7 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
   const activityHoverSections = buildActivityHoverSections(trace, activitySparkline, fmtTime);
   const compositionPie = buildCompositionPie(trace);
   const compositionTooltip = describeCompositionTooltip(compositionPie);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   return (
     <div
@@ -649,6 +661,49 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
             )}
           </span>
         </div>
+        <div
+          className="trace-input-row"
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <input
+            ref={inputRef}
+            type="text"
+            className="trace-input-field mono"
+            value={inputValue}
+            placeholder="Continue"
+            aria-label="Send input to session"
+            title="Send input to session"
+            disabled={isSendingInput}
+            onChange={(event) => onInputChange(trace.id, event.target.value)}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              onInputSubmit(trace.id, event.currentTarget.value);
+            }}
+          />
+          <button
+            type="button"
+            className={`trace-input-send-button mono ${isSendingInput ? "pending" : ""}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onInputSubmit(trace.id, inputRef.current?.value ?? inputValue);
+            }}
+            aria-label={isSendingInput ? "Sending session input" : "Send session input"}
+            title={isSendingInput ? "Sending session input..." : "Send session input"}
+            disabled={isSendingInput}
+          >
+            {isSendingInput ? "..." : "send"}
+          </button>
+        </div>
+        {inputError && (
+          <div className="trace-input-error mono" role="status">
+            {inputError}
+          </div>
+        )}
         {openError && (
           <div className="trace-open-error mono" role="status">
             {openError}
