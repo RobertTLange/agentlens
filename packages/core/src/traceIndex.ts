@@ -1062,7 +1062,17 @@ export class TraceIndex extends EventEmitter {
 
       const inferred = this.inferSourceMetadata(filePath);
       if (!inferred) return null;
-      if (inferred.agentHint === "opencode" ? !isJson : inferred.agentHint === "cursor" ? !isTxt : !isJsonl) return null;
+      const isCursorTranscript = isTxt || isJsonl;
+      const isGeminiSessionJson = /\/tmp\/[^/]+\/chats\/session-[^/]+\.json$/i.test(normalizedPath);
+      const matchesExpectedType =
+        inferred.agentHint === "opencode"
+          ? isJson
+          : inferred.agentHint === "cursor"
+            ? isCursorTranscript
+            : inferred.agentHint === "gemini"
+              ? isJsonl || isGeminiSessionJson
+              : isJsonl;
+      if (!matchesExpectedType) return null;
       const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
       return {
         id,

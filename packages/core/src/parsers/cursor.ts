@@ -6,7 +6,7 @@ import fg from "fast-glob";
 import type { ParseOutput, TraceParser } from "./types.js";
 import type { DiscoveredTraceFile } from "../discovery.js";
 import { asRecord, asString, compactText, normalizePreview, parseEpochMs } from "../utils.js";
-import { makeEvent } from "./common.js";
+import { extractTextBlocks, makeEvent, parseJsonLines } from "./common.js";
 
 type CursorRole = "user" | "assistant";
 
@@ -271,6 +271,48 @@ function makeSessionId(filePath: string): string {
   return path.basename(filePath, path.extname(filePath));
 }
 
+function parseCursorJsonlEvents(file: DiscoveredTraceFile, text: string, sessionId: string): ParseOutput["events"] {
+  const rows = parseJsonLines(text);
+  if (rows.length === 0) return [];
+
+  const events: ParseOutput["events"] = [];
+  let eventIndex = 1;
+  for (const row of rows) {
+    const payload = row.value;
+    const role = asString(payload.role).trim().toLowerCase();
+    const message = asRecord(payload.message);
+    const rawContent = message.content ?? payload.content;
+    const textBlocks = extractTextBlocks(rawContent);
+    const fallbackText = asString(message.text).trim() || asString(payload.text).trim();
+    const contentBlocks = textBlocks.length > 0 ? textBlocks : fallbackText ? [fallbackText] : [];
+    const joinedText = contentBlocks.join("\n").trim();
+    const preview = normalizePreview(joinedText || role || "cursor");
+    const eventKind = role === "user" ? "user" : "assistant";
+    const normalizedRole = role || (eventKind === "user" ? "user" : "assistant");
+
+    events.push(
+      makeEvent({
+        traceId: file.id,
+        index: eventIndex,
+        offset: row.offset,
+        timestampMs: null,
+        sessionId,
+        eventKind,
+        rawType: `cursor_jsonl_${eventKind}`,
+        role: normalizedRole,
+        preview,
+        textBlocks: contentBlocks,
+        tocLabel: preview,
+        searchChunks: [normalizedRole, joinedText],
+        raw: payload,
+      }),
+    );
+    eventIndex += 1;
+  }
+
+  return events;
+}
+
 export class CursorParser implements TraceParser {
   name = "cursor";
   agent = "cursor" as const;
@@ -283,6 +325,8 @@ export class CursorParser implements TraceParser {
     if (filePath.includes("/.cursor/")) confidence += 0.35;
     if (filePath.includes("/agent-transcripts/")) confidence += 0.35;
     if (filePath.endsWith(".txt")) confidence += 0.1;
+    if (filePath.endsWith(".jsonl")) confidence += 0.1;
+    if (head.includes("\"role\"") && head.includes("\"message\"")) confidence += 0.1;
     if (head.includes("\nuser:") || head.startsWith("user:")) confidence += 0.1;
     if (head.includes("\nassistant:") || head.startsWith("assistant:")) confidence += 0.1;
     if (head.includes("[tool call]") || head.includes("[thinking]")) confidence += 0.1;
@@ -291,10 +335,23 @@ export class CursorParser implements TraceParser {
   }
 
   parse(file: DiscoveredTraceFile, text: string): ParseOutput {
-    const blocks = splitRoleBlocks(text);
-    const events: ParseOutput["events"] = [];
     const sessionId = makeSessionId(file.path);
     const sessionMetadata = loadCursorSessionMetadata(file.path, sessionId);
+    const jsonlEvents = parseCursorJsonlEvents(file, text, sessionId);
+    if (jsonlEvents.length > 0) {
+      applyCursorEventTimestamps(jsonlEvents, sessionMetadata.createdAtMs, file.mtimeMs);
+      applyCursorEventModel(jsonlEvents, sessionMetadata.model);
+      return {
+        agent: "cursor",
+        parser: this.name,
+        sessionId,
+        events: jsonlEvents,
+        parseError: "",
+      };
+    }
+
+    const blocks = splitRoleBlocks(text);
+    const events: ParseOutput["events"] = [];
     const toolCallIdByName = new Map<string, string>();
     let eventIndex = 1;
 

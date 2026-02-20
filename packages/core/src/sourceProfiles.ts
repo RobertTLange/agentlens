@@ -40,7 +40,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
     name: "cursor_agent_transcripts",
     enabled: false,
     roots: ["~/.cursor/projects"],
-    includeGlobs: ["**/agent-transcripts/*.txt"],
+    includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
     excludeGlobs: [],
     maxDepth: 8,
     agentHint: "cursor",

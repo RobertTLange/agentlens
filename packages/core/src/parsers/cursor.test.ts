@@ -106,6 +106,34 @@ describe("CursorParser", () => {
     expect(output.parseError).toContain("missing role blocks");
   });
 
+  it("parses cursor jsonl transcript lines", () => {
+    const parser = new CursorParser();
+    const file = makeDiscoveredFile("/tmp/.cursor/projects/proj/agent-transcripts/session-jsonl-1.jsonl");
+    const text = [
+      JSON.stringify({
+        role: "user",
+        message: {
+          content: [{ type: "text", text: "<user_query>\nhello\n</user_query>" }],
+        },
+      }),
+      JSON.stringify({
+        role: "assistant",
+        message: {
+          content: [{ type: "text", text: "Hi Robert! Let's ship it." }],
+        },
+      }),
+    ].join("\n");
+
+    const output = parser.parse(file, text);
+    expect(output.agent).toBe("cursor");
+    expect(output.parser).toBe("cursor");
+    expect(output.sessionId).toBe("session-jsonl-1");
+    expect(output.parseError).toBe("");
+    expect(output.events.map((event) => event.eventKind)).toEqual(["user", "assistant"]);
+    expect(output.events[0]?.textBlocks.join("\n")).toContain("hello");
+    expect(output.events[1]?.preview).toContain("Let's ship it");
+  });
+
   it("hydrates cursor model and timestamps from chat metadata", async () => {
     if (!hasSqliteCli()) return;
 

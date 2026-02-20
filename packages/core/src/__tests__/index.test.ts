@@ -229,7 +229,7 @@ describe("trace index", () => {
           name: "cursor_agent_transcripts",
           enabled: true,
           roots: [path.join(root, ".cursor", "projects")],
-          includeGlobs: ["**/agent-transcripts/*.txt"],
+          includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
           excludeGlobs: [],
           maxDepth: 8,
           agentHint: "cursor",
@@ -408,7 +408,7 @@ describe("trace index", () => {
           name: "cursor_agent_transcripts",
           enabled: false,
           roots: [],
-          includeGlobs: ["**/agent-transcripts/*.txt"],
+          includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
           excludeGlobs: [],
           maxDepth: 8,
           agentHint: "cursor",
@@ -458,6 +458,151 @@ describe("trace index", () => {
     expect(toolUseEvent?.toolName).toBe("google_web_search");
     expect(toolUseEvent?.toolType).toBe("websearch");
     expect(toolResultEvent?.toolResultText).toContain("Cloudy");
+  });
+
+  it("indexes new gemini session json files via dirty refresh and ignores project logs.json", async () => {
+    const root = await createTempRoot();
+    const geminiHome = path.join(root, ".gemini");
+    const projectHash = "ab1a2dcf4db5d04597945f92d298533b91ee4b703c7cc87cfdd24ec5cdf55ab1";
+    const projectDir = path.join(geminiHome, "tmp", projectHash);
+    const chatsDir = path.join(projectDir, "chats");
+    await mkdir(chatsDir, { recursive: true });
+
+    const config = mergeConfig({
+      scan: {
+        mode: "adaptive",
+        intervalSeconds: 1,
+        intervalMinMs: 60,
+        intervalMaxMs: 200,
+        fullRescanIntervalMs: 600_000,
+        batchDebounceMs: 40,
+        recentEventWindow: 400,
+        includeMetaDefault: true,
+        statusRunningTtlMs: 300_000,
+        statusWaitingTtlMs: 900_000,
+      },
+      sessionLogDirectories: [{ directory: geminiHome, logType: "gemini" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_agent_transcripts: {
+          name: "cursor_agent_transcripts",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+        gemini_tmp: {
+          name: "gemini_tmp",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/chats/session-*.json", "**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "gemini",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.start();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(index.getSummaries()).toHaveLength(0);
+
+      const sessionId = "54bc8ff5-57e7-4741-8bbc-18125dc656d0";
+      const sessionPath = path.join(chatsDir, "session-2026-02-20T13-33-54bc8ff5.json");
+      await writeFile(
+        sessionPath,
+        JSON.stringify(
+          {
+            sessionId,
+            projectHash,
+            startTime: "2026-02-20T13:33:54.000Z",
+            lastUpdated: "2026-02-20T13:34:12.000Z",
+            messages: [
+              {
+                id: "u1",
+                timestamp: "2026-02-20T13:33:54.000Z",
+                type: "user",
+                content: [{ text: "hello" }],
+              },
+              {
+                id: "a1",
+                timestamp: "2026-02-20T13:33:55.000Z",
+                type: "gemini",
+                content: "hi there",
+                model: "gemini-3-flash-preview",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        const summary = index.getSummaries().find((item) => item.sessionId === sessionId);
+        if (summary) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      const geminiSummaries = index.getSummaries().filter((item) => item.agent === "gemini");
+      expect(geminiSummaries).toHaveLength(1);
+      expect(geminiSummaries[0]?.sessionId).toBe(sessionId);
+      expect(geminiSummaries[0]?.path.endsWith("/chats/session-2026-02-20T13-33-54bc8ff5.json")).toBe(true);
+
+      await writeFile(
+        path.join(projectDir, "logs.json"),
+        JSON.stringify([{ sessionId, messageId: 0, type: "user", message: "hi" }], null, 2),
+        "utf8",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 350));
+
+      const updatedGeminiSummaries = index.getSummaries().filter((item) => item.agent === "gemini");
+      expect(updatedGeminiSummaries).toHaveLength(1);
+      expect(updatedGeminiSummaries[0]?.path.endsWith("/logs.json")).toBe(false);
+    } finally {
+      index.stop();
+    }
   });
 
   it("parses opencode storage sessions with tool events and token metrics", async () => {
