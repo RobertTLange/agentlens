@@ -42,11 +42,11 @@ Default log + ingestion paths:
 | Agent | Default session log root (`sessionLogDirectories`) | Default AgentLens source(s) | Default ingestion path(s) |
 | --- | --- | --- | --- |
 | Codex | `~/.codex` | `sources.codex_home` (enabled) | `~/.codex/sessions/**/*.jsonl` |
-| Claude | `~/.claude` | `sources.claude_projects` (enabled), `sources.claude_history` (disabled) | `~/.claude/projects/**/*.jsonl`, `~/.claude/history.jsonl` |
-| Cursor | `~/.cursor` | `sources.cursor_agent_transcripts` (disabled) | `~/.cursor/projects/**/agent-transcripts/*.txt` |
-| Gemini | `~/.gemini` | `sources.gemini_tmp` (disabled) | `~/.gemini/tmp/**/chats/session-*.json`, `~/.gemini/tmp/**/*.jsonl` |
-| Pi | `~/.pi` | `sources.pi_agent_sessions` (disabled) | `~/.pi/agent/sessions/**/*.jsonl` |
-| OpenCode | `~/.local/share/opencode` | `sources.opencode_storage_session` (disabled) + OpenCode discovery fallbacks | `~/.local/share/opencode/storage/session/**/*.json`, `~/.local/share/opencode/storage/session_diff/**/*.json`, `~/.local/share/opencode/storage/opencode.db` |
+| Claude | `~/.claude` | `sources.claude_projects` (enabled), `sources.claude_history` (enabled) | `~/.claude/projects/**/*.jsonl`, `~/.claude/history.jsonl` |
+| Cursor | `~/.cursor` | `sources.cursor_agent_transcripts` (enabled) | `~/.cursor/projects/**/agent-transcripts/*.txt` |
+| Gemini | `~/.gemini` | `sources.gemini_tmp` (enabled) | `~/.gemini/tmp/**/chats/session-*.json`, `~/.gemini/tmp/**/*.jsonl` |
+| Pi | `~/.pi` | `sources.pi_agent_sessions` (enabled) | `~/.pi/agent/sessions/**/*.jsonl` |
+| OpenCode | `~/.local/share/opencode` | `sources.opencode_storage_session` (enabled) + OpenCode discovery fallbacks | `~/.local/share/opencode/storage/session/**/*.json`, `~/.local/share/opencode/storage/session_diff/**/*.json`, `~/.local/share/opencode/storage/opencode.db` |
 
 ## Activity Status Semantics
 
@@ -149,10 +149,14 @@ Common commands:
 ```bash
 agentlens --browser
 agentlens summary
+agentlens summary --llm
 agentlens summary --json --since 24h
-agentlens sessions list --limit 20
+agentlens sessions list --limit 50
+agentlens sessions list --llm --group-by recency --limit 50
 agentlens session latest --show-tools
+agentlens session latest --llm
 agentlens session <trace_id_or_session_id> --show-tools
+agentlens sessions events latest --llm --limit 100
 agentlens sessions events latest --follow --jsonl
 agentlens config get
 agentlens config set scan.intervalSeconds 1.5
@@ -161,6 +165,9 @@ agentlens config set scan.intervalSeconds 1.5
 Useful patterns:
 
 - Use `latest` for the most recently updated trace/session.
+- For LLM workflows, use: `summary --llm` -> `session <id> --llm` -> `sessions events <id> --llm`.
+- `sessions list` defaults to the most recent 50 sessions.
+- Use `sessions list --llm --group-by recency` to prioritize recent history (`today`, `last_7d`, `older`).
 - Use `sessions events ... --follow` for live terminal streaming.
 - Use JSON/JSONL flags (`--json`, `--jsonl`) for scripting pipelines.
 
