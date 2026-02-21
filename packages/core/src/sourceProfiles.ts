@@ -5,6 +5,7 @@ export const DEFAULT_SESSION_LOG_DIRECTORIES: SessionLogDirectoryConfig[] = [
   { directory: "~/.claude", logType: "claude" },
   { directory: "~/.cursor", logType: "cursor" },
   { directory: "~/.gemini", logType: "gemini" },
+  { directory: "~/.pi", logType: "pi" },
   { directory: "~/.local/share/opencode", logType: "opencode" },
 ];
 
@@ -62,6 +63,15 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
     excludeGlobs: [],
     maxDepth: 8,
     agentHint: "gemini",
+  },
+  pi_agent_sessions: {
+    name: "pi_agent_sessions",
+    enabled: false,
+    roots: ["~/.pi/agent/sessions"],
+    includeGlobs: ["**/*.jsonl"],
+    excludeGlobs: [],
+    maxDepth: 8,
+    agentHint: "pi",
   },
 };
 

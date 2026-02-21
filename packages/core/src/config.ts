@@ -44,6 +44,7 @@ function isAgentKind(value: string): value is AgentKind {
     value === "cursor" ||
     value === "opencode" ||
     value === "gemini" ||
+    value === "pi" ||
     value === "unknown"
   );
 }
@@ -70,7 +71,7 @@ function normalizeSessionLogDirectory(value: unknown): SessionLogDirectoryConfig
 
 function ensureDefaultSessionLogDirectory(
   entries: SessionLogDirectoryConfig[],
-  targetLogType: "cursor" | "gemini",
+  targetLogType: "cursor" | "gemini" | "pi",
   anchorTypes: AgentKind[],
 ): SessionLogDirectoryConfig[] {
   if (entries.some((entry) => entry.logType === targetLogType)) {
@@ -100,7 +101,8 @@ function ensureDefaultSessionLogDirectory(
 
 function ensureKnownSessionLogDirectories(entries: SessionLogDirectoryConfig[]): SessionLogDirectoryConfig[] {
   const withCursor = ensureDefaultSessionLogDirectory(entries, "cursor", ["codex", "claude", "opencode"]);
-  return ensureDefaultSessionLogDirectory(withCursor, "gemini", ["codex", "claude", "cursor", "opencode"]);
+  const withGemini = ensureDefaultSessionLogDirectory(withCursor, "gemini", ["codex", "claude", "cursor", "opencode"]);
+  return ensureDefaultSessionLogDirectory(withGemini, "pi", ["codex", "claude", "cursor", "opencode"]);
 }
 
 function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[]): SessionLogDirectoryConfig[] {
@@ -126,6 +128,7 @@ function mergeSessionLogDirectories(input?: unknown, legacyDirectories?: string[
         else if (normalized.includes(".claude")) logType = "claude";
         else if (normalized.includes(".cursor")) logType = "cursor";
         else if (normalized.includes(".gemini")) logType = "gemini";
+        else if (normalized.includes(".pi")) logType = "pi";
         else if (normalized.includes("opencode")) logType = "opencode";
         return { directory, logType };
       })

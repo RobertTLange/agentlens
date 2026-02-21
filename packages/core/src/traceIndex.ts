@@ -772,6 +772,12 @@ export class TraceIndex extends EventEmitter {
               ? hasPathSegment(baseRoot, "storage")
                 ? baseRoot
                 : path.join(baseRoot, "storage")
+              : entry.logType === "pi"
+                ? hasPathSegment(baseRoot, "sessions")
+                  ? baseRoot
+                  : hasPathSegment(baseRoot, "agent")
+                    ? path.join(baseRoot, "sessions")
+                    : path.join(baseRoot, "agent", "sessions")
             : baseRoot;
       dedup.add(watchRoot);
     }
@@ -1015,6 +1021,9 @@ export class TraceIndex extends EventEmitter {
       if (entry.logType === "opencode" && !normalizedPath.includes("/storage/session/") && !normalizedPath.includes("/storage/session_diff/")) {
         continue;
       }
+      if (entry.logType === "pi" && !normalizedPath.includes("/agent/sessions/")) {
+        continue;
+      }
       return {
         sourceProfile: "session_log",
         agentHint: entry.logType,
@@ -1071,6 +1080,8 @@ export class TraceIndex extends EventEmitter {
             ? isCursorTranscript
             : inferred.agentHint === "gemini"
               ? isJsonl || isGeminiSessionJson
+              : inferred.agentHint === "pi"
+                ? isJsonl && normalizedPath.includes("/agent/sessions/")
               : isJsonl;
       if (!matchesExpectedType) return null;
       const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
