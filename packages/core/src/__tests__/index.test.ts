@@ -17,6 +17,7 @@ describe("trace index", () => {
       { directory: "~/.claude", logType: "claude" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.pi", logType: "pi" },
       { directory: "~/.local/share/opencode", logType: "opencode" },
     ]);
   });
@@ -33,10 +34,11 @@ describe("trace index", () => {
       { directory: "~/custom-logs", logType: "unknown" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.pi", logType: "pi" },
     ]);
   });
 
-  it("auto-injects cursor and gemini session directories for legacy typed configs", () => {
+  it("auto-injects cursor, gemini, and pi session directories for legacy typed configs", () => {
     const config = mergeConfig({
       sessionLogDirectories: [
         { directory: "~/.codex", logType: "codex" },
@@ -48,6 +50,7 @@ describe("trace index", () => {
       { directory: "~/.claude", logType: "claude" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.pi", logType: "pi" },
     ]);
   });
 
@@ -600,6 +603,230 @@ describe("trace index", () => {
       const updatedGeminiSummaries = index.getSummaries().filter((item) => item.agent === "gemini");
       expect(updatedGeminiSummaries).toHaveLength(1);
       expect(updatedGeminiSummaries[0]?.path.endsWith("/logs.json")).toBe(false);
+    } finally {
+      index.stop();
+    }
+  });
+
+  it("indexes pi sessions via dirty refresh and derives pi metrics from usage", async () => {
+    const root = await createTempRoot();
+    const piHome = path.join(root, ".pi");
+    const sessionsDir = path.join(
+      piHome,
+      "agent",
+      "sessions",
+      "--Users-rob-Dropbox-2026_sakana-agentlens--",
+    );
+    await mkdir(sessionsDir, { recursive: true });
+
+    const config = mergeConfig({
+      scan: {
+        mode: "adaptive",
+        intervalSeconds: 1,
+        intervalMinMs: 60,
+        intervalMaxMs: 200,
+        fullRescanIntervalMs: 600_000,
+        batchDebounceMs: 40,
+        recentEventWindow: 400,
+        includeMetaDefault: true,
+        statusRunningTtlMs: 300_000,
+        statusWaitingTtlMs: 900_000,
+      },
+      sessionLogDirectories: [{ directory: piHome, logType: "pi" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_agent_transcripts: {
+          name: "cursor_agent_transcripts",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+        gemini_tmp: {
+          name: "gemini_tmp",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/chats/session-*.json", "**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "gemini",
+        },
+        pi_agent_sessions: {
+          name: "pi_agent_sessions",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "pi",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.start();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(index.getSummaries()).toHaveLength(0);
+
+      const sessionId = "21e08b85-59b6-4acb-9811-a9dead258501";
+      const sessionPath = path.join(sessionsDir, `2026-02-21T09-48-03-994Z_${sessionId}.jsonl`);
+      await writeFile(
+        sessionPath,
+        [
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: sessionId,
+            timestamp: "2026-02-21T09:48:03.994Z",
+            cwd: "/Users/rob/Dropbox/2026_sakana/agentlens",
+          }),
+          JSON.stringify({
+            type: "message",
+            id: "msg_user_1",
+            timestamp: "2026-02-21T09:48:07.077Z",
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "hi there" }],
+              timestamp: 1771667287065,
+            },
+          }),
+          JSON.stringify({
+            type: "message",
+            id: "msg_assistant_1",
+            timestamp: "2026-02-21T09:48:10.749Z",
+            message: {
+              role: "assistant",
+              content: [
+                { type: "text", text: "Let me check using a tool." },
+                { type: "thinking", thinking: "Need to call bash for this." },
+                { type: "toolCall", id: "toolu_1", name: "bash", arguments: { command: "echo hi" } },
+              ],
+              model: "global.anthropic.claude-opus-4-6-v1",
+              usage: {
+                input: 4030,
+                output: 43,
+                cacheRead: 0,
+                cacheWrite: 0,
+                totalTokens: 4073,
+                cost: { total: 0.021225 },
+              },
+            },
+          }),
+          JSON.stringify({
+            type: "message",
+            id: "msg_tool_result_1",
+            timestamp: "2026-02-21T09:48:11.488Z",
+            message: {
+              role: "toolResult",
+              toolCallId: "toolu_1",
+              toolName: "bash",
+              content: [{ type: "text", text: "hi" }],
+              isError: false,
+            },
+          }),
+        ].join("\n"),
+        "utf8",
+      );
+
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        const summary = index.getSummaries().find((item) => item.sessionId === sessionId);
+        if (summary) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      const summary = index.getSummaries().find((item) => item.sessionId === sessionId);
+      expect(summary?.agent).toBe("pi");
+      expect(summary?.parser).toBe("pi");
+      expect(summary?.toolUseCount).toBe(1);
+      expect(summary?.toolResultCount).toBe(1);
+      expect(summary?.tokenTotals).toMatchObject({
+        inputTokens: 4030,
+        outputTokens: 43,
+        cachedReadTokens: 0,
+        cachedCreateTokens: 0,
+        totalTokens: 4073,
+      });
+      expect(summary?.costEstimateUsd).toBeCloseTo(0.021225, 6);
+
+      const initialEventCount = summary?.eventCount ?? 0;
+      await appendFile(
+        sessionPath,
+        `\n${JSON.stringify({
+          type: "message",
+          id: "msg_assistant_2",
+          timestamp: "2026-02-21T09:48:13.795Z",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Done." }],
+            model: "global.anthropic.claude-opus-4-6-v1",
+            usage: {
+              input: 1,
+              output: 33,
+              cacheRead: 0,
+              cacheWrite: 4180,
+              totalTokens: 4214,
+              cost: { total: 0.026955 },
+            },
+          },
+        })}`,
+        "utf8",
+      );
+
+      const growthDeadline = Date.now() + 4000;
+      while (Date.now() < growthDeadline) {
+        const next = index.getSummaries().find((item) => item.sessionId === sessionId);
+        if ((next?.eventCount ?? 0) > initialEventCount) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      const updated = index.getSummaries().find((item) => item.sessionId === sessionId);
+      expect((updated?.eventCount ?? 0) > initialEventCount).toBe(true);
+      expect(updated?.costEstimateUsd).toBeCloseTo(0.04818, 6);
+      expect(updated?.tokenTotals).toMatchObject({
+        inputTokens: 4031,
+        outputTokens: 76,
+        cachedCreateTokens: 4180,
+        totalTokens: 8287,
+      });
     } finally {
       index.stop();
     }

@@ -12,6 +12,7 @@ import {
   geminiProjectHashesFromCwd,
   geminiProjectKeyFromTracePath,
   geminiProjectSlugsFromCwd,
+  inferSessionCwd,
   matchesCurrentUser,
   parseTmuxClients,
   resolveDefaultWebDistPath,
@@ -167,6 +168,18 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
 }
 
 describe("server api", () => {
+  it("infers session cwd from both session_meta and session events", async () => {
+    const codexDetail = {
+      events: [{ rawType: "session_meta", raw: { payload: { cwd: " /tmp/codex " } } }],
+    } as unknown as Parameters<typeof inferSessionCwd>[0];
+    const piDetail = {
+      events: [{ rawType: "session", raw: { cwd: " /tmp/pi " } }],
+    } as unknown as Parameters<typeof inferSessionCwd>[0];
+
+    expect(inferSessionCwd(codexDetail)).toBe("/tmp/codex");
+    expect(inferSessionCwd(piDetail)).toBe("/tmp/pi");
+  });
+
   it("matches process owner by username and numeric uid", async () => {
     expect(matchesCurrentUser("rob", { username: "rob", uid: "501" })).toBe(true);
     expect(matchesCurrentUser("501", { username: "rob", uid: "501" })).toBe(true);
@@ -666,6 +679,60 @@ describe("server api", () => {
     );
 
     expect(selected).toEqual([6322]);
+  });
+
+  it("falls back to pi session-id matching with strict pi command detection", async () => {
+    const sessionId = "21e08b85-59b6-4acb-9811-a9dead258501";
+    const selected = selectAgentProcessPidsBySessionId(
+      sessionId,
+      "pi",
+      [
+        {
+          pid: 68074,
+          user: "rob",
+          args: "pi --resume 21e08b85-59b6-4acb-9811-a9dead258501",
+        },
+        {
+          pid: 68075,
+          user: "rob",
+          args: "bash /tmp/run.sh --agent pi --resume 21e08b85-59b6-4acb-9811-a9dead258501",
+        },
+      ],
+      { username: "rob", uid: "501" },
+      1000,
+    );
+
+    expect(selected).toEqual([68074]);
+  });
+
+  it("matches pi open-file candidates only when process args resolve to pi command", async () => {
+    const sessionId = "21e08b85-59b6-4acb-9811-a9dead258501";
+    const selected = selectOpenFileProcessPids({
+      summary: {
+        agent: "pi",
+        sessionId,
+      },
+      openFileProcesses: [
+        {
+          pid: 7001,
+          command: "bash",
+          user: "rob",
+        },
+        {
+          pid: 7002,
+          command: "npx",
+          user: "rob",
+        },
+      ],
+      argsByPid: new Map<number, string>([
+        [7001, "bash /tmp/run.sh --agent pi --resume 21e08b85-59b6-4acb-9811-a9dead258501"],
+        [7002, "npx --yes @mariozechner/pi-coding-agent --resume 21e08b85-59b6-4acb-9811-a9dead258501"],
+      ]),
+      identity: { username: "rob", uid: "501" },
+      requesterPid: 1000,
+    });
+
+    expect(selected).toEqual([7002]);
   });
 
   it("selects cursor fallback process by matching cursor transcript project key", async () => {

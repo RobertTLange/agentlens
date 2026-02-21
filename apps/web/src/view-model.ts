@@ -18,6 +18,7 @@ const AGENT_ICON_BY_KIND: Record<AgentKind, string | null> = {
   cursor: "/icons/cursor.jpeg",
   opencode: "/icons/opencode.png",
   gemini: "/icons/gemini.svg",
+  pi: "/icons/pi.png",
   unknown: null,
 };
 

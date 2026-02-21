@@ -8,6 +8,7 @@ import { CursorParser } from "./cursor.js";
 import { GeminiParser } from "./gemini.js";
 import { GenericParser } from "./generic.js";
 import { OpencodeParser } from "./opencode.js";
+import { PiParser } from "./pi.js";
 
 export class ParserRegistry {
   private readonly parsers: TraceParser[];
@@ -19,6 +20,7 @@ export class ParserRegistry {
       new CursorParser(),
       new OpencodeParser(),
       new GeminiParser(),
+      new PiParser(),
       new GenericParser(),
     ];
   }

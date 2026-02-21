@@ -33,6 +33,7 @@ describe("config", () => {
       ),
     ).toBe(true);
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
+    expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.pi", logType: "pi" });
   });
 
   it("infers gemini log type from legacy sessionJsonlDirectories paths", () => {
@@ -45,7 +46,17 @@ describe("config", () => {
     ]);
   });
 
-  it("auto-injects gemini directory for legacy typed sessionLogDirectories", () => {
+  it("infers pi log type from legacy sessionJsonlDirectories paths", () => {
+    const config = mergeConfig({
+      sessionJsonlDirectories: ["~/.pi/agent/sessions", "~/logs/other"],
+    });
+    expect(config.sessionLogDirectories).toEqual([
+      { directory: "~/.pi/agent/sessions", logType: "pi" },
+      { directory: "~/logs/other", logType: "unknown" },
+    ]);
+  });
+
+  it("auto-injects gemini and pi directories for legacy typed sessionLogDirectories", () => {
     const config = mergeConfig({
       sessionLogDirectories: [
         { directory: "~/.codex", logType: "codex" },
@@ -58,6 +69,7 @@ describe("config", () => {
       { directory: "~/.claude", logType: "claude" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.pi", logType: "pi" },
     ]);
   });
 

@@ -98,6 +98,15 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
       }
       return ["storage/session/**/*.json"];
     }
+    if (logType === "pi") {
+      if (hasPathSegment(root, "sessions")) {
+        return ["**/*.jsonl"];
+      }
+      if (hasPathSegment(root, "agent")) {
+        return ["sessions/**/*.jsonl"];
+      }
+      return ["agent/sessions/**/*.jsonl"];
+    }
     return ["**/*.jsonl"];
   };
 
