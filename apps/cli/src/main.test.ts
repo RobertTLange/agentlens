@@ -55,6 +55,42 @@ function buildFixtureConfig(codexSessionsRoot: string) {
         maxDepth: 8,
         agentHint: "claude",
       },
+      cursor_agent_transcripts: {
+        name: "cursor_agent_transcripts",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "cursor",
+      },
+      opencode_storage_session: {
+        name: "opencode_storage_session",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.json"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "opencode",
+      },
+      gemini_tmp: {
+        name: "gemini_tmp",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/chats/session-*.json", "**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "gemini",
+      },
+      pi_agent_sessions: {
+        name: "pi_agent_sessions",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "pi",
+      },
     },
   });
 }
@@ -181,6 +217,85 @@ async function buildEmptyFixture(): Promise<{ configPath: string }> {
   const configPath = path.join(root, "config.toml");
   await saveConfig(config, configPath);
   return { configPath };
+}
+
+async function buildManySessionsFixture(count: number): Promise<{ configPath: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-cli-many-"));
+  const codexRoot = path.join(root, ".codex", "sessions", "2026", "02", "11");
+  await mkdir(codexRoot, { recursive: true });
+
+  const now = Date.now();
+  for (let index = 0; index < count; index += 1) {
+    const sessionId = `cli-many-${String(index).padStart(3, "0")}`;
+    const timestamp = new Date(now - index * 60_000).toISOString();
+    await writeFile(
+      path.join(codexRoot, `${sessionId}.jsonl`),
+      [
+        JSON.stringify({
+          timestamp,
+          type: "session_meta",
+          payload: { id: sessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp,
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: `hello ${index}` }],
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+  }
+
+  const config = buildFixtureConfig(path.join(root, ".codex", "sessions"));
+  const configPath = path.join(root, "config.toml");
+  await saveConfig(config, configPath);
+  return { configPath };
+}
+
+async function buildRecencyFixture(): Promise<{ configPath: string; newestSessionId: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-cli-recency-"));
+  const codexRoot = path.join(root, ".codex", "sessions", "2026", "02", "11");
+  await mkdir(codexRoot, { recursive: true });
+
+  const now = Date.now();
+  const rows = [
+    { sessionId: "cli-recency-today", timestampMs: now - 2 * 60 * 60 * 1000 },
+    { sessionId: "cli-recency-week", timestampMs: now - 2 * 24 * 60 * 60 * 1000 },
+    { sessionId: "cli-recency-old", timestampMs: now - 10 * 24 * 60 * 60 * 1000 },
+  ];
+
+  for (const row of rows) {
+    const timestamp = new Date(row.timestampMs).toISOString();
+    await writeFile(
+      path.join(codexRoot, `${row.sessionId}.jsonl`),
+      [
+        JSON.stringify({
+          timestamp,
+          type: "session_meta",
+          payload: { id: row.sessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp,
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: `message ${row.sessionId}` }],
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+  }
+
+  const config = buildFixtureConfig(path.join(root, ".codex", "sessions"));
+  const configPath = path.join(root, "config.toml");
+  await saveConfig(config, configPath);
+  return { configPath, newestSessionId: rows[0]?.sessionId ?? "cli-recency-today" };
 }
 
 function runCli(args: string[]): string {
@@ -378,6 +493,46 @@ describe("cli", () => {
     expect(eventLines.length).toBe(2);
     const parsed = JSON.parse(eventLines[0] ?? "{}") as { index?: number };
     expect(parsed.index).toBeTypeOf("number");
+  });
+
+  it("renders deterministic llm summary/session/events tables for chained agent calls", async () => {
+    const fixture = await buildFixture();
+
+    const summaryLlm = runCli(["--config", fixture.configPath, "summary", "--llm"]);
+    expect(summaryLlm).toContain("## overview");
+    expect(summaryLlm).toContain("## by_status");
+    expect(summaryLlm).toContain("## candidate_sessions");
+    expect(summaryLlm).toContain("trace_id");
+    expect(summaryLlm).toContain(fixture.sessionId);
+
+    const sessionLlm = runCli(["--config", fixture.configPath, "session", fixture.sessionId, "--llm"]);
+    expect(sessionLlm).toContain("## session_summary");
+    expect(sessionLlm).toContain("## next_calls");
+    expect(sessionLlm).toContain("agentlens sessions events");
+
+    const eventsLlm = runCli(["--config", fixture.configPath, "sessions", "events", fixture.sessionId, "--llm", "--limit", "3"]);
+    expect(eventsLlm).toContain("## events");
+    expect(eventsLlm).toMatch(/idx\s+\|\s+kind\s+\|\s+time\s+\|\s+tool\s+\|\s+call_id\s+\|\s+preview/);
+  });
+
+  it("uses default sessions list limit of 50", async () => {
+    const fixture = await buildManySessionsFixture(55);
+    const list = JSON.parse(runCli(["--config", fixture.configPath, "sessions", "list", "--json"])) as Array<{
+      id: string;
+      sessionId: string;
+    }>;
+    expect(list.length).toBe(50);
+  });
+
+  it("supports llm recency grouping for historical sessions", async () => {
+    const fixture = await buildRecencyFixture();
+    const grouped = runCli(["--config", fixture.configPath, "sessions", "list", "--llm", "--group-by", "recency"]);
+    expect(grouped).toContain("## today");
+    expect(grouped).toContain("## last_7d");
+    expect(grouped).toContain("## older");
+    expect(grouped).toContain("cli-recency-today");
+    expect(grouped).toContain("cli-recency-week");
+    expect(grouped).toContain("cli-recency-old");
   });
 
   it("supports latest alias for session/show/events commands", async () => {
