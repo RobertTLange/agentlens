@@ -5,8 +5,8 @@
 <h1 align="center">AgentLens</h1>
 
 <p align="center">
-  <strong>Local observability for Codex, Claude, Cursor, Gemini, and OpenCode sessions.</strong><br />
-  Inspect Codex, Claude, Cursor, Gemini, and OpenCode traces in a live web UI, CLI, and HTTP API.
+  <strong>Local observability for Codex, Claude, Cursor, Gemini, Pi, and OpenCode sessions.</strong><br />
+  Inspect Codex, Claude, Cursor, Gemini, Pi, and OpenCode traces in a live web UI, CLI, and HTTP API.
 </p>
 
 <p align="center">
@@ -25,14 +25,15 @@ It is designed for local analysis: no hosted backend required.
 
 ## Key Capabilities
 
-- Unified ingestion for Codex, Claude, Cursor, Gemini, and OpenCode logs.
+- Unified ingestion for Codex, Claude, Cursor, Gemini, Pi, and OpenCode logs.
 - Cursor agent-transcript ingestion from `~/.cursor/projects/**/agent-transcripts/*.txt`.
 - Gemini chat ingestion from `~/.gemini/tmp/**/chats/session-*.json` and `~/.gemini/tmp/**/*.jsonl`.
+- Pi session ingestion from `~/.pi/agent/sessions/**/*.jsonl`.
 - OpenCode integration for `storage/session`, `storage/session_diff`, and `opencode.db` fallback data.
 - Normalized event model across agents (`user`, `assistant`, `reasoning`, `tool_use`, `tool_result`, `meta`, `system`).
 - Real-time stream updates for newly discovered traces and appended events.
 - Deep tool-call visibility with argument/result text and unmatched tool I/O detection.
-- Stop active Codex/Claude/Cursor/Gemini/OpenCode session processes from the web UI session row control.
+- Stop active Codex/Claude/Cursor/Gemini/Pi/OpenCode session processes from the web UI session row control.
 - Triage metrics out of the box: traces, sessions, events, errors, event-kind distribution, and top tools.
 - Three interfaces over one core index: browser UI, CLI, and HTTP API.
 
@@ -44,6 +45,7 @@ Default log + ingestion paths:
 | Claude | `~/.claude` | `sources.claude_projects` (enabled), `sources.claude_history` (disabled) | `~/.claude/projects/**/*.jsonl`, `~/.claude/history.jsonl` |
 | Cursor | `~/.cursor` | `sources.cursor_agent_transcripts` (disabled) | `~/.cursor/projects/**/agent-transcripts/*.txt` |
 | Gemini | `~/.gemini` | `sources.gemini_tmp` (disabled) | `~/.gemini/tmp/**/chats/session-*.json`, `~/.gemini/tmp/**/*.jsonl` |
+| Pi | `~/.pi` | `sources.pi_agent_sessions` (disabled) | `~/.pi/agent/sessions/**/*.jsonl` |
 | OpenCode | `~/.local/share/opencode` | `sources.opencode_storage_session` (disabled) + OpenCode discovery fallbacks | `~/.local/share/opencode/storage/session/**/*.json`, `~/.local/share/opencode/storage/session_diff/**/*.json`, `~/.local/share/opencode/storage/opencode.db` |
 
 ## Activity Status Semantics
@@ -84,7 +86,7 @@ detailLoadMode = "lazy_from_disk"
 ## Architecture
 
 ```text
-Local agent logs (~/.codex, ~/.claude, ~/.cursor, ~/.gemini, ~/.local/share/opencode)
+Local agent logs (~/.codex, ~/.claude, ~/.cursor, ~/.gemini, ~/.pi, ~/.local/share/opencode)
   -> @agentlens/core (discovery + parsing + indexing)
   -> @agentlens/server (Fastify API + SSE + static web hosting)
   -> apps/web (React UI) and apps/cli (terminal workflows)

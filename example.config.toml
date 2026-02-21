@@ -26,6 +26,7 @@ sessionLogDirectories = [
   { directory = "~/.claude", logType = "claude" },
   { directory = "~/.cursor", logType = "cursor" },
   { directory = "~/.gemini", logType = "gemini" },
+  { directory = "~/.pi", logType = "pi" },
   { directory = "~/.local/share/opencode", logType = "opencode" }
 ]
 
@@ -82,6 +83,15 @@ includeGlobs = ["**/chats/session-*.json", "**/*.jsonl"]
 excludeGlobs = []
 maxDepth = 8
 agentHint = "gemini"
+
+[sources.pi_agent_sessions]
+name = "pi_agent_sessions"
+enabled = false
+roots = ["~/.pi/agent/sessions"]
+includeGlobs = ["**/*.jsonl"]
+excludeGlobs = []
+maxDepth = 8
+agentHint = "pi"
 
 [traceInspector]
 includeMetaDefault = false
