@@ -34,6 +34,18 @@ describe("config", () => {
     ).toBe(true);
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.pi", logType: "pi" });
+    const defaultEnabledSources = [
+      "codex_home",
+      "claude_projects",
+      "claude_history",
+      "cursor_agent_transcripts",
+      "opencode_storage_session",
+      "gemini_tmp",
+      "pi_agent_sessions",
+    ] as const;
+    for (const sourceName of defaultEnabledSources) {
+      expect(config.sources[sourceName]?.enabled).toBe(true);
+    }
   });
 
   it("infers gemini log type from legacy sessionJsonlDirectories paths", () => {
@@ -71,6 +83,29 @@ describe("config", () => {
       { directory: "~/.gemini", logType: "gemini" },
       { directory: "~/.pi", logType: "pi" },
     ]);
+  });
+
+  it("keeps unspecified default sources disabled when explicit sources config is provided", () => {
+    const config = mergeConfig({
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: ["~/tmp/codex"],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+      },
+    });
+    expect(config.sources.codex_home?.enabled).toBe(true);
+    expect(config.sources.claude_projects?.enabled).toBe(false);
+    expect(config.sources.claude_history?.enabled).toBe(false);
+    expect(config.sources.cursor_agent_transcripts?.enabled).toBe(false);
+    expect(config.sources.opencode_storage_session?.enabled).toBe(false);
+    expect(config.sources.gemini_tmp?.enabled).toBe(false);
+    expect(config.sources.pi_agent_sessions?.enabled).toBe(false);
   });
 
   it("loads new nested sections from TOML", async () => {

@@ -30,7 +30,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
   },
   claude_history: {
     name: "claude_history",
-    enabled: false,
+    enabled: true,
     roots: ["~/.claude"],
     includeGlobs: ["history.jsonl"],
     excludeGlobs: [],
@@ -39,7 +39,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
   },
   cursor_agent_transcripts: {
     name: "cursor_agent_transcripts",
-    enabled: false,
+    enabled: true,
     roots: ["~/.cursor/projects"],
     includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
     excludeGlobs: [],
@@ -48,7 +48,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
   },
   opencode_storage_session: {
     name: "opencode_storage_session",
-    enabled: false,
+    enabled: true,
     roots: ["~/.local/share/opencode/storage/session"],
     includeGlobs: ["**/*.json"],
     excludeGlobs: [],
@@ -57,7 +57,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
   },
   gemini_tmp: {
     name: "gemini_tmp",
-    enabled: false,
+    enabled: true,
     roots: ["~/.gemini/tmp"],
     includeGlobs: ["**/chats/session-*.json", "**/*.jsonl"],
     excludeGlobs: [],
@@ -66,7 +66,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
   },
   pi_agent_sessions: {
     name: "pi_agent_sessions",
-    enabled: false,
+    enabled: true,
     roots: ["~/.pi/agent/sessions"],
     includeGlobs: ["**/*.jsonl"],
     excludeGlobs: [],
