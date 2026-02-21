@@ -189,12 +189,18 @@ function asSessionCwd(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function inferSessionCwd(detail: SessionDetail): string {
+export function inferSessionCwd(detail: SessionDetail): string {
   for (const event of detail.events) {
-    if (event.rawType !== "session_meta") continue;
-    const rawPayload = (event.raw as { payload?: unknown }).payload;
-    if (!rawPayload || typeof rawPayload !== "object") continue;
-    const cwd = asSessionCwd((rawPayload as { cwd?: unknown }).cwd);
+    if (event.rawType !== "session_meta" && event.rawType !== "session") continue;
+    const rawRecord = event.raw as { payload?: unknown; cwd?: unknown };
+    const rawPayload = rawRecord.payload;
+    let cwd = "";
+    if (rawPayload && typeof rawPayload === "object") {
+      cwd = asSessionCwd((rawPayload as { cwd?: unknown }).cwd);
+    }
+    if (!cwd) {
+      cwd = asSessionCwd(rawRecord.cwd);
+    }
     if (cwd) return cwd;
   }
   return "";
@@ -641,6 +647,23 @@ function normalizeCommand(command: string): string {
   return command.trim().toLowerCase();
 }
 
+function isPiCommand(command: string): boolean {
+  const normalized = normalizeCommand(command);
+  if (!normalized) return false;
+
+  const firstToken = normalized.split(/\s+/, 1)[0] ?? "";
+  const firstBaseName = firstToken.split("/").at(-1) ?? firstToken;
+  if (firstBaseName === "pi") return true;
+
+  if (/\bexec\s+(?:\S*\/)?pi(?:\s|$)/.test(normalized)) return true;
+  if (/\b(?:node|bun|deno)\b\s+\S*\/pi(?:\s|$)/.test(normalized)) return true;
+  if (/\b(?:node|bun|deno)\b\s+\S*pi-coding-agent\S*/.test(normalized)) return true;
+  if (/\bnpx\b[\s\S]*@mariozechner\/pi-coding-agent\b/.test(normalized)) return true;
+  if (/\bpi-coding-agent\b/.test(normalized)) return true;
+
+  return false;
+}
+
 function isOpenCodeServeCommand(command: string): boolean {
   const normalized = normalizeCommand(command);
   if (!normalized) return false;
@@ -660,6 +683,7 @@ function commandMatchesAgent(command: string, agent: TraceSummary["agent"]): boo
   if (agent === "claude") return /\bclaude\b/.test(normalized);
   if (agent === "cursor") return /\bcursor\b/.test(normalized);
   if (agent === "gemini") return /\bgemini\b/.test(normalized);
+  if (agent === "pi") return isPiCommand(normalized);
   if (agent === "opencode") return /\bopencode\b/.test(normalized);
   return false;
 }
@@ -1547,6 +1571,9 @@ async function resolveSessionProcessPids(
     if (matchedPids.length > 0) {
       matchedPids = await excludeOpenCodeServePids(matchedPids);
     }
+  }
+  if (matchedPids.length === 0 && summary.agent === "pi") {
+    matchedPids = await findAgentProcessPidsBySessionId(summary.sessionId, "pi", identity, requesterPid);
   }
   if (matchedPids.length === 0 && sessionCwd) {
     matchedPids = await findAgentProjectProcessPids(
