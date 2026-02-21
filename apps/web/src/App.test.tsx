@@ -1,6 +1,6 @@
 /* @vitest-environment happy-dom */
 
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import type { EventKind, NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.js";
@@ -259,6 +259,14 @@ function getTraceInputSendButton(id: string): HTMLButtonElement {
   return button;
 }
 
+function getOlderTracesToggle(): HTMLButtonElement {
+  const button = document.querySelector(".older-traces-toggle");
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error("missing older sessions toggle");
+  }
+  return button;
+}
+
 function getTimelineStripPanel(): HTMLElement {
   const panel = document.querySelector(".timeline-strip-panel");
   if (!panel) throw new Error("missing timeline strip panel");
@@ -309,6 +317,14 @@ function setTimelineStripMetrics(
   Object.defineProperty(scroller, "clientWidth", { configurable: true, value: metrics.clientWidth });
   Object.defineProperty(scroller, "scrollWidth", { configurable: true, value: metrics.scrollWidth });
   Object.defineProperty(scroller, "scrollLeft", { configurable: true, writable: true, value: metrics.scrollLeft });
+}
+
+function flushRafQueue(): void {
+  act(() => {
+    for (const callback of rafQueue.splice(0)) {
+      callback(0);
+    }
+  });
 }
 
 function installTimelineStripScrollTo(scroller: HTMLDivElement) {
@@ -449,6 +465,60 @@ describe("App sessions list live motion", () => {
     expect(document.querySelector("footer")).toBeNull();
   });
 
+  it("renders only the newest 20 sessions by default and gates older sessions behind a toggle", async () => {
+    const manyTraces = Array.from({ length: 25 }, (_, index) => {
+      const suffix = String(index).padStart(2, "0");
+      return makeTrace(`trace-${suffix}`, 1_000 + index * 1_000);
+    });
+    tracesById = Object.fromEntries(manyTraces.map((trace) => [trace.id, trace]));
+    overview = makeOverview(manyTraces.length);
+    tracePagesById = Object.fromEntries(manyTraces.map((trace) => [trace.id, makeTracePage(trace)]));
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(20));
+
+    const toggle = getOlderTracesToggle();
+    expect(toggle.textContent).toContain("Show older sessions (5)");
+
+    const visibleSessionNames = Array.from(document.querySelectorAll(".trace-session-name")).map((node) =>
+      node.textContent?.trim(),
+    );
+    expect(visibleSessionNames[0]).toBe("session-trace-24");
+    expect(visibleSessionNames).not.toContain("session-trace-04");
+
+    act(() => {
+      toggle.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(25));
+    expect(getOlderTracesToggle().textContent).toContain("Hide older sessions (5)");
+    expect(Array.from(document.querySelectorAll(".trace-session-name")).map((node) => node.textContent?.trim())).toContain(
+      "session-trace-04",
+    );
+  });
+
+  it("auto-expands older sessions while searching so older matches are visible", async () => {
+    const manyTraces = Array.from({ length: 25 }, (_, index) => makeTrace(`trace-search-${index}`, 1_000 + index * 1_000));
+    tracesById = Object.fromEntries(manyTraces.map((trace) => [trace.id, trace]));
+    overview = makeOverview(manyTraces.length);
+    tracePagesById = Object.fromEntries(manyTraces.map((trace) => [trace.id, makeTracePage(trace)]));
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(20));
+
+    const searchInput = document.querySelector(".list-panel .search");
+    if (!(searchInput instanceof HTMLInputElement)) {
+      throw new Error("missing session search input");
+    }
+
+    act(() => {
+      fireEvent.change(searchInput, { target: { value: "trace-search" } });
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(25));
+    expect(getOlderTracesToggle().getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("shows last live update time in header status", async () => {
     const nowMs = 1_700_000_000_000;
     vi.spyOn(Date, "now").mockReturnValue(nowMs);
@@ -561,7 +631,10 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [assistantEvent, userEvent]);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
     await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(2));
 
     act(() => {
@@ -606,7 +679,10 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [userEvent, assistantEvent]);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
 
     const autoFollowLabel = Array.from(document.querySelectorAll(".detail-controls .checkbox")).find((node) =>
       node.textContent?.includes("auto follow"),
@@ -697,7 +773,10 @@ describe("App sessions list live motion", () => {
     });
 
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(2));
-    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
     const traceRequestsAfterShowAll = getTraceDetailRequests("trace-c");
     expect(traceRequestsAfterShowAll[traceRequestsAfterShowAll.length - 1]).toContain("include_meta=1");
 
@@ -1716,11 +1795,23 @@ describe("App sessions list live motion", () => {
     expect(source).toBeTruthy();
     if (!source) return;
 
-    act(() => {
-      source.emit("events_appended", { id: "trace-c", appended: 1 });
-    });
+    const updatedSummary: TraceSummary = {
+      ...selectedTrace,
+      eventCount: selectedTrace.eventCount + 1,
+      mtimeMs: selectedTrace.mtimeMs + 1_000,
+      lastEventTs: (selectedTrace.lastEventTs ?? selectedTrace.mtimeMs) + 1_000,
+    };
+    tracesById["trace-c"] = updatedSummary;
 
-    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    act(() => {
+      source.emit("trace_updated", { summary: updatedSummary });
+    });
+    flushRafQueue();
+
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
     await waitFor(() => expect(document.querySelectorAll(".event-raw-json").length).toBe(1));
 
     const expandedRawJson = document.querySelector(".event-raw-json");
@@ -1774,9 +1865,16 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("events_appended", { id: "trace-c", appended: 1 });
     });
+    flushRafQueue();
 
-    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(2));
-    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".toc-row").length).toBe(2);
+    });
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
 
     const newTocRow = Array.from(document.querySelectorAll(".toc-row")).find((row) => row.textContent?.includes("#5"));
     expect(newTocRow?.className).toContain("toc-row-enter");
@@ -1818,13 +1916,18 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("events_appended", { id: "trace-c", appended: appendedEvents.length });
     });
+    flushRafQueue();
 
     await waitFor(() => {
+      flushRafQueue();
       const count = document.querySelectorAll(".toc-row").length;
       expect(count).toBeGreaterThan(1);
       expect(count).toBeLessThanOrEqual(11);
     });
-    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(11));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".toc-row").length).toBe(11);
+    });
   });
 
   it("auto-scrolls strip to latest when pinned at right edge and new events append", async () => {
@@ -1868,8 +1971,12 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("events_appended", { id: "trace-c", appended: 1 });
     });
+    flushRafQueue();
 
-    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".timeline-segment").length).toBe(2);
+    });
     await waitFor(() => expect(scrollToSpy).toHaveBeenCalled());
 
     const lastCall = scrollToSpy.mock.calls.at(-1)?.[0] as ScrollToOptions | undefined;
@@ -1907,8 +2014,12 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("events_appended", { id: "trace-c", appended: 1 });
     });
+    flushRafQueue();
 
-    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".timeline-segment").length).toBe(2);
+    });
     await waitFor(() => expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#5"));
   });
 
@@ -1953,8 +2064,12 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("events_appended", { id: "trace-c", appended: 1 });
     });
+    flushRafQueue();
 
-    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".timeline-segment").length).toBe(2);
+    });
     await waitFor(() => expect(panel.className).toContain("timeline-strip-has-right-glow"));
     expect(scrollToSpy).not.toHaveBeenCalled();
     expect(panel.getAttribute("aria-label")).toContain("off-screen to the right");

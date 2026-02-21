@@ -276,9 +276,19 @@ function mergeModels(input?: Partial<ModelsConfig>): ModelsConfig {
 export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
   const sources: Record<string, SourceProfileConfig> = {};
   const inputSources = input?.sources ?? {};
+  const hasExplicitSources = input?.sources !== undefined;
 
   for (const [name, defaultProfile] of Object.entries(DEFAULT_SOURCE_PROFILES)) {
-    sources[name] = mergeProfile(defaultProfile, inputSources[name]);
+    const profileInput = inputSources[name];
+    if (profileInput) {
+      sources[name] = mergeProfile(defaultProfile, profileInput);
+      continue;
+    }
+    if (hasExplicitSources) {
+      sources[name] = mergeProfile(defaultProfile, { enabled: false });
+      continue;
+    }
+    sources[name] = mergeProfile(defaultProfile);
   }
 
   for (const [name, profile] of Object.entries(inputSources)) {

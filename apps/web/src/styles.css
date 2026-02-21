@@ -266,20 +266,18 @@ body {
 }
 
 .timeline-segment.timeline-segment-enter {
-  animation: timeline-segment-enter 440ms cubic-bezier(0.2, 0.9, 0.2, 1) 1 both;
+  animation: timeline-segment-enter 170ms ease-out 1 both;
 }
 
 @keyframes timeline-segment-enter {
   0% {
     opacity: 0;
-    transform: translateY(5px) scale(0.86);
-    filter: saturate(0.9) brightness(1.08);
+    transform: translateY(2px);
   }
 
   100% {
     opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: saturate(1) brightness(1);
+    transform: translateY(0);
   }
 }
 
@@ -394,6 +392,35 @@ body {
   padding: 8px;
   display: grid;
   gap: 8px;
+}
+
+.older-traces-block {
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+  background: #f8fafc;
+}
+
+.older-traces-toggle {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #f1f5f9;
+  color: #334155;
+  padding: 7px 10px;
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.older-traces-toggle:hover {
+  background: #e2e8f0;
+}
+
+.older-traces-toggle:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
 }
 
 .trace-row {
@@ -1340,20 +1367,18 @@ body {
 }
 
 .toc-row.toc-row-enter {
-  animation: toc-row-enter 420ms cubic-bezier(0.2, 0.9, 0.2, 1) 1 both;
+  animation: toc-row-enter 170ms ease-out 1 both;
 }
 
 @keyframes toc-row-enter {
   0% {
     opacity: 0;
-    transform: translateY(8px) scale(0.986);
-    filter: saturate(0.9) brightness(1.05);
+    transform: translateY(2px);
   }
 
   100% {
     opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: saturate(1) brightness(1);
+    transform: translateY(0);
   }
 }
 
@@ -1427,20 +1452,18 @@ body {
 }
 
 .event-card.event-card-enter {
-  animation: event-card-enter 480ms cubic-bezier(0.2, 0.9, 0.2, 1) 1 both;
+  animation: event-card-enter 180ms ease-out 1 both;
 }
 
 @keyframes event-card-enter {
   0% {
     opacity: 0;
-    transform: translateY(10px) scale(0.985);
-    filter: saturate(0.88) brightness(1.04);
+    transform: translateY(2px);
   }
 
   100% {
     opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: saturate(1) brightness(1);
+    transform: translateY(0);
   }
 }
 

@@ -17,19 +17,19 @@ import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
 const API = "";
-const EVENT_ENTER_ANIMATION_MS = 560;
-const EVENT_APPEND_QUEUE_BATCH_SIZE = 6;
-const EVENT_APPEND_QUEUE_DELAY_MS = 36;
+const EVENT_ENTER_ANIMATION_MS = 180;
 const TRACE_ENTER_ANIMATION_MS = 620;
 const TIMELINE_LATEST_EPSILON_PX = 12;
 const HEADER_FLASH_VISIBLE_MS = 2_400;
 const HEADER_FLASH_FADE_MS = 380;
-const CLOCK_TICK_MS = 5_000;
+const CLOCK_TICK_MS = 10_000;
 const TIMELINE_EVENT_INITIAL_RENDER_LIMIT = 240;
 const TIMELINE_EVENT_RENDER_STEP = 240;
 const TIMELINE_EVENT_RENDER_PREFETCH_PX = 320;
 const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
+const PRIMARY_RECENT_SESSION_COUNT = 20;
+const OLDER_TRACE_PAGE_SIZE = 40;
 const EVENT_KIND_OPTIONS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "meta"];
 const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
   system: "system",
@@ -239,6 +239,8 @@ export function App(): JSX.Element {
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
   const [query, setQuery] = useState("");
+  const [showOlderTraces, setShowOlderTraces] = useState(false);
+  const [olderTraceRenderLimit, setOlderTraceRenderLimit] = useState(OLDER_TRACE_PAGE_SIZE);
   const [visibleEventKinds, setVisibleEventKinds] = useState<Set<EventKind>>(() => createDefaultVisibleEventKinds());
   const [isEventTypeFilterMenuOpen, setIsEventTypeFilterMenuOpen] = useState(false);
   const [tocQuery, setTocQuery] = useState("");
@@ -281,7 +283,7 @@ export function App(): JSX.Element {
   const previousAnimatedEventFilterKeyRef = useRef("");
   const previousPageEventIdsRef = useRef<Set<string>>(new Set());
   const queuedEventIdsRef = useRef<string[]>([]);
-  const queuedEventTimerRef = useRef<number | null>(null);
+  const queuedEventFlushRafRef = useRef<number | null>(null);
   const enterAnimationTimerByTraceIdRef = useRef<Map<string, number>>(new Map());
   const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
   const flashStatusFadeTimerRef = useRef<number | null>(null);
@@ -322,6 +324,22 @@ export function App(): JSX.Element {
       return search.includes(q);
     });
   }, [traces, query]);
+  const primaryTraces = useMemo(
+    () => filteredTraces.slice(0, PRIMARY_RECENT_SESSION_COUNT),
+    [filteredTraces],
+  );
+  const olderTraces = useMemo(
+    () => filteredTraces.slice(PRIMARY_RECENT_SESSION_COUNT),
+    [filteredTraces],
+  );
+  const visibleOlderTraces = useMemo(
+    () => olderTraces.slice(0, olderTraceRenderLimit),
+    [olderTraceRenderLimit, olderTraces],
+  );
+  const renderedTraces = useMemo(
+    () => (showOlderTraces ? primaryTraces.concat(visibleOlderTraces) : primaryTraces),
+    [primaryTraces, showOlderTraces, visibleOlderTraces],
+  );
   const includeMeta = visibleEventKinds.has("meta");
   const visibleEventKindKey = useMemo(
     () => EVENT_KIND_OPTIONS.filter((kind) => visibleEventKinds.has(kind)).join(","),
@@ -373,7 +391,8 @@ export function App(): JSX.Element {
   const timelineStripEvents = useMemo(() => buildTimelineStripSegments(visibleTimelineEvents), [visibleTimelineEvents]);
   const tocRowIds = useMemo(() => renderedTocRows.map((row) => row.eventId), [renderedTocRows]);
   const timelineEventIds = useMemo(() => renderedTimelineEvents.map((event) => event.eventId), [renderedTimelineEvents]);
-  const filteredTraceIds = useMemo(() => filteredTraces.map((trace) => trace.id), [filteredTraces]);
+  const renderedTraceIds = useMemo(() => renderedTraces.map((trace) => trace.id), [renderedTraces]);
+  const hiddenOlderTraceCount = Math.max(0, olderTraces.length - visibleOlderTraces.length);
   const timelineStripShowsRightGlow =
     timelineStripHasOverflow && timelineOffscreenAppendCount > 0 && !timelineStripPinnedToLatest;
   const selectedTraceSummary = useMemo(() => {
@@ -446,7 +465,7 @@ export function App(): JSX.Element {
     }
     return rows;
   }, [toolCallTypeCountsPreview]);
-  const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(filteredTraceIds);
+  const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(renderedTraceIds);
   const { bindItemRef: bindTocRowRef } = useListReorderAnimation<HTMLButtonElement>(tocRowIds, { resetKey: selectedId });
   const { bindItemRef: bindEventCardRef } = useListReorderAnimation<HTMLElement>(timelineEventIds, {
     resetKey: selectedId,
@@ -524,9 +543,9 @@ export function App(): JSX.Element {
   );
 
   const clearEventAppendQueue = useCallback((): void => {
-    if (queuedEventTimerRef.current !== null) {
-      window.clearTimeout(queuedEventTimerRef.current);
-      queuedEventTimerRef.current = null;
+    if (queuedEventFlushRafRef.current !== null) {
+      window.cancelAnimationFrame(queuedEventFlushRafRef.current);
+      queuedEventFlushRafRef.current = null;
     }
     queuedEventIdsRef.current = [];
   }, []);
@@ -549,37 +568,25 @@ export function App(): JSX.Element {
     enterAnimationTimerByEventIdRef.current.set(eventId, timeoutId);
   }, []);
 
-  const flushQueuedEventBatch = useCallback((): void => {
+  const flushQueuedEvents = useCallback((): void => {
     if (queuedEventIdsRef.current.length === 0) {
-      queuedEventTimerRef.current = null;
       return;
     }
-
-    const batch = queuedEventIdsRef.current.splice(0, EVENT_APPEND_QUEUE_BATCH_SIZE);
-    if (batch.length > 0) {
-      setVisibleEventIds((prev) => {
-        const next = new Set(prev);
-        for (const eventId of batch) next.add(eventId);
-        return next;
-      });
-      setEnteringEventIds((prev) => {
-        const next = new Set(prev);
-        for (const eventId of batch) next.add(eventId);
-        return next;
-      });
-      for (const eventId of batch) {
-        scheduleEventEnterAnimationCleanup(eventId);
-      }
+    const queued = queuedEventIdsRef.current;
+    queuedEventIdsRef.current = [];
+    setVisibleEventIds((prev) => {
+      const next = new Set(prev);
+      for (const eventId of queued) next.add(eventId);
+      return next;
+    });
+    setEnteringEventIds((prev) => {
+      const next = new Set(prev);
+      for (const eventId of queued) next.add(eventId);
+      return next;
+    });
+    for (const eventId of queued) {
+      scheduleEventEnterAnimationCleanup(eventId);
     }
-
-    if (queuedEventIdsRef.current.length === 0) {
-      queuedEventTimerRef.current = null;
-      return;
-    }
-
-    queuedEventTimerRef.current = window.setTimeout(() => {
-      flushQueuedEventBatch();
-    }, EVENT_APPEND_QUEUE_DELAY_MS);
   }, [scheduleEventEnterAnimationCleanup]);
 
   const enqueueEventsForAppendReveal = useCallback(
@@ -591,12 +598,13 @@ export function App(): JSX.Element {
         queuedEventIdSet.add(eventId);
         queuedEventIdsRef.current.push(eventId);
       }
-      if (queuedEventTimerRef.current !== null) return;
-      queuedEventTimerRef.current = window.setTimeout(() => {
-        flushQueuedEventBatch();
-      }, EVENT_APPEND_QUEUE_DELAY_MS);
+      if (queuedEventFlushRafRef.current !== null) return;
+      queuedEventFlushRafRef.current = window.requestAnimationFrame(() => {
+        queuedEventFlushRafRef.current = null;
+        flushQueuedEvents();
+      });
     },
-    [flushQueuedEventBatch],
+    [flushQueuedEvents],
   );
 
   const handleTimelineStripScroll = useCallback((): void => {
@@ -621,6 +629,15 @@ export function App(): JSX.Element {
   const resetEventKindsToDefault = useCallback((): void => {
     setVisibleEventKinds(createDefaultVisibleEventKinds());
   }, []);
+
+  const toggleOlderTraceVisibility = useCallback((): void => {
+    setShowOlderTraces((prev) => !prev);
+  }, []);
+
+  const loadMoreOlderTraces = useCallback((): void => {
+    setShowOlderTraces(true);
+    setOlderTraceRenderLimit((prev) => Math.min(prev + OLDER_TRACE_PAGE_SIZE, olderTraces.length));
+  }, [olderTraces.length]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -647,6 +664,20 @@ export function App(): JSX.Element {
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [isEventTypeFilterMenuOpen]);
+
+  useEffect(() => {
+    if (!query.trim()) return;
+    setShowOlderTraces(true);
+    setOlderTraceRenderLimit(Math.max(OLDER_TRACE_PAGE_SIZE, olderTraces.length));
+  }, [olderTraces.length, query]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const selectedOlderIndex = olderTraces.findIndex((trace) => trace.id === selectedId);
+    if (selectedOlderIndex < 0) return;
+    if (!showOlderTraces) setShowOlderTraces(true);
+    setOlderTraceRenderLimit((prev) => Math.max(prev, OLDER_TRACE_PAGE_SIZE, selectedOlderIndex + 1));
+  }, [olderTraces, selectedId, showOlderTraces]);
 
   useEffect(() => {
     if (selectedId && traces.some((trace) => trace.id === selectedId)) return;
@@ -690,11 +721,11 @@ export function App(): JSX.Element {
   }, [applyTimelineStripViewport]);
 
   useEffect(() => {
-    const filter = query.trim().toLowerCase();
-    const filterChanged = previousTraceFilterRef.current !== filter;
-    previousTraceFilterRef.current = filter;
+    const traceRenderKey = `${query.trim().toLowerCase()}|${showOlderTraces ? "open" : "closed"}|${olderTraceRenderLimit}`;
+    const filterChanged = previousTraceFilterRef.current !== traceRenderKey;
+    previousTraceFilterRef.current = traceRenderKey;
 
-    const currentTraceIds = new Set(filteredTraceIds);
+    const currentTraceIds = new Set(renderedTraceIds);
     if (filterChanged || !traceEnterAnimationInitializedRef.current) {
       traceEnterAnimationInitializedRef.current = true;
       previousVisibleTraceIdsRef.current = currentTraceIds;
@@ -703,7 +734,7 @@ export function App(): JSX.Element {
       return;
     }
 
-    const appendedTraceIds = filteredTraceIds.filter((traceId) => !previousVisibleTraceIdsRef.current.has(traceId));
+    const appendedTraceIds = renderedTraceIds.filter((traceId) => !previousVisibleTraceIdsRef.current.has(traceId));
     previousVisibleTraceIdsRef.current = currentTraceIds;
     if (appendedTraceIds.length === 0) return;
 
@@ -730,7 +761,7 @@ export function App(): JSX.Element {
       }, TRACE_ENTER_ANIMATION_MS + index * 45);
       enterAnimationTimerByTraceIdRef.current.set(traceId, timeoutId);
     });
-  }, [filteredTraceIds, query]);
+  }, [olderTraceRenderLimit, query, renderedTraceIds, showOlderTraces]);
 
   useEffect(() => {
     const bumpPulse = (traceId: string): void => {
@@ -1413,6 +1444,40 @@ export function App(): JSX.Element {
     [flashHeaderStatus],
   );
 
+  const renderTraceRow = (trace: TraceSummary): JSX.Element => {
+    const isActive = trace.id === selectedId;
+    const isPathExpanded = expandedPathTraceIds.has(trace.id);
+    const pulseSeq = pulseSeqByTraceId[trace.id] ?? 0;
+    const activityStatus = trace.activityStatus;
+    return (
+      <SessionTraceRow
+        key={trace.id}
+        trace={trace}
+        activityStatus={activityStatus}
+        isActive={isActive}
+        isPathExpanded={isPathExpanded}
+        isEntering={enteringTraceIds.has(trace.id)}
+        isOpening={openingTraceIds.has(trace.id)}
+        isStopping={stoppingTraceIds.has(trace.id)}
+        isSendingInput={sendingInputTraceIds.has(trace.id)}
+        inputValue={traceInputByTraceId[trace.id] ?? ""}
+        openError={openErrorByTraceId[trace.id] ?? ""}
+        stopError={stopErrorByTraceId[trace.id] ?? ""}
+        inputError={inputErrorByTraceId[trace.id] ?? ""}
+        pulseSeq={pulseSeq}
+        nowMs={clockNowMs}
+        onSelect={setSelectedId}
+        onOpen={openTraceSession}
+        onInputChange={setTraceInput}
+        onInputSubmit={sendTraceInput}
+        onTogglePath={toggleTracePathExpanded}
+        onStop={stopTraceSession}
+        rowRef={bindTraceRowRef(trace.id)}
+        fmtTime={fmtTime}
+      />
+    );
+  };
+
   return (
     <main className="shell">
       <header className="hero">
@@ -1423,7 +1488,7 @@ export function App(): JSX.Element {
               {headerStatus}
             </div>
           </div>
-          <p>Live observability for your Codex, Claude, Cursor, Gemini and OpenCode agent sessions.</p>
+          <p>Live observability for your Codex, Claude, Cursor, Gemini, OpenCode and Pi agent sessions.</p>
         </div>
         <div className="hero-metrics">
           <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
@@ -1499,39 +1564,31 @@ export function App(): JSX.Element {
             />
           </div>
           <div className="list-scroll">
-            {filteredTraces.map((trace) => {
-              const isActive = trace.id === selectedId;
-              const isPathExpanded = expandedPathTraceIds.has(trace.id);
-              const pulseSeq = pulseSeqByTraceId[trace.id] ?? 0;
-              const activityStatus = trace.activityStatus;
-              return (
-                <SessionTraceRow
-                  key={trace.id}
-                  trace={trace}
-                  activityStatus={activityStatus}
-                  isActive={isActive}
-                  isPathExpanded={isPathExpanded}
-                  isEntering={enteringTraceIds.has(trace.id)}
-                  isOpening={openingTraceIds.has(trace.id)}
-                  isStopping={stoppingTraceIds.has(trace.id)}
-                  isSendingInput={sendingInputTraceIds.has(trace.id)}
-                  inputValue={traceInputByTraceId[trace.id] ?? ""}
-                  openError={openErrorByTraceId[trace.id] ?? ""}
-                  stopError={stopErrorByTraceId[trace.id] ?? ""}
-                  inputError={inputErrorByTraceId[trace.id] ?? ""}
-                  pulseSeq={pulseSeq}
-                  nowMs={clockNowMs}
-                  onSelect={setSelectedId}
-                  onOpen={openTraceSession}
-                  onInputChange={setTraceInput}
-                  onInputSubmit={sendTraceInput}
-                  onTogglePath={toggleTracePathExpanded}
-                  onStop={stopTraceSession}
-                  rowRef={bindTraceRowRef(trace.id)}
-                  fmtTime={fmtTime}
-                />
-              );
-            })}
+            {primaryTraces.map((trace) => renderTraceRow(trace))}
+            {olderTraces.length > 0 && (
+              <section className="older-traces-block" aria-label="Older sessions">
+                <button
+                  type="button"
+                  className="mono older-traces-toggle"
+                  onClick={toggleOlderTraceVisibility}
+                  aria-expanded={showOlderTraces}
+                >
+                  {showOlderTraces
+                    ? `Hide older sessions (${olderTraces.length})`
+                    : `Show older sessions (${olderTraces.length})`}
+                </button>
+                {showOlderTraces && (
+                  <>
+                    {visibleOlderTraces.map((trace) => renderTraceRow(trace))}
+                    {hiddenOlderTraceCount > 0 && (
+                      <button type="button" className="load-more mono older-traces-load-more" onClick={loadMoreOlderTraces}>
+                        {`Load ${Math.min(OLDER_TRACE_PAGE_SIZE, hiddenOlderTraceCount)} more older sessions`}
+                      </button>
+                    )}
+                  </>
+                )}
+              </section>
+            )}
             {filteredTraces.length === 0 && <div className="empty">No sessions</div>}
           </div>
         </section>

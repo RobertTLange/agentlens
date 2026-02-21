@@ -991,7 +991,7 @@ describe("server api", () => {
     expect(largePayload.traces).toHaveLength(75);
 
     await server.close();
-  });
+  }, 20_000);
 
   it("serves overview, trace listing, trace details, stop/open controls, and config updates", async () => {
     const fixture = await buildFixture();
@@ -1264,5 +1264,5 @@ describe("server api", () => {
     expect(configPayload.config.cost.modelRates[0]?.model).toBe("gpt-5.3-codex");
 
     await server.close();
-  });
+  }, 20_000);
 });

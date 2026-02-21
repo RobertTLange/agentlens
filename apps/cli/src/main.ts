@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import type { AppConfig, TraceSummary } from "@agentlens/contracts";
+import type { AppConfig, NamedCount, TraceSummary } from "@agentlens/contracts";
 import {
   DEFAULT_CONFIG_PATH,
   loadConfig,
@@ -13,6 +13,8 @@ import {
 import { launchBrowser } from "./browser.js";
 
 const LATEST_KEYWORD = "latest";
+const DEFAULT_HISTORY_LIMIT = 50;
+const STATUS_ORDER: TraceSummary["activityStatus"][] = ["running", "waiting_input", "idle"];
 
 function printTable(rows: string[][]): void {
   if (rows.length === 0) return;
@@ -33,6 +35,47 @@ function printTable(rows: string[][]): void {
 function fmtTime(ms: number | null): string {
   if (!ms) return "-";
   return new Date(ms).toISOString();
+}
+
+function fmtTimeCompact(ms: number | null): string {
+  if (!ms) return "-";
+  return new Date(ms).toISOString().replace(".000Z", "Z");
+}
+
+function fmtAgeShort(ms: number | null): string {
+  if (!ms) return "-";
+  const deltaSeconds = Math.floor(Math.max(0, Date.now() - ms) / 1000);
+  if (deltaSeconds < 10) return "now";
+  if (deltaSeconds < 60) return `${deltaSeconds}s`;
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m`;
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h`;
+  return `${Math.floor(deltaSeconds / 86400)}d`;
+}
+
+function pathTail(inputPath: string): string {
+  const trimmed = inputPath.replace(/[\\/]+$/g, "");
+  if (!trimmed) return inputPath;
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || trimmed;
+}
+
+function normalizeInlineText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function fmtPct(count: number, total: number): string {
+  if (total <= 0) return "0.0%";
+  return `${((count / total) * 100).toFixed(1)}%`;
+}
+
+function printNamedTable(section: string, rows: string[][], opts: { llm?: boolean } = {}): void {
+  if (rows.length === 0) return;
+  if (opts.llm) {
+    console.log(`\n## ${section}`);
+  } else {
+    console.log(`\n${section}:`);
+  }
+  printTable(rows);
 }
 
 function parseValue(input: string): unknown {
@@ -78,6 +121,89 @@ function sortByRecent(items: TraceSummary[]): TraceSummary[] {
   );
 }
 
+function aggregateTopTools(items: TraceSummary[], limit: number): NamedCount[] {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    for (const row of item.topTools ?? []) {
+      counts.set(row.name, (counts.get(row.name) ?? 0) + row.count);
+    }
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, Math.max(1, limit))
+    .map(([name, count]) => ({ name, count }));
+}
+
+function buildStatusCounts(items: TraceSummary[]): Record<TraceSummary["activityStatus"], number> {
+  const counts: Record<TraceSummary["activityStatus"], number> = {
+    running: 0,
+    waiting_input: 0,
+    idle: 0,
+  };
+  for (const item of items) {
+    counts[item.activityStatus] += 1;
+  }
+  return counts;
+}
+
+function assertValidGroupBy(groupBy: string | undefined): void {
+  if (!groupBy) return;
+  if (groupBy === "recency") return;
+  throw new Error(`unsupported group-by mode: ${groupBy}`);
+}
+
+function bucketByRecency(items: TraceSummary[]): Record<"today" | "last_7d" | "older", TraceSummary[]> {
+  const now = Date.now();
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  const sevenDayMs = 7 * oneDayMs;
+  const buckets: Record<"today" | "last_7d" | "older", TraceSummary[]> = {
+    today: [],
+    last_7d: [],
+    older: [],
+  };
+  for (const item of items) {
+    const updatedMs = item.lastEventTs ?? item.mtimeMs;
+    const ageMs = Math.max(0, now - updatedMs);
+    if (ageMs < oneDayMs) buckets.today.push(item);
+    else if (ageMs < sevenDayMs) buckets.last_7d.push(item);
+    else buckets.older.push(item);
+  }
+  return buckets;
+}
+
+interface SessionHistoryRow {
+  rank: number;
+  sessionId: string;
+  traceId: string;
+  agent: string;
+  updatedAge: string;
+  updatedAt: string;
+  events: string;
+  errors: string;
+  tools: string;
+  status: string;
+  pathTail: string;
+}
+
+function toSessionHistoryRows(items: TraceSummary[], startRank = 1): SessionHistoryRow[] {
+  return items.map((item, index) => {
+    const updatedMs = item.lastEventTs ?? item.mtimeMs;
+    return {
+      rank: startRank + index,
+      sessionId: item.sessionId || "-",
+      traceId: item.id,
+      agent: item.agent,
+      updatedAge: fmtAgeShort(updatedMs),
+      updatedAt: fmtTimeCompact(updatedMs),
+      events: String(item.eventCount),
+      errors: String(item.errorCount),
+      tools: String(item.toolUseCount),
+      status: item.activityStatus,
+      pathTail: pathTail(item.path),
+    };
+  });
+}
+
 function isLatestToken(input: string): boolean {
   return input.trim().toLowerCase() === LATEST_KEYWORD;
 }
@@ -115,8 +241,10 @@ program.addHelpText(
 Examples:
   $ agentlens --browser
   $ agentlens summary --json
-  $ agentlens sessions list --limit 20
+  $ agentlens summary --llm
+  $ agentlens sessions list --limit 50
   $ agentlens session latest --show-tools
+  $ agentlens session latest --llm
   $ agentlens sessions events latest --follow
 `,
 );
@@ -124,9 +252,10 @@ Examples:
 program
   .command("summary")
   .option("--json", "JSON output")
+  .option("--llm", "Deterministic table output for LLM agents")
   .option("--agent <name>", "Filter by agent")
   .option("--since <window>", "Filter by recency window (e.g. 24h, 30m, 7d)")
-  .action(async (opts: { json?: boolean; agent?: string; since?: string }) => {
+  .action(async (opts: { json?: boolean; llm?: boolean; agent?: string; since?: string }) => {
     const configPath = program.opts<{ config: string }>().config;
     const snapshot = await loadSnapshot(configPath);
     const all = opts.agent
@@ -153,7 +282,8 @@ program
         }
         return acc;
       }, {}),
-      topTools: snapshot.getTopTools(12),
+      byStatus: buildStatusCounts(items),
+      topTools: aggregateTopTools(items, 12),
     };
 
     if (opts.json) {
@@ -161,44 +291,84 @@ program
       return;
     }
 
-    printTable([
-      ["traces", "sessions", "events", "errors", "tool_uses", "tool_results"],
+    const llmMode = opts.llm === true;
+    printNamedTable(
+      "overview",
       [
-        String(data.traces),
-        String(data.sessions),
-        String(data.events),
-        String(data.errors),
-        String(data.toolUses),
-        String(data.toolResults),
+        ["traces", "sessions", "events", "errors", "tool_uses", "tool_results"],
+        [
+          String(data.traces),
+          String(data.sessions),
+          String(data.events),
+          String(data.errors),
+          String(data.toolUses),
+          String(data.toolResults),
+        ],
       ],
-    ]);
-    console.log("\nby_agent:");
-    printTable([
-      ["agent", "count"],
-      ...Object.entries(data.byAgent)
-        .sort((a, b) => b[1] - a[1])
-        .map(([agent, count]) => [agent, String(count)]),
-    ]);
+      { llm: llmMode },
+    );
 
-    console.log("\nby_event_kind:");
-    printTable([
-      ["kind", "count"],
-      ...Object.entries(data.byEventKind)
-        .sort((a, b) => b[1] - a[1])
-        .map(([kind, count]) => [kind, String(count)]),
-    ]);
+    printNamedTable(
+      "by_agent",
+      [
+        ["agent", "count", "pct"],
+        ...Object.entries(data.byAgent)
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .map(([agent, count]) => [agent, String(count), fmtPct(count, data.traces)]),
+      ],
+      { llm: llmMode },
+    );
 
-    console.log("\ntop_tools:");
-    printTable([
-      ["tool", "calls"],
-      ...data.topTools.map((row) => [row.name, String(row.count)]),
-    ]);
+    printNamedTable(
+      "by_status",
+      [
+        ["status", "count", "pct"],
+        ...STATUS_ORDER.map((status) => [status, String(data.byStatus[status]), fmtPct(data.byStatus[status], data.traces)]),
+      ],
+      { llm: llmMode },
+    );
+
+    printNamedTable(
+      "top_tools",
+      [["tool", "calls"], ...data.topTools.map((row) => [row.name, String(row.count)])],
+      { llm: llmMode },
+    );
+
+    if (llmMode) {
+      const candidateRows = toSessionHistoryRows(sortByRecent(items).slice(0, 20));
+      printNamedTable(
+        "candidate_sessions",
+        [
+          ["rank", "session_id", "trace_id", "agent", "updated_age", "updated_at", "events", "errors", "status", "path_tail"],
+          ...candidateRows.map((row) => [
+            String(row.rank),
+            row.sessionId,
+            row.traceId,
+            row.agent,
+            row.updatedAge,
+            row.updatedAt,
+            row.events,
+            row.errors,
+            row.status,
+            row.pathTail,
+          ]),
+        ],
+        { llm: true },
+      );
+    }
   });
 
-async function renderSessionsList(opts: { limit: string; agent?: string; json?: boolean }): Promise<void> {
+async function renderSessionsList(opts: {
+  limit: string;
+  agent?: string;
+  json?: boolean;
+  llm?: boolean;
+  groupBy?: string;
+}): Promise<void> {
   const configPath = program.opts<{ config: string }>().config;
   const all = await summaries(configPath, opts.agent);
-  const limit = Math.max(1, Number(opts.limit) || 20);
+  assertValidGroupBy(opts.groupBy);
+  const limit = Math.max(1, Number(opts.limit) || DEFAULT_HISTORY_LIMIT);
   const rows = sortByRecent(all).slice(0, limit);
 
   if (opts.json) {
@@ -206,22 +376,48 @@ async function renderSessionsList(opts: { limit: string; agent?: string; json?: 
     return;
   }
 
-  printTable([
-    ["id", "agent", "updated", "events", "errors", "path"],
-    ...rows.map((row) => [
-      row.id,
-      row.agent,
-      fmtTime(row.lastEventTs ?? row.mtimeMs),
-      String(row.eventCount),
-      String(row.errorCount),
-      row.path,
-    ]),
-  ]);
+  const llmMode = opts.llm === true;
+  const renderRows = (sectionName: string, source: TraceSummary[], rankStart: number): number => {
+    if (source.length === 0) return rankStart;
+    const rowViews = toSessionHistoryRows(source, rankStart);
+    printNamedTable(
+      sectionName,
+      [
+        ["rank", "session", "trace_id", "agent", "updated_age", "updated_at", "events", "errors", "tools", "status", "path_tail"],
+        ...rowViews.map((row) => [
+          String(row.rank),
+          row.sessionId,
+          row.traceId,
+          row.agent,
+          row.updatedAge,
+          row.updatedAt,
+          row.events,
+          row.errors,
+          row.tools,
+          row.status,
+          row.pathTail,
+        ]),
+      ],
+      { llm: llmMode },
+    );
+    return rankStart + source.length;
+  };
+
+  if (opts.groupBy === "recency") {
+    const buckets = bucketByRecency(rows);
+    let rank = 1;
+    rank = renderRows("today", buckets.today, rank);
+    rank = renderRows("last_7d", buckets.last_7d, rank);
+    renderRows("older", buckets.older, rank);
+    return;
+  }
+
+  renderRows("sessions", rows, 1);
 }
 
 async function renderSessionDetail(
   id: string,
-  opts: { events: string; includeMeta?: boolean; json?: boolean; showTools?: boolean },
+  opts: { events: string; includeMeta?: boolean; json?: boolean; llm?: boolean; showTools?: boolean },
 ): Promise<void> {
   const configPath = program.opts<{ config: string }>().config;
   const snapshot = await loadSnapshot(configPath);
@@ -240,50 +436,205 @@ async function renderSessionDetail(
   }
 
   const summary = page.summary;
-  printTable([
-    ["id", "session_id", "agent", "parser", "events", "errors", "path"],
-    [
-      summary.id,
-      summary.sessionId || "-",
-      summary.agent,
-      summary.parser,
-      String(summary.eventCount),
-      String(summary.errorCount),
-      summary.path,
-    ],
-  ]);
+  const updatedMs = summary.lastEventTs ?? summary.mtimeMs;
+  if (opts.llm) {
+    printNamedTable(
+      "session_summary",
+      [
+        [
+          "trace_id",
+          "session_id",
+          "agent",
+          "parser",
+          "updated_age",
+          "updated_at",
+          "events",
+          "errors",
+          "tool_uses",
+          "tool_results",
+          "status",
+          "path",
+        ],
+        [
+          summary.id,
+          summary.sessionId || "-",
+          summary.agent,
+          summary.parser,
+          fmtAgeShort(updatedMs),
+          fmtTimeCompact(updatedMs),
+          String(summary.eventCount),
+          String(summary.errorCount),
+          String(summary.toolUseCount),
+          String(summary.toolResultCount),
+          summary.activityStatus,
+          summary.path,
+        ],
+      ],
+      { llm: true },
+    );
+    printNamedTable(
+      "next_calls",
+      [
+        ["call", "purpose"],
+        [`agentlens sessions events ${summary.id} --llm --limit 100`, "chronological event inspection"],
+      ],
+      { llm: true },
+    );
+    return;
+  }
 
-  console.log("\nlatest_events:");
+  printNamedTable(
+    "session",
+    [
+      ["trace_id", "session_id", "agent", "parser", "updated_age", "updated_at", "events", "errors", "status", "path"],
+      [
+        summary.id,
+        summary.sessionId || "-",
+        summary.agent,
+        summary.parser,
+        fmtAgeShort(updatedMs),
+        fmtTimeCompact(updatedMs),
+        String(summary.eventCount),
+        String(summary.errorCount),
+        summary.activityStatus,
+        summary.path,
+      ],
+    ],
+  );
+
   if (opts.showTools) {
-    printTable([
-      ["idx", "kind", "time", "tool", "call", "args/result", "preview"],
+    printNamedTable("latest_events", [
+      ["idx", "kind", "time", "tool", "call", "args_result", "preview"],
       ...page.events.map((event) => [
         String(event.index),
         event.eventKind,
         fmtTime(event.timestampMs),
         event.toolName || event.functionName || "-",
         event.toolCallId || "-",
-        event.toolArgsText || event.toolResultText || "-",
-        event.preview,
+        normalizeInlineText(event.toolArgsText || event.toolResultText || "-"),
+        normalizeInlineText(event.preview),
       ]),
     ]);
     return;
   }
 
+  printNamedTable("latest_events", [
+    ["idx", "kind", "time", "preview"],
+    ...page.events.map((event) => [String(event.index), event.eventKind, fmtTime(event.timestampMs), normalizeInlineText(event.preview)]),
+  ]);
+}
+
+function renderEventsTable(
+  events: Array<{
+    index: number;
+    eventKind: string;
+    timestampMs: number | null;
+    preview: string;
+    toolName?: string;
+    functionName?: string;
+    toolCallId?: string;
+  }>,
+  opts: { llm?: boolean },
+): void {
+  if (opts.llm) {
+    printNamedTable(
+      "events",
+      [
+        ["idx", "kind", "time", "tool", "call_id", "preview"],
+        ...events.map((event) => [
+          String(event.index),
+          event.eventKind,
+          fmtTimeCompact(event.timestampMs),
+          event.toolName || event.functionName || "-",
+          event.toolCallId || "-",
+          normalizeInlineText(event.preview),
+        ]),
+      ],
+      { llm: true },
+    );
+    return;
+  }
   printTable([
     ["idx", "kind", "time", "preview"],
-    ...page.events.map((event) => [String(event.index), event.eventKind, fmtTime(event.timestampMs), event.preview]),
+    ...events.map((event) => [String(event.index), event.eventKind, fmtTime(event.timestampMs), normalizeInlineText(event.preview)]),
   ]);
+}
+
+async function renderSessionEvents(
+  id: string,
+  opts: { limit: string; before?: string; includeMeta?: boolean; jsonl?: boolean; llm?: boolean; follow?: boolean },
+): Promise<void> {
+  const configPath = program.opts<{ config: string }>().config;
+
+  if (opts.follow) {
+    const index = await TraceIndex.fromConfigPath(configPath);
+    await index.start();
+    const resolved = resolveTraceIdOrLatest(index, id);
+
+    const initialOptions: { limit: number; includeMeta?: boolean } = {
+      limit: Math.max(1, Number(opts.limit) || 50),
+    };
+    if (opts.includeMeta !== undefined) {
+      initialOptions.includeMeta = opts.includeMeta;
+    }
+    const initial = index.getTracePage(resolved, initialOptions);
+
+    if (opts.jsonl) {
+      for (const event of initial.events) console.log(JSON.stringify(event));
+    } else {
+      renderEventsTable(initial.events, opts.llm ? { llm: true } : {});
+    }
+
+    index.on("stream", ({ envelope }: { envelope: { type: string; payload: Record<string, unknown> } }) => {
+      if (envelope.type !== "events_appended") return;
+      if (String(envelope.payload.id ?? "") !== resolved) return;
+      const latestEvents = Array.isArray(envelope.payload.latestEvents) ? (envelope.payload.latestEvents as unknown[]) : [];
+      const typedEvents = latestEvents.filter((event): event is (typeof initial.events)[number] =>
+        Boolean(event && typeof event === "object"),
+      );
+      if (opts.jsonl) {
+        for (const event of typedEvents) console.log(JSON.stringify(event));
+      } else {
+        renderEventsTable(typedEvents, opts.llm ? { llm: true } : {});
+      }
+    });
+    return;
+  }
+
+  const snapshot = await loadSnapshot(configPath);
+  const resolved = resolveTraceIdOrLatest(snapshot, id);
+  const pageOptions: { limit?: number; before?: string; includeMeta?: boolean } = {};
+  if (opts.includeMeta !== undefined) {
+    pageOptions.includeMeta = opts.includeMeta;
+  }
+  pageOptions.limit = Math.max(1, Number(opts.limit) || 50);
+  if (opts.before) {
+    pageOptions.before = opts.before;
+  }
+  const page = snapshot.getTracePage(resolved, pageOptions);
+
+  if (opts.jsonl) {
+    for (const event of page.events) {
+      console.log(JSON.stringify(event));
+    }
+  } else {
+    renderEventsTable(page.events, opts.llm ? { llm: true } : {});
+    if (page.nextBefore) {
+      console.log(`\nnext_before=${page.nextBefore}`);
+    }
+  }
 }
 
 const sessions = program.command("sessions").description("Session-level operations");
 
 sessions
   .command("list")
-  .option("--limit <n>", "Rows to show", "20")
+  .option("--limit <n>", "Rows to show", String(DEFAULT_HISTORY_LIMIT))
   .option("--agent <name>", "Filter by agent")
+  .option("--group-by <mode>", "Group output (supported: recency)")
   .option("--json", "JSON output")
-  .action(async (opts: { limit: string; agent?: string; json?: boolean }) => {
+  .option("--llm", "Deterministic table output for LLM agents")
+  .action(async (opts: { limit: string; agent?: string; groupBy?: string; json?: boolean; llm?: boolean }) => {
     await renderSessionsList(opts);
   });
 
@@ -294,9 +645,12 @@ program
   .option("--include-meta", "Include meta events")
   .option("--show-tools", "Show tool/function details")
   .option("--json", "JSON output")
-  .action(async (id: string, opts: { events: string; includeMeta?: boolean; json?: boolean; showTools?: boolean }) => {
+  .option("--llm", "Deterministic table output for LLM agents")
+  .action(
+    async (id: string, opts: { events: string; includeMeta?: boolean; json?: boolean; llm?: boolean; showTools?: boolean }) => {
     await renderSessionDetail(id, opts);
-  });
+    },
+  );
 
 sessions
   .command("show <id_or_latest>")
@@ -304,9 +658,12 @@ sessions
   .option("--include-meta", "Include meta events")
   .option("--show-tools", "Show tool/function details")
   .option("--json", "JSON output")
-  .action(async (id: string, opts: { events: string; includeMeta?: boolean; json?: boolean; showTools?: boolean }) => {
+  .option("--llm", "Deterministic table output for LLM agents")
+  .action(
+    async (id: string, opts: { events: string; includeMeta?: boolean; json?: boolean; llm?: boolean; showTools?: boolean }) => {
     await renderSessionDetail(id, opts);
-  });
+    },
+  );
 
 sessions
   .command("events <id_or_latest>")
@@ -314,81 +671,14 @@ sessions
   .option("--before <cursor>", "Pagination cursor")
   .option("--include-meta", "Include meta events")
   .option("--jsonl", "Emit one event JSON per line")
+  .option("--llm", "Deterministic table output for LLM agents")
   .option("--follow", "Follow live updates")
   .action(
     async (
       id: string,
-      opts: { limit: string; before?: string; includeMeta?: boolean; jsonl?: boolean; follow?: boolean },
+      opts: { limit: string; before?: string; includeMeta?: boolean; jsonl?: boolean; llm?: boolean; follow?: boolean },
     ) => {
-      const configPath = program.opts<{ config: string }>().config;
-
-      if (opts.follow) {
-        const index = await TraceIndex.fromConfigPath(configPath);
-        await index.start();
-        const resolved = resolveTraceIdOrLatest(index, id);
-
-        const initialOptions: { limit: number; includeMeta?: boolean } = {
-          limit: Math.max(1, Number(opts.limit) || 50),
-        };
-        if (opts.includeMeta !== undefined) {
-          initialOptions.includeMeta = opts.includeMeta;
-        }
-        const initial = index.getTracePage(resolved, initialOptions);
-
-        for (const event of initial.events) {
-          if (opts.jsonl) {
-            console.log(JSON.stringify(event));
-          } else {
-            console.log(`${event.index}\t${event.eventKind}\t${event.preview}`);
-          }
-        }
-
-        index.on("stream", ({ envelope }: { envelope: { type: string; payload: Record<string, unknown> } }) => {
-          if (envelope.type !== "events_appended") return;
-          if (String(envelope.payload.id ?? "") !== resolved) return;
-
-          const latestEvents = Array.isArray(envelope.payload.latestEvents)
-            ? (envelope.payload.latestEvents as unknown[])
-            : [];
-
-          for (const event of latestEvents) {
-            if (opts.jsonl) {
-              console.log(JSON.stringify(event));
-            } else if (event && typeof event === "object") {
-              const typed = event as { index?: number; eventKind?: string; preview?: string };
-              console.log(`${typed.index ?? "?"}\t${typed.eventKind ?? "?"}\t${typed.preview ?? ""}`);
-            }
-          }
-        });
-
-        return;
-      }
-
-      const snapshot = await loadSnapshot(configPath);
-      const resolved = resolveTraceIdOrLatest(snapshot, id);
-      const pageOptions: { limit?: number; before?: string; includeMeta?: boolean } = {};
-      if (opts.includeMeta !== undefined) {
-        pageOptions.includeMeta = opts.includeMeta;
-      }
-      pageOptions.limit = Math.max(1, Number(opts.limit) || 50);
-      if (opts.before) {
-        pageOptions.before = opts.before;
-      }
-      const page = snapshot.getTracePage(resolved, pageOptions);
-
-      if (opts.jsonl) {
-        for (const event of page.events) {
-          console.log(JSON.stringify(event));
-        }
-      } else {
-        printTable([
-          ["idx", "kind", "time", "preview"],
-          ...page.events.map((event) => [String(event.index), event.eventKind, fmtTime(event.timestampMs), event.preview]),
-        ]);
-        if (page.nextBefore) {
-          console.log(`\nnext_before=${page.nextBefore}`);
-        }
-      }
+      await renderSessionEvents(id, opts);
     },
   );
 
