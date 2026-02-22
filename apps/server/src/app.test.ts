@@ -167,6 +167,82 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
   };
 }
 
+async function buildFixtureWithCustomTrace(
+  traceLog: string,
+  sessionId: string,
+): Promise<{ configPath: string; index: TraceIndex; sessionId: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-server-custom-"));
+  const codexRoot = path.join(root, ".codex", "sessions", "2026", "02", "11");
+  await mkdir(codexRoot, { recursive: true });
+  await writeFile(path.join(codexRoot, "custom-trace.jsonl"), traceLog, "utf8");
+
+  const config = mergeConfig({
+    scan: {
+      mode: "adaptive",
+      intervalSeconds: 5,
+      intervalMinMs: 200,
+      intervalMaxMs: 3000,
+      fullRescanIntervalMs: 900_000,
+      batchDebounceMs: 120,
+      recentEventWindow: 200,
+      includeMetaDefault: false,
+      statusRunningTtlMs: 30_000,
+      statusWaitingTtlMs: 300_000,
+    },
+    sessionLogDirectories: [],
+    cost: {
+      enabled: true,
+      currency: "USD",
+      unknownModelPolicy: "n_a",
+      modelRates: [
+        {
+          model: "gpt-5.3-codex",
+          inputPer1MUsd: 1,
+          outputPer1MUsd: 1,
+          cachedReadPer1MUsd: 1,
+          cachedCreatePer1MUsd: 1,
+          reasoningOutputPer1MUsd: 1,
+        },
+      ],
+    },
+    sources: {
+      codex_home: {
+        name: "codex_home",
+        enabled: true,
+        roots: [path.join(root, ".codex", "sessions")],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "codex",
+      },
+      claude_projects: {
+        name: "claude_projects",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+      claude_history: {
+        name: "claude_history",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["history.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+    },
+  });
+  const configPath = path.join(root, "config.toml");
+  await saveConfig(config, configPath);
+
+  const index = new TraceIndex(config);
+  await index.refresh();
+  return { configPath, index, sessionId };
+}
+
 describe("server api", () => {
   it("infers session cwd from both session_meta and session events", async () => {
     const codexDetail = {
@@ -989,6 +1065,215 @@ describe("server api", () => {
     expect(largeRes.statusCode).toBe(200);
     const largePayload = largeRes.json() as { traces: Array<{ id: string; sessionId: string }> };
     expect(largePayload.traces).toHaveLength(75);
+
+    await server.close();
+  }, 20_000);
+
+  it("serves local-day agent activity bins with break markers and dominant colors", async () => {
+    const fixture = await buildFixtureWithTraceCount(3);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/day?date=2026-02-11&tz_offset_min=0&bin_min=5&break_min=10",
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      activity: {
+        dateLocal: string;
+        binMinutes: number;
+        breakMinutes: number;
+        totalSessionsInWindow: number;
+        bins: Array<{
+          activeSessionCount: number;
+          dominantAgent: string;
+          dominantEventKind: string;
+          eventCount: number;
+          isBreak: boolean;
+        }>;
+      };
+    };
+    expect(payload.activity.dateLocal).toBe("2026-02-11");
+    expect(payload.activity.binMinutes).toBe(5);
+    expect(payload.activity.breakMinutes).toBe(10);
+    expect(payload.activity.totalSessionsInWindow).toBe(3);
+    expect(payload.activity.bins.length).toBeGreaterThan(200);
+    const activeBins = payload.activity.bins.filter((bin) => bin.activeSessionCount > 0);
+    expect(activeBins.length).toBeGreaterThan(0);
+    expect(activeBins.every((bin) => bin.dominantAgent === "codex")).toBe(true);
+    expect(payload.activity.bins.some((bin) => bin.isBreak)).toBe(true);
+    expect(payload.activity.bins.some((bin) => bin.eventCount > 0 && bin.dominantEventKind !== "none")).toBe(true);
+
+    await server.close();
+  }, 20_000);
+
+  it("serves weekly heatmap activity windows from 6am to 2am", async () => {
+    const fixture = await buildFixtureWithTraceCount(3);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/week?end_date=2026-02-11&tz_offset_min=0&day_count=7&slot_min=30&hour_start=6&hour_end=2",
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      activity: {
+        dayCount: number;
+        slotMinutes: number;
+        hourStartLocal: number;
+        hourEndLocal: number;
+        days: Array<{ dateLocal: string; bins: Array<{ startMs: number; activeSessionCount: number }> }>;
+      };
+    };
+
+    expect(payload.activity.dayCount).toBe(7);
+    expect(payload.activity.slotMinutes).toBe(30);
+    expect(payload.activity.hourStartLocal).toBe(6);
+    expect(payload.activity.hourEndLocal).toBe(2);
+    expect(payload.activity.days).toHaveLength(7);
+    expect(payload.activity.days.every((day) => day.bins.length === 40)).toBe(true);
+    expect(payload.activity.days.some((day) => day.bins.some((bin) => bin.activeSessionCount > 0))).toBe(true);
+    expect(payload.activity.days[0]?.dateLocal).toBe("2026-02-05");
+    expect(payload.activity.days[6]?.dateLocal).toBe("2026-02-11");
+    expect(payload.activity.days[0]?.bins[0]?.startMs).toBe(Date.UTC(2026, 1, 5, 6, 0, 0));
+    expect(payload.activity.days[0]?.bins[1]?.startMs).toBe(Date.UTC(2026, 1, 5, 6, 30, 0));
+
+    await server.close();
+  }, 20_000);
+
+  it("returns validation errors for invalid activity day query params", async () => {
+    const fixture = await buildFixtureWithTraceCount(1);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const invalidDate = await server.inject({
+      method: "GET",
+      url: "/api/activity/day?date=2026-99-11&tz_offset_min=0",
+    });
+    expect(invalidDate.statusCode).toBe(400);
+    expect(invalidDate.json()).toEqual({ error: "invalid date" });
+
+    const invalidTz = await server.inject({
+      method: "GET",
+      url: "/api/activity/day?date=2026-02-11&tz_offset_min=abc",
+    });
+    expect(invalidTz.statusCode).toBe(400);
+    expect(invalidTz.json()).toEqual({ error: "invalid tz_offset_min" });
+
+    await server.close();
+  }, 20_000);
+
+  it("returns validation errors for invalid activity week query params", async () => {
+    const fixture = await buildFixtureWithTraceCount(1);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const invalidSlot = await server.inject({
+      method: "GET",
+      url: "/api/activity/week?end_date=2026-02-11&tz_offset_min=0&slot_min=abc",
+    });
+    expect(invalidSlot.statusCode).toBe(400);
+    expect(invalidSlot.json()).toEqual({ error: "invalid slot_min" });
+
+    const invalidWindow = await server.inject({
+      method: "GET",
+      url: "/api/activity/week?end_date=2026-02-11&tz_offset_min=0&hour_start=6&hour_end=6",
+    });
+    expect(invalidWindow.statusCode).toBe(400);
+    expect(invalidWindow.json()).toEqual({ error: "invalid hour window" });
+
+    await server.close();
+  }, 20_000);
+
+  it("filters out idle session gaps with no events for over twenty minutes", async () => {
+    const sessionId = "server-session-gap";
+    const traceLog = [
+      JSON.stringify({
+        timestamp: "2026-02-11T00:00:00.000Z",
+        type: "session_meta",
+        payload: { id: sessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T00:05:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          id: "fc_gap_1",
+          name: "run_command",
+          call_id: "call_gap_1",
+          arguments: "{\"command\":\"echo hi\"}",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T00:06:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call_gap_1",
+          output: "hi",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T06:00:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          id: "fc_gap_2",
+          name: "run_command",
+          call_id: "call_gap_2",
+          arguments: "{\"command\":\"echo later\"}",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T06:01:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call_gap_2",
+          output: "later",
+        },
+      }),
+    ].join("\n");
+
+    const fixture = await buildFixtureWithCustomTrace(traceLog, sessionId);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/day?date=2026-02-11&tz_offset_min=0&bin_min=5&break_min=10",
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      activity: {
+        totalSessionsInWindow: number;
+        bins: Array<{ startMs: number; activeSessionCount: number }>;
+      };
+    };
+    expect(payload.activity.totalSessionsInWindow).toBe(1);
+
+    const byStart = new Map(payload.activity.bins.map((bin) => [bin.startMs, bin.activeSessionCount]));
+    expect(byStart.get(Date.UTC(2026, 1, 11, 0, 5, 0))).toBe(1);
+    expect(byStart.get(Date.UTC(2026, 1, 11, 0, 10, 0))).toBe(0);
+    expect(byStart.get(Date.UTC(2026, 1, 11, 3, 0, 0))).toBe(0);
+    expect(byStart.get(Date.UTC(2026, 1, 11, 6, 0, 0))).toBe(1);
 
     await server.close();
   }, 20_000);

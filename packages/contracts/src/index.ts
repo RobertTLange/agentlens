@@ -212,6 +212,54 @@ export interface TracePage {
   liveCursor: string;
 }
 
+export interface AgentActivityBin {
+  startMs: number;
+  endMs: number;
+  activeSessionCount: number;
+  activeTraceIds: string[];
+  primaryTraceId: string;
+  activeByAgent: Record<AgentKind, number>;
+  eventCount: number;
+  eventKindCounts: Record<EventKind, number>;
+  dominantAgent: AgentKind | "none";
+  dominantEventKind: EventKind | "none";
+  isBreak: boolean;
+}
+
+export interface AgentActivityDay {
+  dateLocal: string;
+  tzOffsetMinutes: number;
+  binMinutes: number;
+  breakMinutes: number;
+  windowStartMs: number;
+  windowEndMs: number;
+  totalSessionsInWindow: number;
+  peakConcurrentSessions: number;
+  peakConcurrentAtMs: number | null;
+  bins: AgentActivityBin[];
+}
+
+export interface AgentActivityWeekDay {
+  dateLocal: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  totalSessionsInWindow: number;
+  peakConcurrentSessions: number;
+  peakConcurrentAtMs: number | null;
+  bins: AgentActivityBin[];
+}
+
+export interface AgentActivityWeek {
+  tzOffsetMinutes: number;
+  dayCount: number;
+  slotMinutes: number;
+  hourStartLocal: number;
+  hourEndLocal: number;
+  startDateLocal: string;
+  endDateLocal: string;
+  days: AgentActivityWeekDay[];
+}
+
 export interface OverviewStats {
   traceCount: number;
   sessionCount: number;
