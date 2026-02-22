@@ -13,6 +13,7 @@ const AGENT_KIND_KEYS: AgentKind[] = ["claude", "codex", "cursor", "opencode", "
 const EVENT_KIND_KEYS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "meta"];
 const DEFAULT_BIN_MINUTES = 5;
 const DEFAULT_BREAK_MINUTES = 10;
+const DEFAULT_DAY_HOUR_START_LOCAL = 7;
 const MIN_BIN_MINUTES = 1;
 const MAX_BIN_MINUTES = 60;
 const MIN_BREAK_MINUTES = 1;
@@ -392,7 +393,8 @@ export function buildAgentActivityDay(
   const binMinutes = clamp(requestedBinMinutes ?? DEFAULT_BIN_MINUTES, MIN_BIN_MINUTES, MAX_BIN_MINUTES);
   const breakMinutes = clamp(requestedBreakMinutes ?? DEFAULT_BREAK_MINUTES, MIN_BREAK_MINUTES, MAX_BREAK_MINUTES);
 
-  const windowStartMs = windowStartMsForDateLocal(dateLocal, tzOffsetMinutes);
+  const dayStartMs = windowStartMsForDateLocal(dateLocal, tzOffsetMinutes);
+  const windowStartMs = dayStartMs + DEFAULT_DAY_HOUR_START_LOCAL * 60 * 60_000;
   const windowEndOfDayMs = windowStartMs + DAY_MS;
   const todayLocal = toLocalDateString(nowMs, tzOffsetMinutes);
   const windowEndMs = dateLocal === todayLocal ? Math.max(windowStartMs, Math.min(windowEndOfDayMs, nowMs)) : windowEndOfDayMs;

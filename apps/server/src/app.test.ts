@@ -1089,6 +1089,7 @@ describe("server api", () => {
         breakMinutes: number;
         totalSessionsInWindow: number;
         bins: Array<{
+          startMs: number;
           activeSessionCount: number;
           dominantAgent: string;
           dominantEventKind: string;
@@ -1100,6 +1101,8 @@ describe("server api", () => {
     expect(payload.activity.dateLocal).toBe("2026-02-11");
     expect(payload.activity.binMinutes).toBe(5);
     expect(payload.activity.breakMinutes).toBe(10);
+    expect(payload.activity.bins[0]?.startMs).toBe(Date.UTC(2026, 1, 11, 7, 0, 0));
+    expect(payload.activity.bins[1]?.startMs).toBe(Date.UTC(2026, 1, 11, 7, 5, 0));
     expect(payload.activity.totalSessionsInWindow).toBe(3);
     expect(payload.activity.bins.length).toBeGreaterThan(200);
     const activeBins = payload.activity.bins.filter((bin) => bin.activeSessionCount > 0);
@@ -1212,12 +1215,12 @@ describe("server api", () => {
     const sessionId = "server-session-gap";
     const traceLog = [
       JSON.stringify({
-        timestamp: "2026-02-11T00:00:00.000Z",
+        timestamp: "2026-02-11T07:00:00.000Z",
         type: "session_meta",
         payload: { id: sessionId, cwd: "/tmp/proj", cli_version: "0.1.0" },
       }),
       JSON.stringify({
-        timestamp: "2026-02-11T00:05:00.000Z",
+        timestamp: "2026-02-11T07:05:00.000Z",
         type: "response_item",
         payload: {
           type: "function_call",
@@ -1228,7 +1231,7 @@ describe("server api", () => {
         },
       }),
       JSON.stringify({
-        timestamp: "2026-02-11T00:06:00.000Z",
+        timestamp: "2026-02-11T07:06:00.000Z",
         type: "response_item",
         payload: {
           type: "function_call_output",
@@ -1237,7 +1240,7 @@ describe("server api", () => {
         },
       }),
       JSON.stringify({
-        timestamp: "2026-02-11T06:00:00.000Z",
+        timestamp: "2026-02-11T13:00:00.000Z",
         type: "response_item",
         payload: {
           type: "function_call",
@@ -1248,7 +1251,7 @@ describe("server api", () => {
         },
       }),
       JSON.stringify({
-        timestamp: "2026-02-11T06:01:00.000Z",
+        timestamp: "2026-02-11T13:01:00.000Z",
         type: "response_item",
         payload: {
           type: "function_call_output",
@@ -1279,10 +1282,10 @@ describe("server api", () => {
     expect(payload.activity.totalSessionsInWindow).toBe(1);
 
     const byStart = new Map(payload.activity.bins.map((bin) => [bin.startMs, bin.activeSessionCount]));
-    expect(byStart.get(Date.UTC(2026, 1, 11, 0, 5, 0))).toBe(1);
-    expect(byStart.get(Date.UTC(2026, 1, 11, 0, 10, 0))).toBe(0);
-    expect(byStart.get(Date.UTC(2026, 1, 11, 3, 0, 0))).toBe(0);
-    expect(byStart.get(Date.UTC(2026, 1, 11, 6, 0, 0))).toBe(1);
+    expect(byStart.get(Date.UTC(2026, 1, 11, 7, 5, 0))).toBe(1);
+    expect(byStart.get(Date.UTC(2026, 1, 11, 7, 10, 0))).toBe(0);
+    expect(byStart.get(Date.UTC(2026, 1, 11, 10, 0, 0))).toBe(0);
+    expect(byStart.get(Date.UTC(2026, 1, 11, 13, 0, 0))).toBe(1);
 
     await server.close();
   }, 20_000);

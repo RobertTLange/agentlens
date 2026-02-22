@@ -36,10 +36,12 @@ Base URL (default): `http://127.0.0.1:8787`
 
 ### `GET /api/activity/day`
 
-- `date` (`YYYY-MM-DD`, local day)
+- `date` (`YYYY-MM-DD`, local day label)
 - `tz_offset_min` (integer timezone offset minutes; JS `Date#getTimezoneOffset()`)
 - `bin_min` (bin width in minutes)
 - `break_min` (minimum contiguous no-agent minutes to mark as break)
+
+Daily window is a 24-hour cycle anchored at `7:00` local time (`date 07:00` to next-day `07:00`).
 
 ### `GET /api/activity/week`
 
