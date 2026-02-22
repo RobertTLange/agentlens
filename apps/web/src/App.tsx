@@ -17,6 +17,7 @@ import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
 const API = "";
+const AD_HOC_TRACE_ID_PREFIX = "adhoc:";
 const EVENT_ENTER_ANIMATION_MS = 180;
 const TRACE_ENTER_ANIMATION_MS = 620;
 const TIMELINE_LATEST_EPSILON_PX = 12;
@@ -229,12 +230,40 @@ function createDefaultVisibleEventKinds(): Set<EventKind> {
   return new Set(DEFAULT_VISIBLE_EVENT_KINDS);
 }
 
+function adHocEncodedPathFromLocationPathname(pathname: string): string {
+  const match = pathname.match(/^\/trace-file\/([^/?#]+)/);
+  if (!match || !match[1]) return "";
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return "";
+  }
+}
+
+function isAdHocTraceSelection(selectedId: string): boolean {
+  return selectedId.startsWith(AD_HOC_TRACE_ID_PREFIX);
+}
+
+function decodeBase64Url(input: string): string {
+  if (!input.trim()) throw new Error("empty base64url input");
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padLength = (4 - (normalized.length % 4)) % 4;
+  const padded = `${normalized}${"=".repeat(padLength)}`;
+  const decodedBinary = window.atob(padded);
+  const bytes = Uint8Array.from(decodedBinary, (ch) => ch.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 export function App(): JSX.Element {
   const [overview, setOverview] = useState<OverviewStats | null>(null);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
+  const [activeAdHocEncodedPath, setActiveAdHocEncodedPath] = useState(() =>
+    typeof window === "undefined" ? "" : adHocEncodedPathFromLocationPathname(window.location.pathname),
+  );
   const [selectedId, setSelectedId] = useState("");
   const [page, setPage] = useState<TracePage | null>(null);
   const [status, setStatus] = useState("Loading...");
+  const [deepLinkWarning, setDeepLinkWarning] = useState("");
   const [flashStatus, setFlashStatus] = useState("");
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
@@ -399,15 +428,27 @@ export function App(): JSX.Element {
     if (!selectedId) return null;
     return traces.find((trace) => trace.id === selectedId) ?? null;
   }, [selectedId, traces]);
+  const selectedAdHocPath = useMemo(() => {
+    if (!isAdHocTraceSelection(selectedId)) return "";
+    const encodedPath = selectedId.slice(AD_HOC_TRACE_ID_PREFIX.length);
+    if (!encodedPath) return "";
+    try {
+      return decodeBase64Url(encodedPath);
+    } catch {
+      return "";
+    }
+  }, [selectedId]);
   const selectedTraceSummaryStamp = selectedTraceSummary ? buildTraceSummaryStamp(selectedTraceSummary) : "";
   const selectedTracePulseSeq = selectedTraceSummary ? (pulseSeqByTraceId[selectedTraceSummary.id] ?? 0) : 0;
-  const selectedTraceLabel = selectedTraceSummary?.sessionId || selectedTraceSummary?.id || "";
+  const selectedTraceLabel = selectedTraceSummary?.sessionId || selectedTraceSummary?.id || selectedAdHocPath || "";
   const selectedTraceEventCount = selectedTraceSummary?.eventCount ?? 0;
   const selectedTraceUpdatedMs = selectedTraceSummary
     ? Math.max(selectedTraceSummary.lastEventTs ?? 0, selectedTraceSummary.mtimeMs)
     : null;
   const selectedTraceMeta = selectedTraceSummary
     ? `${selectedTraceSummary.agent} · ${selectedTraceEventCount} ${selectedTraceEventCount === 1 ? "event" : "events"} · updated ${fmtTimeAgo(selectedTraceUpdatedMs, clockNowMs)}`
+    : selectedAdHocPath
+      ? `ad-hoc file · ${selectedAdHocPath}`
     : "Pick a session to inspect.";
   const sessionStatusCounts = useMemo(() => {
     const counts = {
@@ -680,6 +721,7 @@ export function App(): JSX.Element {
   }, [olderTraces, selectedId, showOlderTraces]);
 
   useEffect(() => {
+    if (isAdHocTraceSelection(selectedId)) return;
     if (selectedId && traces.some((trace) => trace.id === selectedId)) return;
     const fallbackId = traces[0]?.id ?? "";
     if (fallbackId === selectedId) return;
@@ -781,7 +823,11 @@ export function App(): JSX.Element {
         const sorted = limitRecentTraces(tracesResp.traces.map(applyManualStopOverride));
         setOverview(overviewResp.overview);
         setTraces(sorted);
-        setSelectedId((prev) => prev || sorted[0]?.id || "");
+        setSelectedId((prev) => {
+          if (prev) return prev;
+          if (activeAdHocEncodedPath) return `${AD_HOC_TRACE_ID_PREFIX}${activeAdHocEncodedPath}`;
+          return sorted[0]?.id || "";
+        });
         setStatus(`Loaded ${sorted.length} traces`);
       } catch (error) {
         setStatus(`Failed: ${String(error)}`);
@@ -939,7 +985,15 @@ export function App(): JSX.Element {
     return () => {
       source.close();
     };
-  }, [applyManualStopOverride, removeTraceRow]);
+  }, [activeAdHocEncodedPath, applyManualStopOverride, removeTraceRow]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const desiredPath =
+      isAdHocTraceSelection(selectedId) && activeAdHocEncodedPath ? `/trace-file/${activeAdHocEncodedPath}` : "/";
+    if (window.location.pathname === desiredPath) return;
+    window.history.replaceState(null, "", desiredPath);
+  }, [activeAdHocEncodedPath, selectedId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -975,6 +1029,8 @@ export function App(): JSX.Element {
     const cacheKey = buildTracePageCacheKey(selectedId, includeMeta);
     const selectedSummaryStamp = selectedTraceSummaryStamp;
     const cachedEntry = tracePageCacheRef.current.get(cacheKey);
+    const selectedAdHocEncodedPath = isAdHocTraceSelection(selectedId) ? selectedId.slice(AD_HOC_TRACE_ID_PREFIX.length) : "";
+    const isAdHocSelection = Boolean(selectedAdHocEncodedPath);
 
     const applyTraceDetail = (detail: TracePage): void => {
       const eventIds = new Set(detail.events.map((event) => event.eventId));
@@ -1001,9 +1057,11 @@ export function App(): JSX.Element {
 
     const shouldFetch =
       !cachedEntry ||
-      !selectedSummaryStamp ||
-      cachedEntry.summaryStamp !== selectedSummaryStamp ||
-      (sameTraceAsPreviousLoad && (includeMetaChanged || liveTickChanged));
+      (isAdHocSelection
+        ? sameTraceAsPreviousLoad && includeMetaChanged
+        : !selectedSummaryStamp ||
+          cachedEntry.summaryStamp !== selectedSummaryStamp ||
+          (sameTraceAsPreviousLoad && (includeMetaChanged || liveTickChanged)));
     if (!shouldFetch) {
       return;
     }
@@ -1015,11 +1073,17 @@ export function App(): JSX.Element {
     const loadTrace = async (): Promise<void> => {
       try {
         const detail = await fetchJson<TracePage>(
-          `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=1200&include_meta=${includeMeta ? "1" : "0"}`,
+          isAdHocSelection
+            ? `${API}/api/tracefile?path=${encodeURIComponent(selectedAdHocEncodedPath)}&limit=1200&include_meta=${includeMeta ? "1" : "0"}`
+            : `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=1200&include_meta=${includeMeta ? "1" : "0"}`,
           { signal: abortController.signal },
         );
         if (abortController.signal.aborted) return;
         if (traceLoadRequestSeqRef.current !== requestSeq) return;
+        if (isAdHocSelection) {
+          setDeepLinkWarning("");
+          setActiveAdHocEncodedPath(selectedAdHocEncodedPath);
+        }
         upsertTracePageCache(tracePageCacheRef.current, cacheKey, {
           page: detail,
           summaryStamp: buildTraceSummaryStamp(detail.summary),
@@ -1028,6 +1092,12 @@ export function App(): JSX.Element {
       } catch (error) {
         if (abortController.signal.aborted) return;
         if (error instanceof Error && error.name === "AbortError") return;
+        if (isAdHocSelection) {
+          setDeepLinkWarning("Requested trace file not found; showing latest indexed session.");
+          setActiveAdHocEncodedPath("");
+          setSelectedId(traces[0]?.id ?? "");
+          return;
+        }
         setStatus(`Trace load failed: ${String(error)}`);
       }
     };
@@ -1036,7 +1106,7 @@ export function App(): JSX.Element {
     return () => {
       abortController.abort();
     };
-  }, [clearEventAppendQueue, selectedId, selectedTraceSummaryStamp, includeMeta, liveTick]);
+  }, [clearEventAppendQueue, includeMeta, liveTick, selectedId, selectedTraceSummaryStamp, traces]);
 
   useEffect(() => {
     if (!autoFollow) return;
@@ -1488,6 +1558,11 @@ export function App(): JSX.Element {
               {headerStatus}
             </div>
           </div>
+          {deepLinkWarning && (
+            <div className="hero-warning mono" role="status">
+              {deepLinkWarning}
+            </div>
+          )}
           <p>Live observability for your Codex, Claude, Cursor, Gemini, OpenCode and Pi agent sessions.</p>
         </div>
         <div className="hero-metrics">
