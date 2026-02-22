@@ -21,8 +21,8 @@ const DEFAULT_WEEK_DAY_COUNT = 7;
 const MIN_WEEK_DAY_COUNT = 1;
 const MAX_WEEK_DAY_COUNT = 14;
 const DEFAULT_WEEK_SLOT_MINUTES = 30;
-const DEFAULT_WEEK_HOUR_START_LOCAL = 6;
-const DEFAULT_WEEK_HOUR_END_LOCAL = 2;
+const DEFAULT_WEEK_HOUR_START_LOCAL = 0;
+const DEFAULT_WEEK_HOUR_END_LOCAL = 24;
 const MIN_TZ_OFFSET_MINUTES = -14 * 60;
 const MAX_TZ_OFFSET_MINUTES = 14 * 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -108,6 +108,22 @@ function parseDateLocal(dateLocal: string): { year: number; month: number; day: 
 function windowStartMsForDateLocal(dateLocal: string, tzOffsetMinutes: number): number {
   const { year, month, day } = parseDateLocal(dateLocal);
   return Date.UTC(year, month - 1, day) + tzOffsetMinutes * 60_000;
+}
+
+function computeWeekWindowMinutes(hourStartLocal: number, hourEndLocal: number): number {
+  if (hourEndLocal === hourStartLocal) {
+    return 24 * 60;
+  }
+  if (hourEndLocal === 24) {
+    return (24 - hourStartLocal) * 60;
+  }
+  if (hourEndLocal > hourStartLocal) {
+    return (hourEndLocal - hourStartLocal) * 60;
+  }
+  if (hourEndLocal < hourStartLocal) {
+    return (24 - hourStartLocal + hourEndLocal) * 60;
+  }
+  return 0;
 }
 
 function shiftDateLocal(dateLocal: string, dayOffset: number): string {
@@ -422,8 +438,8 @@ export function buildAgentActivityWeek(
   const requestedHourStart = validateInt(options.hourStartLocal, "hour_start");
   const requestedHourEnd = validateInt(options.hourEndLocal, "hour_end");
   const hourStartLocal = clamp(requestedHourStart ?? DEFAULT_WEEK_HOUR_START_LOCAL, 0, 23);
-  const hourEndLocal = clamp(requestedHourEnd ?? DEFAULT_WEEK_HOUR_END_LOCAL, 0, 23);
-  const windowMinutes = ((hourEndLocal - hourStartLocal + 24) % 24) * 60;
+  const hourEndLocal = clamp(requestedHourEnd ?? DEFAULT_WEEK_HOUR_END_LOCAL, 0, 24);
+  const windowMinutes = computeWeekWindowMinutes(hourStartLocal, hourEndLocal);
   if (windowMinutes <= 0) {
     throw new Error("invalid hour window");
   }

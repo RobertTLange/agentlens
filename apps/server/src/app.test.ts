@@ -1174,7 +1174,7 @@ describe("server api", () => {
     await server.close();
   }, 20_000);
 
-  it("returns validation errors for invalid activity week query params", async () => {
+  it("returns validation errors for invalid activity week params and supports equal hour windows", async () => {
     const fixture = await buildFixtureWithTraceCount(1);
     const server = await createServer({
       traceIndex: fixture.index,
@@ -1189,12 +1189,21 @@ describe("server api", () => {
     expect(invalidSlot.statusCode).toBe(400);
     expect(invalidSlot.json()).toEqual({ error: "invalid slot_min" });
 
-    const invalidWindow = await server.inject({
+    const equalHourWindow = await server.inject({
       method: "GET",
       url: "/api/activity/week?end_date=2026-02-11&tz_offset_min=0&hour_start=6&hour_end=6",
     });
-    expect(invalidWindow.statusCode).toBe(400);
-    expect(invalidWindow.json()).toEqual({ error: "invalid hour window" });
+    expect(equalHourWindow.statusCode).toBe(200);
+    const equalHourPayload = equalHourWindow.json() as {
+      activity: {
+        hourStartLocal: number;
+        hourEndLocal: number;
+        days: Array<{ bins: Array<unknown> }>;
+      };
+    };
+    expect(equalHourPayload.activity.hourStartLocal).toBe(6);
+    expect(equalHourPayload.activity.hourEndLocal).toBe(6);
+    expect(equalHourPayload.activity.days[0]?.bins.length).toBe(48);
 
     await server.close();
   }, 20_000);
