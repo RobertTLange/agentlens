@@ -1,7 +1,15 @@
 /* @vitest-environment happy-dom */
 
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import type { EventKind, NormalizedEvent, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
+import type {
+  AgentActivityDay,
+  AgentActivityWeek,
+  EventKind,
+  NormalizedEvent,
+  OverviewStats,
+  TracePage,
+  TraceSummary,
+} from "@agentlens/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.js";
 
@@ -133,6 +141,149 @@ function makeOverview(traceCount: number): OverviewStats {
       meta: 0,
     },
     updatedAtMs: 1_000,
+  };
+}
+
+function makeActivityDay(): AgentActivityDay {
+  const startMs = Date.UTC(2026, 1, 22, 0, 0, 0);
+  return {
+    dateLocal: "2026-02-22",
+    tzOffsetMinutes: 0,
+    binMinutes: 5,
+    breakMinutes: 10,
+    windowStartMs: startMs,
+    windowEndMs: startMs + 20 * 60_000,
+    totalSessionsInWindow: 3,
+    peakConcurrentSessions: 2,
+    peakConcurrentAtMs: startMs,
+    bins: [
+      {
+        startMs,
+        endMs: startMs + 5 * 60_000,
+        activeSessionCount: 2,
+        activeTraceIds: ["trace-c", "trace-a"],
+        primaryTraceId: "trace-c",
+        activeByAgent: { claude: 1, codex: 1, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
+        eventCount: 2,
+        eventKindCounts: { system: 0, assistant: 2, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, meta: 0 },
+        dominantAgent: "codex",
+        dominantEventKind: "assistant",
+        isBreak: false,
+      },
+      {
+        startMs: startMs + 5 * 60_000,
+        endMs: startMs + 10 * 60_000,
+        activeSessionCount: 0,
+        activeTraceIds: [],
+        primaryTraceId: "",
+        activeByAgent: { claude: 0, codex: 0, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
+        eventCount: 0,
+        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, meta: 0 },
+        dominantAgent: "none",
+        dominantEventKind: "none",
+        isBreak: true,
+      },
+      {
+        startMs: startMs + 10 * 60_000,
+        endMs: startMs + 15 * 60_000,
+        activeSessionCount: 1,
+        activeTraceIds: ["trace-a"],
+        primaryTraceId: "trace-a",
+        activeByAgent: { claude: 0, codex: 0, cursor: 1, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
+        eventCount: 1,
+        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 1, tool_result: 0, reasoning: 0, meta: 0 },
+        dominantAgent: "cursor",
+        dominantEventKind: "tool_use",
+        isBreak: false,
+      },
+      {
+        startMs: startMs + 15 * 60_000,
+        endMs: startMs + 20 * 60_000,
+        activeSessionCount: 0,
+        activeTraceIds: [],
+        primaryTraceId: "",
+        activeByAgent: { claude: 0, codex: 0, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
+        eventCount: 0,
+        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, meta: 0 },
+        dominantAgent: "none",
+        dominantEventKind: "none",
+        isBreak: true,
+      },
+    ],
+  };
+}
+
+function makeActivityWeek(): AgentActivityWeek {
+  const slotMinutes = 30;
+  const slotMs = slotMinutes * 60_000;
+  const dayCount = 7;
+  const hourStartLocal = 6;
+  const hourEndLocal = 2;
+  const startDateLocal = "2026-02-16";
+  const endDateLocal = "2026-02-22";
+  const emptyAgentCounts = (): Record<TraceSummary["agent"], number> => ({
+    claude: 0,
+    codex: 0,
+    cursor: 0,
+    opencode: 0,
+    gemini: 0,
+    pi: 0,
+    unknown: 0,
+  });
+  const emptyEventCounts = (): Record<EventKind, number> => ({
+    system: 0,
+    assistant: 0,
+    user: 0,
+    tool_use: 0,
+    tool_result: 0,
+    reasoning: 0,
+    meta: 0,
+  });
+
+  const days = Array.from({ length: dayCount }, (_, dayIndex) => {
+    const date = new Date(Date.UTC(2026, 1, 16 + dayIndex));
+    const dateLocal = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    const windowStartMs = Date.UTC(2026, 1, 16 + dayIndex, 6, 0, 0);
+    const windowEndMs = windowStartMs + 20 * 60 * 60 * 1000;
+
+    const bins = Array.from({ length: 40 }, (_, slotIndex) => {
+      const startMs = windowStartMs + slotIndex * slotMs;
+      const isHotSlot = (dayIndex === 6 && slotIndex === 12) || (dayIndex === 5 && slotIndex === 25);
+      return {
+        startMs,
+        endMs: startMs + slotMs,
+        activeSessionCount: isHotSlot ? 1 : 0,
+        activeTraceIds: isHotSlot ? ["trace-a"] : [],
+        primaryTraceId: isHotSlot ? "trace-a" : "",
+        activeByAgent: isHotSlot ? { ...emptyAgentCounts(), codex: 1 } : emptyAgentCounts(),
+        eventCount: isHotSlot ? 3 : 0,
+        eventKindCounts: isHotSlot ? { ...emptyEventCounts(), assistant: 3 } : emptyEventCounts(),
+        dominantAgent: isHotSlot ? ("codex" as const) : ("none" as const),
+        dominantEventKind: isHotSlot ? ("assistant" as const) : ("none" as const),
+        isBreak: false,
+      };
+    });
+
+    return {
+      dateLocal,
+      windowStartMs,
+      windowEndMs,
+      totalSessionsInWindow: bins.some((bin) => bin.activeSessionCount > 0) ? 1 : 0,
+      peakConcurrentSessions: bins.some((bin) => bin.activeSessionCount > 0) ? 1 : 0,
+      peakConcurrentAtMs: bins.find((bin) => bin.activeSessionCount > 0)?.startMs ?? null,
+      bins,
+    };
+  });
+
+  return {
+    tzOffsetMinutes: 0,
+    dayCount,
+    slotMinutes,
+    hourStartLocal,
+    hourEndLocal,
+    startDateLocal,
+    endDateLocal,
+    days,
   };
 }
 
@@ -365,6 +516,8 @@ let openResponsesByTraceId: Record<string, { status: number; body: Record<string
 let inputResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let inputRequests: Array<{ traceId: string; text: string; submit: boolean }>;
 let missingAdHocEncodedPaths: Set<string>;
+let activityDay: AgentActivityDay;
+let activityWeek: AgentActivityWeek;
 
 beforeEach(() => {
   tracesById = {
@@ -383,6 +536,8 @@ beforeEach(() => {
   inputResponsesByTraceId = {};
   inputRequests = [];
   missingAdHocEncodedPaths = new Set<string>();
+  activityDay = makeActivityDay();
+  activityWeek = makeActivityWeek();
   window.history.replaceState(null, "", "/");
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
@@ -405,6 +560,12 @@ beforeEach(() => {
       }
       if (url.includes("/api/traces")) {
         return new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 });
+      }
+      if (url.includes("/api/activity/day")) {
+        return new Response(JSON.stringify({ activity: activityDay }), { status: 200 });
+      }
+      if (url.includes("/api/activity/week")) {
+        return new Response(JSON.stringify({ activity: activityWeek }), { status: 200 });
       }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
@@ -489,6 +650,127 @@ describe("App sessions list live motion", () => {
       "https://github.com/RobertTLange/agentlens",
     );
     expect(document.querySelector("footer")).toBeNull();
+  });
+
+  it("switches to the activity view and renders daily + weekly activity heatmaps", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true));
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/week"))).toBe(true));
+    await waitFor(() => expect(document.querySelectorAll(".activity-bin-heat").length).toBe(activityDay.bins.length));
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+    expect(document.querySelector(".activity-day-title")?.textContent).toBe("Daily Activity");
+    expect(document.querySelector(".activity-week-title")?.textContent).toBe("Week Heatmap");
+    expect(document.querySelector(".activity-session-segment.agent-border-codex")).toBeTruthy();
+    expect(document.querySelector(".activity-bin-heat.is-break")).toBeTruthy();
+    expect(document.querySelector(".activity-idle-cell.active")).toBeTruthy();
+    const segmentStyles = Array.from(document.querySelectorAll(".activity-session-segment")).map(
+      (node) => node.getAttribute("style") ?? "",
+    );
+    expect(segmentStyles.some((style) => style.includes("--event-assistant-bg"))).toBe(true);
+  });
+
+  it("compresses timeline columns when inactivity exceeds four hours", async () => {
+    const startMs = Date.UTC(2026, 1, 22, 0, 0, 0);
+    const binMinutes = 5;
+    const binCount = 72;
+    activityDay = {
+      ...activityDay,
+      binMinutes,
+      windowStartMs: startMs,
+      windowEndMs: startMs + binCount * binMinutes * 60_000,
+      totalSessionsInWindow: 2,
+      peakConcurrentSessions: 1,
+      peakConcurrentAtMs: startMs,
+      bins: Array.from({ length: binCount }, (_, index) => {
+        const isFirstActive = index === 0;
+        const isLastActive = index === binCount - 1;
+        const isActive = isFirstActive || isLastActive;
+        const traceId = isFirstActive ? "trace-a" : isLastActive ? "trace-c" : "";
+        return {
+          startMs: startMs + index * binMinutes * 60_000,
+          endMs: startMs + (index + 1) * binMinutes * 60_000,
+          activeSessionCount: isActive ? 1 : 0,
+          activeTraceIds: traceId ? [traceId] : [],
+          primaryTraceId: traceId,
+          activeByAgent: { claude: 0, codex: isActive ? 1 : 0, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
+          eventCount: isActive ? 1 : 0,
+          eventKindCounts: {
+            system: 0,
+            assistant: isActive ? 1 : 0,
+            user: 0,
+            tool_use: 0,
+            tool_result: 0,
+            reasoning: 0,
+            meta: 0,
+          },
+          dominantAgent: isActive ? ("codex" as const) : ("none" as const),
+          dominantEventKind: isActive ? ("assistant" as const) : ("none" as const),
+          isBreak: !isActive,
+        };
+      }),
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-session-segment").length).toBeGreaterThan(0));
+    const timelineStyle = document.querySelector(".activity-timeline-horizontal")?.getAttribute("style") ?? "";
+    expect(timelineStyle).toContain("grid-template-columns");
+    expect(timelineStyle).toMatch(/0\.08\d*fr/);
+    expect(document.querySelector(".activity-day-meta")?.textContent).toContain("idle >4h compressed");
+  });
+
+  it("jumps from activity bin click to inspector with selected session", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-session-segment").length).toBeGreaterThan(0));
+    const clickableBin = Array.from(document.querySelectorAll(".activity-session-segment")).find((node) => {
+      return node instanceof HTMLButtonElement && !node.disabled && node.getAttribute("aria-label")?.includes("trace-a");
+    });
+    if (!(clickableBin instanceof HTMLButtonElement)) {
+      throw new Error("missing clickable activity bin");
+    }
+    act(() => {
+      clickableBin.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    await waitFor(() => expect(getTraceRow("trace-a").className).toContain("active"));
   });
 
   it("renders only the newest 20 sessions by default and gates older sessions behind a toggle", async () => {
