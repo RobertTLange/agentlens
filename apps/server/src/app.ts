@@ -9,6 +9,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import type { AppConfig, SessionDetail, TraceSummary } from "@agentlens/contracts";
 import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
+import { buildAgentActivityDay, buildAgentActivityWeek } from "./activity.js";
 
 const execFileAsync = promisify(execFile);
 const STOP_SIGNAL_WAIT_MS = 1_200;
@@ -2035,6 +2036,55 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
   server.get("/api/overview", async () => ({ overview: traceIndex.getOverview() }));
   server.get("/api/perf", async () => ({ perf: traceIndex.getPerformanceStats() }));
+  server.get("/api/activity/day", async (request, reply) => {
+    const query = request.query as {
+      date?: string;
+      tz_offset_min?: string;
+      bin_min?: string;
+      break_min?: string;
+    };
+
+    try {
+      const activityOptions = {
+        ...(query.date !== undefined ? { dateLocal: query.date } : {}),
+        ...(query.tz_offset_min !== undefined ? { tzOffsetMinutes: Number.parseInt(query.tz_offset_min, 10) } : {}),
+        ...(query.bin_min !== undefined ? { binMinutes: Number.parseInt(query.bin_min, 10) } : {}),
+        ...(query.break_min !== undefined ? { breakMinutes: Number.parseInt(query.break_min, 10) } : {}),
+      };
+      const activity = buildAgentActivityDay(traceIndex, activityOptions);
+      return { activity };
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
+
+  server.get("/api/activity/week", async (request, reply) => {
+    const query = request.query as {
+      end_date?: string;
+      tz_offset_min?: string;
+      day_count?: string;
+      slot_min?: string;
+      hour_start?: string;
+      hour_end?: string;
+    };
+
+    try {
+      const activityOptions = {
+        ...(query.end_date !== undefined ? { endDateLocal: query.end_date } : {}),
+        ...(query.tz_offset_min !== undefined ? { tzOffsetMinutes: Number.parseInt(query.tz_offset_min, 10) } : {}),
+        ...(query.day_count !== undefined ? { dayCount: Number.parseInt(query.day_count, 10) } : {}),
+        ...(query.slot_min !== undefined ? { slotMinutes: Number.parseInt(query.slot_min, 10) } : {}),
+        ...(query.hour_start !== undefined ? { hourStartLocal: Number.parseInt(query.hour_start, 10) } : {}),
+        ...(query.hour_end !== undefined ? { hourEndLocal: Number.parseInt(query.hour_end, 10) } : {}),
+      };
+      const activity = buildAgentActivityWeek(traceIndex, activityOptions);
+      return { activity };
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
 
   server.get("/api/traces", async (request) => {
     const query = request.query as { agent?: string; limit?: string };

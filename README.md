@@ -16,7 +16,7 @@
 When agent workflows fail, most debugging time goes into piecing together scattered logs, tool calls, and session state. AgentLens gives you one local place to inspect traces live, compare sessions quickly, and jump from summary to event-level detail in seconds.
 
 
-![AgentLens web UI](docs/demo-2026-02-15-141523.png)
+![AgentLens Trace Inspector view](docs/inspector-2026-02-22.png)
 
 
 ## Quick Start
@@ -72,7 +72,14 @@ node -e 'const p=process.argv[1]; console.log(`http://localhost:8787/trace-file/
 - Unified ingestion for Codex, Claude, Cursor, Gemini, Pi, OpenCode.
 - Live web UI + CLI + HTTP API on one local index.
 - Session activity state (`running`, `waiting_input`, `idle`).
+- Activity Overview in web UI:
+  - `Daily Activity`: left-to-right timeline, stacked parallel sessions, pastel event coloring, idle-gap compression.
+  - `Week Heatmap`: click a day label to load that day in `Daily Activity`.
 - Tool call/result inspection, error visibility, and stream updates.
+
+## Activity View
+
+![AgentLens Daily Activity view](docs/activity-2026-02-22.png)
 
 ## Docs
 

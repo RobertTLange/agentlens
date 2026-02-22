@@ -13,6 +13,7 @@ import {
   type TimelineSortDirection,
 } from "./view-model.js";
 import { SessionTraceRow } from "./SessionTraceRow.js";
+import { ActivityView } from "./ActivityView.js";
 import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
@@ -267,6 +268,7 @@ export function App(): JSX.Element {
   const [flashStatus, setFlashStatus] = useState("");
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
+  const [activeView, setActiveView] = useState<"inspector" | "activity">("inspector");
   const [query, setQuery] = useState("");
   const [showOlderTraces, setShowOlderTraces] = useState(false);
   const [olderTraceRenderLimit, setOlderTraceRenderLimit] = useState(OLDER_TRACE_PAGE_SIZE);
@@ -506,6 +508,14 @@ export function App(): JSX.Element {
     }
     return rows;
   }, [toolCallTypeCountsPreview]);
+  const traceAgentById = useMemo(
+    () => Object.fromEntries(traces.map((trace) => [trace.id, trace.agent])),
+    [traces],
+  );
+  const traceTokenTotalsById = useMemo(
+    () => Object.fromEntries(traces.map((trace) => [trace.id, trace.tokenTotals])),
+    [traces],
+  );
   const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(renderedTraceIds);
   const { bindItemRef: bindTocRowRef } = useListReorderAnimation<HTMLButtonElement>(tocRowIds, { resetKey: selectedId });
   const { bindItemRef: bindEventCardRef } = useListReorderAnimation<HTMLElement>(timelineEventIds, {
@@ -722,7 +732,7 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (isAdHocTraceSelection(selectedId)) return;
-    if (selectedId && traces.some((trace) => trace.id === selectedId)) return;
+    if (selectedId) return;
     const fallbackId = traces[0]?.id ?? "";
     if (fallbackId === selectedId) return;
     setSelectedId(fallbackId);
@@ -1565,63 +1575,89 @@ export function App(): JSX.Element {
           )}
           <p>Live observability for your Codex, Claude, Cursor, Gemini, OpenCode and Pi agent sessions.</p>
         </div>
-        <div className="hero-metrics">
-          <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
-          <span>{`events ${overview?.eventCount ?? 0}`}</span>
-          <span>{`errors ${overview?.errorCount ?? 0}`}</span>
-          <span>{`tool io ${(overview?.toolUseCount ?? 0) + (overview?.toolResultCount ?? 0)}`}</span>
-          <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
-            <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-              <path
-                fill="currentColor"
-                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
-              />
-            </svg>
-            <span>agentlens</span>
-          </a>
+        <div className="hero-right">
+          <div className="hero-metrics">
+            <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
+            <span>{`events ${overview?.eventCount ?? 0}`}</span>
+            <span>{`errors ${overview?.errorCount ?? 0}`}</span>
+            <span>{`tool io ${(overview?.toolUseCount ?? 0) + (overview?.toolResultCount ?? 0)}`}</span>
+          </div>
+          <div className="hero-actions">
+            <div className="hero-view-toggle" role="tablist" aria-label="Primary view selector">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeView === "inspector"}
+                className={`mono hero-view-button ${activeView === "inspector" ? "active" : ""}`}
+                onClick={() => setActiveView("inspector")}
+              >
+                Inspector
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeView === "activity"}
+                className={`mono hero-view-button ${activeView === "activity" ? "active" : ""}`}
+                onClick={() => setActiveView("activity")}
+              >
+                Activity
+              </button>
+            </div>
+            <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
+              <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path
+                  fill="currentColor"
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+                />
+              </svg>
+              <span>agentlens</span>
+            </a>
+          </div>
         </div>
       </header>
 
-      <section
-        className={`timeline-strip-panel ${timelineStripShowsRightGlow ? "timeline-strip-has-right-glow" : ""}`}
-        aria-label={
-          timelineStripShowsRightGlow
-            ? `Session timeline summary, ${timelineOffscreenAppendCount} new events off-screen to the right`
-            : "Session timeline summary"
-        }
-      >
-        {timelineStripEvents.length > 0 ? (
-          <div
-            className="timeline-strip-scroll"
-            ref={timelineStripRef}
-            onScroll={handleTimelineStripScroll}
-            data-at-latest={timelineStripPinnedToLatest ? "true" : "false"}
-            data-has-overflow={timelineStripHasOverflow ? "true" : "false"}
+      {activeView === "inspector" ? (
+        <>
+          <section
+            className={`timeline-strip-panel ${timelineStripShowsRightGlow ? "timeline-strip-has-right-glow" : ""}`}
+            aria-label={
+              timelineStripShowsRightGlow
+                ? `Session timeline summary, ${timelineOffscreenAppendCount} new events off-screen to the right`
+                : "Session timeline summary"
+            }
           >
-            <div className="timeline-strip-track" aria-label="Chronological timeline events">
-              {timelineStripEvents.map((event) => {
-                const isActive = event.eventId === selectedEventId;
-                const eventTime = fmtTime(event.timestampMs);
-                const eventLabel = event.label || event.eventKind;
-                return (
-                  <button
-                    key={event.eventId}
-                    type="button"
-                    className={`timeline-segment kind-${kindClassSuffix(event.colorKey)} ${isActive ? "active" : ""} ${enteringEventIds.has(event.eventId) ? "timeline-segment-enter" : ""}`}
-                    onClick={() => jumpToEvent(event.eventId)}
-                    title={`${eventLabel} (${event.eventKind}) #${event.index} ${eventTime}`}
-                    aria-label={`Jump to event #${event.index} ${event.eventKind}: ${eventLabel}`}
-                  />
-                );
-              })}
-            </div>
-          </div>
-        ) : (
-          <div className="timeline-strip-empty">No timeline events</div>
-        )}
-      </section>
+            {timelineStripEvents.length > 0 ? (
+              <div
+                className="timeline-strip-scroll"
+                ref={timelineStripRef}
+                onScroll={handleTimelineStripScroll}
+                data-at-latest={timelineStripPinnedToLatest ? "true" : "false"}
+                data-has-overflow={timelineStripHasOverflow ? "true" : "false"}
+              >
+                <div className="timeline-strip-track" aria-label="Chronological timeline events">
+                  {timelineStripEvents.map((event) => {
+                    const isActive = event.eventId === selectedEventId;
+                    const eventTime = fmtTime(event.timestampMs);
+                    const eventLabel = event.label || event.eventKind;
+                    return (
+                      <button
+                        key={event.eventId}
+                        type="button"
+                        className={`timeline-segment kind-${kindClassSuffix(event.colorKey)} ${isActive ? "active" : ""} ${enteringEventIds.has(event.eventId) ? "timeline-segment-enter" : ""}`}
+                        onClick={() => jumpToEvent(event.eventId)}
+                        title={`${eventLabel} (${event.eventKind}) #${event.index} ${eventTime}`}
+                        aria-label={`Jump to event #${event.index} ${event.eventKind}: ${eventLabel}`}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="timeline-strip-empty">No timeline events</div>
+            )}
+          </section>
 
-      <div className="grid">
+          <div className="grid">
         <section className="panel list-panel">
           <div className="panel-head">
             <div className="session-head-top">
@@ -1887,6 +1923,17 @@ export function App(): JSX.Element {
             )}
         </section>
       </div>
+    </>
+      ) : (
+        <ActivityView
+          traceAgentById={traceAgentById}
+          traceTokenTotalsById={traceTokenTotalsById}
+          onInspectTrace={(traceId) => {
+            setSelectedId(traceId);
+            setActiveView("inspector");
+          }}
+        />
+      )}
     </main>
   );
 }
