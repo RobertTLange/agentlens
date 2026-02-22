@@ -192,6 +192,12 @@ function traceIdFromTraceUrl(url: string): string {
   return decodeURIComponent(match?.[1] ?? "");
 }
 
+function encodedPathFromTraceFileUrl(url: string): string {
+  const parsed = new URL(url, "http://localhost");
+  if (!parsed.pathname.includes("/api/tracefile")) return "";
+  return parsed.searchParams.get("path") ?? "";
+}
+
 function traceIdFromStopUrl(url: string): string {
   const match = url.match(/\/api\/trace\/([^/]+)\/stop(?:\?|$)/);
   return decodeURIComponent(match?.[1] ?? "");
@@ -205,6 +211,10 @@ function traceIdFromOpenUrl(url: string): string {
 function traceIdFromInputUrl(url: string): string {
   const match = url.match(/\/api\/trace\/([^/]+)\/input(?:\?|$)/);
   return decodeURIComponent(match?.[1] ?? "");
+}
+
+function encodeBase64UrlUtf8(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
 }
 
 function countTraceDetailRequests(traceId: string): number {
@@ -354,6 +364,7 @@ let stopResponsesByTraceId: Record<string, { status: number; body: Record<string
 let openResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let inputResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let inputRequests: Array<{ traceId: string; text: string; submit: boolean }>;
+let missingAdHocEncodedPaths: Set<string>;
 
 beforeEach(() => {
   tracesById = {
@@ -371,6 +382,8 @@ beforeEach(() => {
   openResponsesByTraceId = {};
   inputResponsesByTraceId = {};
   inputRequests = [];
+  missingAdHocEncodedPaths = new Set<string>();
+  window.history.replaceState(null, "", "/");
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
   vi.stubGlobal(
@@ -426,6 +439,19 @@ beforeEach(() => {
         const status = custom?.status ?? 200;
         const body = custom?.body ?? { ok: true, status: "sent_tmux", message: "sent input to tmux pane" };
         return new Response(JSON.stringify(body), { status });
+      }
+      if (url.includes("/api/tracefile")) {
+        const encodedPath = encodedPathFromTraceFileUrl(url);
+        if (missingAdHocEncodedPaths.has(encodedPath)) {
+          return new Response(JSON.stringify({ error: "trace file not found" }), { status: 404 });
+        }
+        const tracePage =
+          Object.values(tracePagesById).find((candidate) => encodeBase64UrlUtf8(candidate.summary.path) === encodedPath) ??
+          Object.values(tracePagesById)[0];
+        if (!tracePage) {
+          return new Response("{}", { status: 404 });
+        }
+        return new Response(JSON.stringify(tracePage), { status: 200 });
       }
       if (url.includes("/api/trace/")) {
         const traceId = traceIdFromTraceUrl(url);
@@ -558,6 +584,34 @@ describe("App sessions list live motion", () => {
     expect(metaInput.checked).toBe(false);
     const traceRequestUrl = getTraceDetailRequests("trace-c")[0];
     expect(traceRequestUrl).toContain("include_meta=0");
+  });
+
+  it("loads an ad-hoc trace file directly from /trace-file/<encoded>", async () => {
+    const tracePage = tracePagesById["trace-c"];
+    if (!tracePage) throw new Error("missing trace-c page");
+    const encodedPath = encodeBase64UrlUtf8(tracePage.summary.path);
+    window.history.replaceState(null, "", `/trace-file/${encodedPath}`);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(requestedUrls.some((url) => url.includes(`/api/tracefile?path=${encodedPath}`))).toBe(true),
+    );
+    expect(document.querySelector(".detail-head-meta")?.textContent).toContain(tracePage.summary.path);
+    expect(window.location.pathname).toBe(`/trace-file/${encodedPath}`);
+  });
+
+  it("falls back to latest indexed trace and warns when deep-linked trace file is missing", async () => {
+    const missingPath = "/tmp/agentlens-missing-deep-link.jsonl";
+    const encodedPath = encodeBase64UrlUtf8(missingPath);
+    missingAdHocEncodedPaths.add(encodedPath);
+    window.history.replaceState(null, "", `/trace-file/${encodedPath}`);
+
+    render(<App />);
+
+    await waitFor(() => expect(document.querySelector(".hero-warning")?.textContent).toContain("not found"));
+    await waitFor(() => expect(getTraceRow("trace-c").className).toContain("active"));
+    expect(window.location.pathname).toBe("/");
   });
 
   it("requests include_meta=1 when enabling meta event kind", async () => {
