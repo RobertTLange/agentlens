@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -173,6 +173,90 @@ function parsePositiveInt(rawValue: string | undefined, fallback: number): numbe
   const parsed = Number.parseInt(rawValue, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.max(1, Math.min(MAX_RECENT_TRACE_LIMIT, parsed));
+}
+
+function decodeBase64UrlUtf8(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("invalid trace file token");
+  try {
+    const decoded = Buffer.from(trimmed, "base64url").toString("utf8");
+    if (!decoded) throw new Error("invalid trace file token");
+    return decoded;
+  } catch {
+    throw new Error("invalid trace file token");
+  }
+}
+
+function resolveTraceFilePathFromToken(encodedPath: string): string {
+  const decodedPath = decodeBase64UrlUtf8(encodedPath);
+  if (decodedPath.includes("\0")) throw new Error("invalid trace file path");
+  const normalizedPath = path.resolve(decodedPath);
+  if (!path.isAbsolute(normalizedPath)) throw new Error("trace file path must be absolute");
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(normalizedPath);
+  } catch {
+    throw new Error("trace file not found");
+  }
+  if (!stat.isFile()) throw new Error("trace file path is not a file");
+  return normalizedPath;
+}
+
+function parseTracePageOptions(query: { limit?: string; before?: string; include_meta?: string }): {
+  limit?: number;
+  before?: string;
+  includeMeta?: boolean;
+} {
+  const pageOptions: { limit?: number; before?: string; includeMeta?: boolean } = {};
+  if (query.include_meta !== undefined) {
+    pageOptions.includeMeta = query.include_meta === "1" || query.include_meta === "true";
+  }
+  if (query.limit) {
+    pageOptions.limit = Number(query.limit);
+  }
+  if (query.before) {
+    pageOptions.before = query.before;
+  }
+  return pageOptions;
+}
+
+function buildAdHocTraceConfig(baseConfig: AppConfig, traceFilePath: string): AppConfig {
+  const parentDirectory = path.dirname(traceFilePath);
+  const filename = path.basename(traceFilePath);
+  const disabledSources = Object.fromEntries(
+    Object.entries(baseConfig.sources).map(([key, value]) => [key, { ...value, enabled: false }]),
+  );
+  return mergeConfig({
+    ...baseConfig,
+    sessionLogDirectories: [],
+    sources: {
+      ...disabledSources,
+      ad_hoc_file: {
+        name: "ad_hoc_file",
+        enabled: true,
+        roots: [parentDirectory],
+        includeGlobs: [filename],
+        excludeGlobs: [],
+        maxDepth: 0,
+        agentHint: "unknown",
+      },
+    },
+  });
+}
+
+async function loadAdHocTracePage(
+  traceIndex: TraceIndex,
+  traceFilePath: string,
+  pageOptions: { limit?: number; before?: string; includeMeta?: boolean },
+) {
+  const adHocConfig = buildAdHocTraceConfig(traceIndex.getConfig(), traceFilePath);
+  const adHocIndex = new TraceIndex(adHocConfig);
+  await adHocIndex.refresh();
+  const matchingSummary = adHocIndex.getSummaries().find((summary) => path.resolve(summary.path) === traceFilePath);
+  if (!matchingSummary) {
+    throw new Error("trace file not parseable");
+  }
+  return adHocIndex.getTracePage(matchingSummary.id, pageOptions);
 }
 
 function listRecentTraceSummaries(
@@ -1964,21 +2048,38 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
     try {
       const resolvedId = traceIndex.resolveId(params.id);
-      const pageOptions: { limit?: number; before?: string; includeMeta?: boolean } = {};
-      if (query.include_meta !== undefined) {
-        pageOptions.includeMeta = query.include_meta === "1" || query.include_meta === "true";
-      }
-      if (query.limit) {
-        pageOptions.limit = Number(query.limit);
-      }
-      if (query.before) {
-        pageOptions.before = query.before;
-      }
+      const pageOptions = parseTracePageOptions(query);
       const page = traceIndex.getTracePage(resolvedId, pageOptions);
       return page;
     } catch (error) {
       reply.code(404);
       return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  server.get("/api/tracefile", async (request, reply) => {
+    const query = request.query as { path?: string; limit?: string; before?: string; include_meta?: string };
+
+    try {
+      const encodedPath = typeof query.path === "string" ? query.path : "";
+      const traceFilePath = resolveTraceFilePathFromToken(encodedPath);
+      const pageOptions = parseTracePageOptions(query);
+      const page = await loadAdHocTracePage(traceIndex, traceFilePath, pageOptions);
+      return page;
+    } catch (error) {
+      const message = asErrorMessage(error);
+      if (
+        message === "invalid trace file token" ||
+        message === "invalid trace file path" ||
+        message === "trace file path must be absolute"
+      ) {
+        reply.code(400);
+      } else if (message === "trace file not found" || message === "trace file path is not a file") {
+        reply.code(404);
+      } else {
+        reply.code(500);
+      }
+      return { error: message };
     }
   });
 
@@ -2208,6 +2309,21 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   });
 
   server.get("/", async (_request, reply) => {
+    if (!existsSync(webDistPath)) {
+      reply.type("text/html");
+      return `<!doctype html>
+<html><body style="font-family: sans-serif; padding: 2rem;">
+<h1>AgentLens server running</h1>
+<p>Web app not built yet.</p>
+<p>Build once: <code>npm -w apps/web run build</code></p>
+<p>Or run dev UI: <code>npm -w apps/web run dev</code> then open <a href="http://127.0.0.1:5173">http://127.0.0.1:5173</a>.</p>
+<p>API: <a href="/api/overview">/api/overview</a></p>
+</body></html>`;
+    }
+    return reply.sendFile("index.html");
+  });
+
+  server.get("/trace-file/*", async (_request, reply) => {
     if (!existsSync(webDistPath)) {
       reply.type("text/html");
       return `<!doctype html>

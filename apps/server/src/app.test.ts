@@ -1064,7 +1064,7 @@ describe("server api", () => {
     const traceById = await server.inject({ method: "GET", url: `/api/trace/${traceId}` });
     expect(traceById.statusCode).toBe(200);
     const detail = traceById.json() as {
-      summary: { sessionId: string };
+      summary: { sessionId: string; path: string };
       events: Array<{ toolCallId?: string; toolArgsText?: string; toolResultText?: string }>;
       toc?: Array<{ label: string; eventKind: string }>;
     };
@@ -1079,6 +1079,36 @@ describe("server api", () => {
 
     const traceBySession = await server.inject({ method: "GET", url: `/api/trace/${fixture.sessionId}` });
     expect(traceBySession.statusCode).toBe(200);
+    const traceFilePath = detail.summary.path;
+    const traceFileToken = Buffer.from(traceFilePath, "utf8").toString("base64url");
+    const traceByFile = await server.inject({ method: "GET", url: `/api/tracefile?path=${encodeURIComponent(traceFileToken)}` });
+    expect(traceByFile.statusCode).toBe(200);
+    expect(traceByFile.json()).toMatchObject({
+      summary: {
+        path: traceFilePath,
+        sessionId: fixture.sessionId,
+      },
+    });
+    const traceByFileMeta = await server.inject({
+      method: "GET",
+      url: `/api/tracefile?path=${encodeURIComponent(traceFileToken)}&include_meta=1&limit=1`,
+    });
+    expect(traceByFileMeta.statusCode).toBe(200);
+    expect((traceByFileMeta.json() as { events: unknown[] }).events.length).toBe(1);
+    const traceByFileInvalidToken = await server.inject({ method: "GET", url: "/api/tracefile?path=%2A%2A%2A" });
+    expect(traceByFileInvalidToken.statusCode).toBe(400);
+    expect(traceByFileInvalidToken.json()).toEqual({
+      error: "invalid trace file token",
+    });
+    const missingPathToken = Buffer.from("/tmp/agentlens-missing-file.jsonl", "utf8").toString("base64url");
+    const traceByFileMissing = await server.inject({
+      method: "GET",
+      url: `/api/tracefile?path=${encodeURIComponent(missingPathToken)}`,
+    });
+    expect(traceByFileMissing.statusCode).toBe(404);
+    expect(traceByFileMissing.json()).toEqual({
+      error: "trace file not found",
+    });
 
     const stopRes = await server.inject({ method: "POST", url: `/api/trace/${traceId}/stop` });
     expect(stopRes.statusCode).toBe(200);
@@ -1265,4 +1295,22 @@ describe("server api", () => {
 
     await server.close();
   }, 20_000);
+
+  it("serves web index for trace-file deep-link routes when static assets exist", async () => {
+    const fixture = await buildFixture();
+    const webDistPath = await mkdtemp(path.join(os.tmpdir(), "agentlens-web-dist-"));
+    await writeFile(path.join(webDistPath, "index.html"), "<!doctype html><html><body>trace-file-deep-link</body></html>", "utf8");
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      webDistPath,
+      enableStatic: true,
+    });
+
+    const response = await server.inject({ method: "GET", url: "/trace-file/demo-token" });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("trace-file-deep-link");
+
+    await server.close();
+  });
 });
