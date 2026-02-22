@@ -508,7 +508,6 @@ export function App(): JSX.Element {
     }
     return rows;
   }, [toolCallTypeCountsPreview]);
-  const inspectableTraceIds = useMemo(() => new Set(traces.map((trace) => trace.id)), [traces]);
   const traceAgentById = useMemo(
     () => Object.fromEntries(traces.map((trace) => [trace.id, trace.agent])),
     [traces],
@@ -733,7 +732,7 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (isAdHocTraceSelection(selectedId)) return;
-    if (selectedId && traces.some((trace) => trace.id === selectedId)) return;
+    if (selectedId) return;
     const fallbackId = traces[0]?.id ?? "";
     if (fallbackId === selectedId) return;
     setSelectedId(fallbackId);
@@ -1927,7 +1926,6 @@ export function App(): JSX.Element {
     </>
       ) : (
         <ActivityView
-          inspectableTraceIds={inspectableTraceIds}
           traceAgentById={traceAgentById}
           traceTokenTotalsById={traceTokenTotalsById}
           onInspectTrace={(traceId) => {

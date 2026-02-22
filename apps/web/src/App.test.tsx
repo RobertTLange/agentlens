@@ -845,7 +845,7 @@ describe("App sessions list live motion", () => {
     expect(document.querySelector(".activity-day-meta")?.textContent).toContain("idle >4h compressed");
   });
 
-  it("jumps from activity bin click to inspector with selected session", async () => {
+  it("jumps from daily activity session click to inspector with corresponding trace", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
 
@@ -861,7 +861,7 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(document.querySelectorAll(".activity-session-segment").length).toBeGreaterThan(0));
     const clickableBin = Array.from(document.querySelectorAll(".activity-session-segment")).find((node) => {
-      return node instanceof HTMLButtonElement && !node.disabled && node.getAttribute("aria-label")?.includes("trace-a");
+      return node instanceof HTMLButtonElement && !node.disabled && node.getAttribute("aria-label")?.includes("trace-c");
     });
     if (!(clickableBin instanceof HTMLButtonElement)) {
       throw new Error("missing clickable activity bin");
@@ -871,7 +871,56 @@ describe("App sessions list live motion", () => {
     });
 
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
-    await waitFor(() => expect(getTraceRow("trace-a").className).toContain("active"));
+    await waitFor(() => expect(getTraceRow("trace-c").className).toContain("active"));
+  });
+
+  it("opens inspector for daily activity session even when not in current session list", async () => {
+    const hiddenTrace = makeTrace("trace-hidden", 4_000);
+    tracePagesById["trace-hidden"] = makeTracePage(hiddenTrace);
+    activityDay = {
+      ...activityDay,
+      totalSessionsInWindow: Math.max(activityDay.totalSessionsInWindow, 1),
+      bins: activityDay.bins.map((bin, index) =>
+        index === 0
+          ? {
+              ...bin,
+              activeSessionCount: 1,
+              activeTraceIds: ["trace-hidden"],
+              primaryTraceId: "trace-hidden",
+              activeByAgent: { claude: 0, codex: 1, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
+              dominantAgent: "codex",
+            }
+          : bin,
+      ),
+    };
+    activityDayByDate = { [activityDay.dateLocal]: activityDay };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-session-segment").length).toBeGreaterThan(0));
+    const hiddenSegment = Array.from(document.querySelectorAll(".activity-session-segment")).find((node) => {
+      return node instanceof HTMLButtonElement && node.getAttribute("aria-label")?.includes("trace-hidden");
+    });
+    if (!(hiddenSegment instanceof HTMLButtonElement)) {
+      throw new Error("missing hidden activity segment");
+    }
+    act(() => {
+      hiddenSegment.click();
+    });
+
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/trace-hidden"))).toBe(true));
+    await waitFor(() => expect(document.querySelector(".detail-panel .detail-summary-cards")).toBeTruthy());
   });
 
   it("renders only the newest 20 sessions by default and gates older sessions behind a toggle", async () => {

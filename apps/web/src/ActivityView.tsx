@@ -53,7 +53,6 @@ interface ActivityWeekResponse {
 
 interface ActivityViewProps {
   onInspectTrace?: (traceId: string) => void;
-  inspectableTraceIds?: ReadonlySet<string>;
   traceAgentById?: Readonly<Record<string, AgentKind>>;
   traceTokenTotalsById?: Readonly<Record<string, TraceTokenTotalsSnapshot | undefined>>;
 }
@@ -262,7 +261,6 @@ function buildSessionSegments(
 
 export function ActivityView({
   onInspectTrace,
-  inspectableTraceIds,
   traceAgentById,
   traceTokenTotalsById,
 }: ActivityViewProps): JSX.Element {
@@ -428,17 +426,14 @@ export function ActivityView({
                   />
                 ))}
                 {segments.map((segment) => {
-                  const isInspectable = inspectableTraceIds?.has(segment.traceId) ?? false;
                   return (
                     <button
                       key={`${segment.traceId}-${segment.startIndex}-${segment.endIndex}`}
                       type="button"
-                      disabled={!isInspectable}
                       onClick={() => {
-                        if (!isInspectable) return;
                         onInspectTrace?.(segment.traceId);
                       }}
-                      className={`activity-session-segment agent-border-${segment.agent}${isInspectable ? "" : " not-inspectable"}`}
+                      className={`activity-session-segment agent-border-${segment.agent}`}
                       style={{
                         gridColumn: `${segment.startIndex + 1} / ${segment.endIndex + 2}`,
                         gridRow: `${segment.laneIndex + 1}`,

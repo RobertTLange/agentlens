@@ -1461,6 +1461,7 @@ body {
 .activity-week-heatmap {
   --activity-week-label-col: 104px;
   --activity-week-row-gap: 8px;
+  --activity-week-grid-pad: 6px;
   border: 1px solid #dbe5ef;
   border-radius: 12px;
   background: #f8fafc;
@@ -1496,7 +1497,7 @@ body {
 
 .activity-week-scale {
   position: relative;
-  margin-left: calc(var(--activity-week-label-col) + var(--activity-week-row-gap));
+  margin-left: calc(var(--activity-week-label-col) + var(--activity-week-row-gap) + var(--activity-week-grid-pad));
   height: 12px;
 }
 
@@ -1521,7 +1522,7 @@ body {
   position: relative;
   display: grid;
   gap: 4px;
-  padding: 4px;
+  padding: var(--activity-week-grid-pad);
 }
 
 .activity-week-grid::after {
@@ -1917,6 +1918,7 @@ body {
   border-radius: 8px;
   background: #f8fafc;
   padding: 2px;
+  isolation: isolate;
 }
 
 .activity-bin-heat {
@@ -1924,6 +1926,8 @@ body {
   border-radius: 2px;
   opacity: 0.22;
   background: #e2e8f0;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .activity-bin-heat.no-agents {
@@ -2015,6 +2019,10 @@ body {
   cursor: pointer;
   background: #f8fafc;
   overflow: hidden;
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+  touch-action: manipulation;
 }
 
 .activity-session-segment:hover:not(:disabled) {
@@ -2449,6 +2457,7 @@ body {
   .activity-week-heatmap {
     --activity-week-label-col: 86px;
     --activity-week-row-gap: 6px;
+    --activity-week-grid-pad: 5px;
   }
 
   .activity-week-day-button {
