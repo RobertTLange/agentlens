@@ -513,6 +513,10 @@ export function App(): JSX.Element {
     () => Object.fromEntries(traces.map((trace) => [trace.id, trace.agent])),
     [traces],
   );
+  const traceTokenTotalsById = useMemo(
+    () => Object.fromEntries(traces.map((trace) => [trace.id, trace.tokenTotals])),
+    [traces],
+  );
   const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(renderedTraceIds);
   const { bindItemRef: bindTocRowRef } = useListReorderAnimation<HTMLButtonElement>(tocRowIds, { resetKey: selectedId });
   const { bindItemRef: bindEventCardRef } = useListReorderAnimation<HTMLElement>(timelineEventIds, {
@@ -1925,6 +1929,7 @@ export function App(): JSX.Element {
         <ActivityView
           inspectableTraceIds={inspectableTraceIds}
           traceAgentById={traceAgentById}
+          traceTokenTotalsById={traceTokenTotalsById}
           onInspectTrace={(traceId) => {
             setSelectedId(traceId);
             setActiveView("inspector");

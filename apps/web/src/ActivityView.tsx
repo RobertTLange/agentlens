@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import type { AgentActivityDay, AgentActivityWeek, AgentKind } from "@agentlens/contracts";
 import { buildActivityViewModel, type ActivityTimelineRowModel } from "./activity-view-model.js";
-import { buildActivityWeekHeatmapModel } from "./activity-week-heatmap-model.js";
-import { formatCompactNumber } from "./view-model.js";
+import {
+  buildActivityWeekHeatmapModel,
+  buildWeeklyUsageSummary,
+  type TraceTokenTotalsSnapshot,
+} from "./activity-week-heatmap-model.js";
+import { formatCompactNumber, formatPercent, iconForAgent } from "./view-model.js";
 
 const API = "";
 const DAY_MINUTES = 24 * 60;
@@ -13,8 +17,8 @@ const BREAK_MINUTES = 10;
 const REFRESH_INTERVAL_MS = 30_000;
 const WEEK_DAY_COUNT = 7;
 const WEEK_SLOT_MINUTES = 30;
-const WEEK_HOUR_START_LOCAL = 6;
-const WEEK_HOUR_END_LOCAL = 2;
+const WEEK_HOUR_START_LOCAL = 7;
+const WEEK_HOUR_END_LOCAL = 7;
 const IDLE_COMPRESSION_THRESHOLD_MINUTES = 4 * 60;
 const IDLE_COMPRESSED_BIN_FR = 0.08;
 const IDLE_COMPRESSED_EDGE_BIN_FR = 0.28;
@@ -51,6 +55,7 @@ interface ActivityViewProps {
   onInspectTrace?: (traceId: string) => void;
   inspectableTraceIds?: ReadonlySet<string>;
   traceAgentById?: Readonly<Record<string, AgentKind>>;
+  traceTokenTotalsById?: Readonly<Record<string, TraceTokenTotalsSnapshot | undefined>>;
 }
 
 function todayLocalDateString(): string {
@@ -85,7 +90,12 @@ function buildWeekCellTooltip(
     `day sessions ${day.totalSessionsInWindow}`,
     `intensity ${cell.level}/4`,
     `primary ${cell.primaryTraceId || "none"}`,
-  ].join(" | ");
+  ].join(" · ");
+}
+
+function formatHours(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  return `${value.toFixed(1)}h`;
 }
 
 interface SessionSegment {
@@ -250,25 +260,23 @@ function buildSessionSegments(
   };
 }
 
-export function ActivityView({ onInspectTrace, inspectableTraceIds, traceAgentById }: ActivityViewProps): JSX.Element {
+export function ActivityView({
+  onInspectTrace,
+  inspectableTraceIds,
+  traceAgentById,
+  traceTokenTotalsById,
+}: ActivityViewProps): JSX.Element {
+  const [selectedDateLocal, setSelectedDateLocal] = useState(() => todayLocalDateString());
   const [activity, setActivity] = useState<AgentActivityDay | null>(null);
   const [activityWeek, setActivityWeek] = useState<AgentActivityWeek | null>(null);
   const [isWeekLoading, setIsWeekLoading] = useState(true);
   const [status, setStatus] = useState("Loading daily activity...");
 
-  const fetchActivity = useCallback(async (): Promise<void> => {
-    const dateLocal = todayLocalDateString();
+  const fetchDayActivity = useCallback(async (dateLocal: string): Promise<void> => {
     const tzOffsetMinutes = new Date().getTimezoneOffset();
     const binMinutes = deriveBinMinutesForViewport(window.innerWidth || 1280);
     const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const dayUrl = `${API}/api/activity/day?date=${encodeURIComponent(dateLocal)}&tz_offset_min=${tzOffsetMinutes}&bin_min=${binMinutes}&break_min=${BREAK_MINUTES}`;
-    const weekUrl =
-      `${API}/api/activity/week?end_date=${encodeURIComponent(dateLocal)}` +
-      `&tz_offset_min=${tzOffsetMinutes}` +
-      `&day_count=${WEEK_DAY_COUNT}` +
-      `&slot_min=${WEEK_SLOT_MINUTES}` +
-      `&hour_start=${WEEK_HOUR_START_LOCAL}` +
-      `&hour_end=${WEEK_HOUR_END_LOCAL}`;
 
     try {
       const dayResponse = await fetch(dayUrl, { cache: "no-store" });
@@ -278,12 +286,23 @@ export function ActivityView({ onInspectTrace, inspectableTraceIds, traceAgentBy
       }
       const dayPayload = (await dayResponse.json()) as ActivityDayResponse;
       setActivity(dayPayload.activity);
-      setStatus(`Daily updated ${refreshedAt} · loading Week Heatmap...`);
+      setStatus(`Daily updated ${refreshedAt}`);
     } catch (error) {
       setStatus(`Daily activity failed: ${error instanceof Error ? error.message : String(error)}`);
-      setIsWeekLoading(false);
-      return;
     }
+  }, []);
+
+  const fetchWeekActivity = useCallback(async (): Promise<void> => {
+    const endDateLocal = todayLocalDateString();
+    const tzOffsetMinutes = new Date().getTimezoneOffset();
+    const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const weekUrl =
+      `${API}/api/activity/week?end_date=${encodeURIComponent(endDateLocal)}` +
+      `&tz_offset_min=${tzOffsetMinutes}` +
+      `&day_count=${WEEK_DAY_COUNT}` +
+      `&slot_min=${WEEK_SLOT_MINUTES}` +
+      `&hour_start=${WEEK_HOUR_START_LOCAL}` +
+      `&hour_end=${WEEK_HOUR_END_LOCAL}`;
 
     setIsWeekLoading(true);
     try {
@@ -296,24 +315,33 @@ export function ActivityView({ onInspectTrace, inspectableTraceIds, traceAgentBy
       setActivityWeek(weekPayload.activity);
       setStatus(`Updated ${refreshedAt}`);
     } catch (error) {
-      setStatus(`Daily updated ${refreshedAt} · Week Heatmap failed: ${error instanceof Error ? error.message : String(error)}`);
+      setStatus(`Week Heatmap failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsWeekLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void fetchActivity();
+    void fetchDayActivity(selectedDateLocal);
+  }, [fetchDayActivity, selectedDateLocal]);
+
+  useEffect(() => {
+    void fetchWeekActivity();
     const intervalId = window.setInterval(() => {
-      void fetchActivity();
+      void fetchWeekActivity();
+      void fetchDayActivity(selectedDateLocal);
     }, REFRESH_INTERVAL_MS);
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [fetchActivity]);
+  }, [fetchDayActivity, fetchWeekActivity, selectedDateLocal]);
 
   const model = useMemo(() => (activity ? buildActivityViewModel(activity) : null), [activity]);
   const weekModel = useMemo(() => (activityWeek ? buildActivityWeekHeatmapModel(activityWeek) : null), [activityWeek]);
+  const weeklyUsageSummary = useMemo(
+    () => (activityWeek ? buildWeeklyUsageSummary(activityWeek, traceAgentById, traceTokenTotalsById) : null),
+    [activityWeek, traceAgentById, traceTokenTotalsById],
+  );
   const binCount = model?.rows.length ?? 0;
   const { segments, laneCount } = useMemo(
     () => (model ? buildSessionSegments(model.rows, traceAgentById) : { segments: [], laneCount: 1 }),
@@ -345,34 +373,21 @@ export function ActivityView({ onInspectTrace, inspectableTraceIds, traceAgentBy
           <h2>Activity</h2>
           <div className="activity-head-meta mono">{activity ? `${activity.dateLocal} overview` : "today"}</div>
         </div>
-        <div className="activity-head-status mono">{headerStatus}</div>
+        <div className="activity-head-right">
+          <div className="activity-head-status mono">{headerStatus}</div>
+          {activity && model ? (
+            <div className="activity-head-stats" aria-label="daily activity summary">
+              <span className="mono activity-head-stat">{`sessions ${formatCompactNumber(activity.totalSessionsInWindow)} in window`}</span>
+              <span className="mono activity-head-stat">{`peak ${formatCompactNumber(model.peakConcurrentSessions)} at ${formatTime(model.peakConcurrentAtMs)}`}</span>
+              <span className="mono activity-head-stat">{`breaks ${formatCompactNumber(model.breakCount)} · ${Math.round(model.breakMinutes)} min`}</span>
+              <span className="mono activity-head-stat">{`active bins ${formatCompactNumber(model.activeBinCount)} · no agents ${formatCompactNumber(model.inactiveBinCount)}`}</span>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {activity && model ? (
         <>
-          <section className="activity-summary-cards" aria-label="daily activity summary cards">
-            <article className="activity-summary-card">
-              <div className="activity-summary-title mono">sessions</div>
-              <div className="activity-summary-value mono">{formatCompactNumber(activity.totalSessionsInWindow)}</div>
-              <div className="activity-summary-sub mono">in window</div>
-            </article>
-            <article className="activity-summary-card">
-              <div className="activity-summary-title mono">peak concurrency</div>
-              <div className="activity-summary-value mono">{formatCompactNumber(model.peakConcurrentSessions)}</div>
-              <div className="activity-summary-sub mono">{`at ${formatTime(model.peakConcurrentAtMs)}`}</div>
-            </article>
-            <article className="activity-summary-card">
-              <div className="activity-summary-title mono">breaks</div>
-              <div className="activity-summary-value mono">{formatCompactNumber(model.breakCount)}</div>
-              <div className="activity-summary-sub mono">{`${Math.round(model.breakMinutes)} min total`}</div>
-            </article>
-            <article className="activity-summary-card">
-              <div className="activity-summary-title mono">active bins</div>
-              <div className="activity-summary-value mono">{formatCompactNumber(model.activeBinCount)}</div>
-              <div className="activity-summary-sub mono">{`no agents ${formatCompactNumber(model.inactiveBinCount)}`}</div>
-            </article>
-          </section>
-
           <section className="activity-day-timeline" aria-label="daily activity timeline">
             <div className="activity-day-head">
               <div className="mono activity-day-title">Daily Activity</div>
@@ -477,7 +492,18 @@ export function ActivityView({ onInspectTrace, inspectableTraceIds, traceAgentBy
               <div className="activity-week-grid">
                 {weekModel.days.map((day) => (
                   <div key={day.dateLocal} className="activity-week-row">
-                    <div className="mono activity-week-day-label">{`${day.dayLabel} · ${formatCompactNumber(day.totalSessionsInWindow)}`}</div>
+                    <button
+                      type="button"
+                      className={`mono activity-week-day-button ${selectedDateLocal === day.dateLocal ? "active" : ""}`}
+                      data-date-local={day.dateLocal}
+                      aria-pressed={selectedDateLocal === day.dateLocal}
+                      onClick={() => {
+                        setSelectedDateLocal(day.dateLocal);
+                      }}
+                      title={`Show Daily Activity for ${day.dateLocal}`}
+                    >
+                      {`${day.dayLabel} · ${formatCompactNumber(day.totalSessionsInWindow)}`}
+                    </button>
                     <div
                       className="activity-week-row-cells"
                       style={
@@ -492,8 +518,7 @@ export function ActivityView({ onInspectTrace, inspectableTraceIds, traceAgentBy
                           <div
                             key={cell.key}
                             className={`activity-week-cell level-${cell.level}`}
-                            title={tooltip}
-                            aria-label={tooltip}
+                            data-tooltip={tooltip}
                           />
                         );
                       })}
@@ -517,6 +542,93 @@ export function ActivityView({ onInspectTrace, inspectableTraceIds, traceAgentBy
                 <div className="mono activity-week-title">Week Heatmap</div>
                 <div className="mono activity-week-meta">Loading...</div>
               </div>
+            </section>
+          ) : null}
+
+          {weekModel && weeklyUsageSummary ? (
+            <section className="activity-week-summary" aria-label="weekly usage summary">
+              <div className="activity-week-summary-head">
+                <div className="mono activity-week-summary-title">Week Summary</div>
+                <div className="mono activity-week-summary-meta">
+                  {`${weekModel.startDateLabel}-${weekModel.endDateLabel} · ranked by session-hours`}
+                </div>
+              </div>
+              <div className="activity-week-summary-cards">
+                <article className="activity-week-summary-card">
+                  <div className="mono activity-week-summary-label">total unique sessions</div>
+                  <div className="mono activity-week-summary-value">
+                    {formatCompactNumber(weeklyUsageSummary.totals.totalUniqueSessions)}
+                  </div>
+                </article>
+                <article className="activity-week-summary-card">
+                  <div className="mono activity-week-summary-label">total session-hours</div>
+                  <div className="mono activity-week-summary-value">{formatHours(weeklyUsageSummary.totals.totalSessionHours)}</div>
+                </article>
+                <article className="activity-week-summary-card">
+                  <div className="mono activity-week-summary-label">peak concurrency</div>
+                  <div className="mono activity-week-summary-value">
+                    {formatCompactNumber(weeklyUsageSummary.totals.peakAllAgentConcurrency)}
+                  </div>
+                </article>
+                <article className="activity-week-summary-card">
+                  <div className="mono activity-week-summary-label">most used agent</div>
+                  <div className="mono activity-week-summary-value">{weeklyUsageSummary.totals.mostUsedAgent ?? "-"}</div>
+                </article>
+              </div>
+              {weeklyUsageSummary.rows.length > 0 ? (
+                <div className="activity-week-summary-table-wrap">
+                  <table className="activity-week-summary-table mono">
+                    <thead>
+                      <tr>
+                        <th scope="col">agent</th>
+                        <th scope="col">session-hours</th>
+                        <th scope="col">share</th>
+                        <th scope="col">unique sessions</th>
+                        <th scope="col">in tokens</th>
+                        <th scope="col">cache tokens</th>
+                        <th scope="col">out tokens</th>
+                        <th scope="col">active slots</th>
+                        <th scope="col">active days</th>
+                        <th scope="col">peak conc.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {weeklyUsageSummary.rows.map((row) => {
+                        const iconPath = iconForAgent(row.agent);
+                        return (
+                          <tr key={row.agent}>
+                            <td>
+                              <span className="activity-week-summary-agent">
+                                {iconPath ? (
+                                  <span className="activity-week-summary-agent-icon-wrap" aria-hidden="true">
+                                    <img src={iconPath} alt="" className="activity-week-summary-agent-icon" loading="lazy" />
+                                  </span>
+                                ) : (
+                                  <span className="activity-week-summary-agent-fallback" aria-hidden="true">
+                                    {row.agent.slice(0, 1).toUpperCase()}
+                                  </span>
+                                )}
+                                <span>{row.agent}</span>
+                              </span>
+                            </td>
+                            <td>{formatHours(row.sessionHours)}</td>
+                            <td>{formatPercent(row.sessionSharePct, 1)}</td>
+                            <td>{formatCompactNumber(row.uniqueSessions)}</td>
+                            <td>{formatCompactNumber(row.inputTokens)}</td>
+                            <td>{formatCompactNumber(row.cacheTokens)}</td>
+                            <td>{formatCompactNumber(row.outputTokens)}</td>
+                            <td>{formatCompactNumber(row.activeSlots)}</td>
+                            <td>{formatCompactNumber(row.activeDays)}</td>
+                            <td>{formatCompactNumber(row.peakConcurrentSessions)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="activity-week-summary-empty mono">No weekly agent activity yet.</div>
+              )}
             </section>
           ) : null}
         </>

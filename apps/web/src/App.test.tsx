@@ -213,6 +213,28 @@ function makeActivityDay(): AgentActivityDay {
   };
 }
 
+function makeActivityDayForDate(dateLocal: string): AgentActivityDay {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateLocal);
+  if (!match) return makeActivityDay();
+  const year = Number.parseInt(match[1] ?? "2026", 10);
+  const month = Number.parseInt(match[2] ?? "01", 10);
+  const day = Number.parseInt(match[3] ?? "01", 10);
+  const startMs = Date.UTC(year, month - 1, day, 0, 0, 0);
+  const base = makeActivityDay();
+  return {
+    ...base,
+    dateLocal,
+    windowStartMs: startMs,
+    windowEndMs: startMs + 20 * 60_000,
+    peakConcurrentAtMs: startMs,
+    bins: base.bins.map((bin, index) => ({
+      ...bin,
+      startMs: startMs + index * base.binMinutes * 60_000,
+      endMs: startMs + (index + 1) * base.binMinutes * 60_000,
+    })),
+  };
+}
+
 function makeActivityWeek(): AgentActivityWeek {
   const slotMinutes = 30;
   const slotMs = slotMinutes * 60_000;
@@ -517,6 +539,7 @@ let inputResponsesByTraceId: Record<string, { status: number; body: Record<strin
 let inputRequests: Array<{ traceId: string; text: string; submit: boolean }>;
 let missingAdHocEncodedPaths: Set<string>;
 let activityDay: AgentActivityDay;
+let activityDayByDate: Record<string, AgentActivityDay>;
 let activityWeek: AgentActivityWeek;
 
 beforeEach(() => {
@@ -537,6 +560,7 @@ beforeEach(() => {
   inputRequests = [];
   missingAdHocEncodedPaths = new Set<string>();
   activityDay = makeActivityDay();
+  activityDayByDate = { [activityDay.dateLocal]: activityDay };
   activityWeek = makeActivityWeek();
   window.history.replaceState(null, "", "/");
 
@@ -562,7 +586,10 @@ beforeEach(() => {
         return new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 });
       }
       if (url.includes("/api/activity/day")) {
-        return new Response(JSON.stringify({ activity: activityDay }), { status: 200 });
+        const parsed = new URL(url, "http://localhost");
+        const requestedDate = parsed.searchParams.get("date") ?? "";
+        const resolvedDay = activityDayByDate[requestedDate] ?? activityDay;
+        return new Response(JSON.stringify({ activity: resolvedDay }), { status: 200 });
       }
       if (url.includes("/api/activity/week")) {
         return new Response(JSON.stringify({ activity: activityWeek }), { status: 200 });
@@ -669,10 +696,21 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true));
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/week"))).toBe(true));
+    expect(
+      requestedUrls.some((url) => url.includes("/api/activity/week") && url.includes("hour_start=7") && url.includes("hour_end=7")),
+    ).toBe(true);
     await waitFor(() => expect(document.querySelectorAll(".activity-bin-heat").length).toBe(activityDay.bins.length));
     await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+    await waitFor(() => expect(document.querySelector(".activity-week-summary")).toBeTruthy());
+    const headerStatsText = document.querySelector(".activity-head-stats")?.textContent?.toLowerCase() ?? "";
+    expect(headerStatsText).toContain("sessions 3 in window");
+    expect(headerStatsText).toContain("peak 2");
+    expect(headerStatsText).toContain("breaks 2");
+    expect(headerStatsText).toContain("active bins 2");
+    expect(document.querySelector(".activity-summary-cards")).toBeNull();
     expect(document.querySelector(".activity-day-title")?.textContent).toBe("Daily Activity");
     expect(document.querySelector(".activity-week-title")?.textContent).toBe("Week Heatmap");
+    expect(document.querySelector(".activity-week-summary-title")?.textContent).toBe("Week Summary");
     expect(document.querySelector(".activity-session-segment.agent-border-codex")).toBeTruthy();
     expect(document.querySelector(".activity-bin-heat.is-break")).toBeTruthy();
     expect(document.querySelector(".activity-idle-cell.active")).toBeTruthy();
@@ -680,6 +718,68 @@ describe("App sessions list live motion", () => {
       (node) => node.getAttribute("style") ?? "",
     );
     expect(segmentStyles.some((style) => style.includes("--event-assistant-bg"))).toBe(true);
+    const summaryCards = Array.from(document.querySelectorAll(".activity-week-summary-card")).map(
+      (node) => node.textContent?.toLowerCase() ?? "",
+    );
+    expect(summaryCards.some((cardText) => cardText.includes("total unique sessions") && cardText.includes("1"))).toBe(true);
+    expect(summaryCards.some((cardText) => cardText.includes("most used agent") && cardText.includes("codex"))).toBe(true);
+    const tableHeaders = Array.from(document.querySelectorAll(".activity-week-summary-table th")).map((node) =>
+      node.textContent?.trim().toLowerCase(),
+    );
+    expect(tableHeaders).toContain("session-hours");
+    expect(tableHeaders).toContain("in tokens");
+    expect(tableHeaders).toContain("cache tokens");
+    expect(tableHeaders).toContain("out tokens");
+    const firstSummaryRowText = document.querySelector(".activity-week-summary-table tbody tr")?.textContent?.toLowerCase() ?? "";
+    expect(firstSummaryRowText).toContain("codex");
+    expect(firstSummaryRowText).toContain("1.0k");
+    expect(firstSummaryRowText).toContain("500");
+    expect(firstSummaryRowText).toContain("400");
+    expect(document.querySelector(".activity-week-summary-agent-icon")).toBeTruthy();
+    const weekHeatmap = document.querySelector(".activity-week-heatmap");
+    const weekSummary = document.querySelector(".activity-week-summary");
+    expect(
+      weekHeatmap && weekSummary
+        ? (weekHeatmap.compareDocumentPosition(weekSummary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+        : false,
+    ).toBe(true);
+  });
+
+  it("updates Daily Activity when clicking a date label in Week Heatmap", async () => {
+    const targetDate = "2026-02-20";
+    activityDayByDate[targetDate] = makeActivityDayForDate(targetDate);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+    const dateButton = document.querySelector(`.activity-week-day-button[data-date-local="${targetDate}"]`);
+    if (!(dateButton instanceof HTMLButtonElement)) {
+      throw new Error(`missing week label button for ${targetDate}`);
+    }
+    act(() => {
+      dateButton.click();
+    });
+
+    await waitFor(() =>
+      expect(
+        requestedUrls.some((url) => url.includes("/api/activity/day") && url.includes(`date=${encodeURIComponent(targetDate)}`)),
+      ).toBe(true),
+    );
+    await waitFor(() => expect(document.querySelector(".activity-day-meta")?.textContent).toContain(targetDate));
+    expect(document.querySelector(`.activity-week-day-button[data-date-local="${targetDate}"]`)?.className).toContain(
+      "active",
+    );
   });
 
   it("compresses timeline columns when inactivity exceeds four hours", async () => {
@@ -722,6 +822,7 @@ describe("App sessions list live motion", () => {
         };
       }),
     };
+    activityDayByDate = { [activityDay.dateLocal]: activityDay };
 
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
