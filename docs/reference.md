@@ -63,6 +63,14 @@ Related config (`[scan]`):
 
 Manual stop from UI/API sets `activityReason: manually_stopped` immediately while live stream remains active.
 
+## Activity Overview (Web)
+
+- `Daily Activity`: left-to-right time axis with stacked parallel session bars.
+- Bars use pastel event-kind fills and agent-colored borders.
+- Long no-agent runs are compressed in the timeline when idle exceeds 4 hours.
+- Clicking a session bar opens that session in Inspector.
+- `Week Heatmap`: click a day label to update `Daily Activity` for that date.
+
 ## Trace Lifecycle
 
 - discovery: source roots + globs

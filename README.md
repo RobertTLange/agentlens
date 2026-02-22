@@ -72,6 +72,9 @@ node -e 'const p=process.argv[1]; console.log(`http://localhost:8787/trace-file/
 - Unified ingestion for Codex, Claude, Cursor, Gemini, Pi, OpenCode.
 - Live web UI + CLI + HTTP API on one local index.
 - Session activity state (`running`, `waiting_input`, `idle`).
+- Activity Overview in web UI:
+  - `Daily Activity`: left-to-right timeline, stacked parallel sessions, pastel event coloring, idle-gap compression.
+  - `Week Heatmap`: click a day label to load that day in `Daily Activity`.
 - Tool call/result inspection, error visibility, and stream updates.
 
 ## Docs
