@@ -1152,6 +1152,35 @@ describe("server api", () => {
     await server.close();
   }, 20_000);
 
+  it("supports year-to-date style activity windows with daily aggregation", async () => {
+    const fixture = await buildFixtureWithTraceCount(3);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/week?end_date=2026-02-22&tz_offset_min=0&day_count=53&slot_min=30&hour_start=7&hour_end=7",
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      activity: {
+        dayCount: number;
+        days: Array<{ dateLocal: string; bins: Array<unknown> }>;
+      };
+    };
+
+    expect(payload.activity.dayCount).toBe(53);
+    expect(payload.activity.days).toHaveLength(53);
+    expect(payload.activity.days[0]?.dateLocal).toBe("2026-01-01");
+    expect(payload.activity.days[52]?.dateLocal).toBe("2026-02-22");
+    expect(payload.activity.days.every((day) => day.bins.length === 48)).toBe(true);
+
+    await server.close();
+  }, 20_000);
+
   it("returns validation errors for invalid activity day query params", async () => {
     const fixture = await buildFixtureWithTraceCount(1);
     const server = await createServer({

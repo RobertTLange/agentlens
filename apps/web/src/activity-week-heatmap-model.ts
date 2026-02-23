@@ -12,6 +12,7 @@ export interface ActivityWeekHeatmapCellModel {
   endMs: number;
   timeLabel: string;
   activeSessionCount: number;
+  activeByAgent: Record<AgentKind, number>;
   eventCount: number;
   primaryTraceId: string;
   level: number;
@@ -197,6 +198,10 @@ function sanitizeTokenValue(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function snapshotActiveByAgent(activeByAgent: Partial<Record<AgentKind, number>> | undefined): Record<AgentKind, number> {
+  return Object.fromEntries(AGENT_KIND_ORDER.map((agent) => [agent, activeByAgent?.[agent] ?? 0])) as Record<AgentKind, number>;
+}
+
 export function buildWeeklyUsageSummary(
   week: AgentActivityWeek,
   traceAgentById?: Readonly<Record<string, AgentKind>>,
@@ -321,6 +326,7 @@ export function buildActivityWeekHeatmapModel(week: AgentActivityWeek): Activity
         endMs,
         timeLabel,
         activeSessionCount,
+        activeByAgent: snapshotActiveByAgent(bin?.activeByAgent),
         eventCount,
         primaryTraceId: bin?.primaryTraceId ?? "",
         level: levelForCount(activeSessionCount, maxSessionsPerSlot),

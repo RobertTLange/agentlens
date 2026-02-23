@@ -1432,18 +1432,22 @@ body {
 }
 
 .activity-day-timeline {
-  border-bottom: 1px solid var(--line);
+  border: 1px solid #dbe5ef;
+  border-radius: 12px;
+  background: #f8fafc;
+  margin: 8px 10px 2px;
+  padding: 10px;
   display: grid;
-  gap: 0;
+  gap: 8px;
 }
 
 .activity-day-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 6px 12px;
-  padding: 10px 10px 0;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--line);
 }
 
 .activity-day-title {
@@ -1454,8 +1458,19 @@ body {
 }
 
 .activity-day-meta {
+  flex: 1 1 100%;
   font-size: 0.62rem;
   color: #475569;
+}
+
+.activity-day-plot,
+.activity-week-plot,
+.activity-year-plot {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding-bottom: 26px;
 }
 
 .activity-week-heatmap {
@@ -1526,7 +1541,7 @@ body {
 }
 
 .activity-week-grid::after {
-  content: "";
+  content: none;
   position: absolute;
   top: 0;
   right: 0;
@@ -1584,6 +1599,7 @@ body {
 }
 
 .activity-week-cell {
+  appearance: none;
   position: relative;
   border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 2px;
@@ -1592,7 +1608,7 @@ body {
   margin: 0;
   padding: 0;
   background: var(--activity-week-level-0);
-  cursor: default;
+  cursor: pointer;
   transition:
     border-color 70ms ease,
     transform 70ms ease;
@@ -1602,6 +1618,15 @@ body {
   border-color: #7f1d1d;
   transform: translateY(-1px);
   z-index: 2;
+}
+
+.activity-week-cell.active {
+  border-color: #0f766e;
+}
+
+.activity-week-cell:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
 }
 
 .activity-week-cell::after {
@@ -1688,6 +1713,139 @@ body {
 .activity-week-legend-swatch.level-3 { background: var(--activity-week-level-3); }
 .activity-week-legend-swatch.level-4 { background: var(--activity-week-level-4); }
 
+.activity-year-heatmap {
+  --activity-year-cell-size: 15.4px;
+  border: 1px solid #dbe5ef;
+  border-radius: 12px;
+  background: #f8fafc;
+  margin: 6px 10px 2px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.activity-year-loading {
+  min-height: 54px;
+}
+
+.activity-year-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.activity-year-title {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #64748b;
+}
+
+.activity-year-meta {
+  font-size: 0.62rem;
+  color: #475569;
+}
+
+.activity-year-chart {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.activity-year-weekday-axis {
+  display: grid;
+  grid-template-rows: repeat(7, var(--activity-year-cell-size));
+  gap: 3px;
+  padding-top: 16px;
+}
+
+.activity-year-weekday-label {
+  font-size: 0.52rem;
+  color: #64748b;
+  line-height: var(--activity-year-cell-size);
+  opacity: 0;
+  white-space: nowrap;
+}
+
+.activity-year-weekday-label.show {
+  opacity: 1;
+}
+
+.activity-year-grid-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.activity-year-week-labels {
+  display: grid;
+  grid-template-columns: repeat(var(--activity-year-week-count), var(--activity-year-cell-size));
+  gap: 3px;
+  min-height: 12px;
+}
+
+.activity-year-week-label {
+  font-size: 0.52rem;
+  color: #64748b;
+  white-space: nowrap;
+  transform: translateX(-2px);
+}
+
+.activity-year-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--activity-year-week-count), var(--activity-year-cell-size));
+  grid-template-rows: repeat(7, var(--activity-year-cell-size));
+  gap: 3px;
+  min-width: 0;
+  align-content: start;
+}
+
+.activity-year-cell {
+  appearance: none;
+  -webkit-appearance: none;
+  width: var(--activity-year-cell-size);
+  height: var(--activity-year-cell-size);
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 3px;
+  background: var(--activity-week-level-0);
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+  transition:
+    border-color 80ms ease,
+    transform 80ms ease;
+}
+
+.activity-year-cell:hover {
+  border-color: #7f1d1d;
+  transform: translateY(-1px);
+}
+
+.activity-year-cell:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.activity-year-cell.active {
+  border-color: #0f766e;
+  box-shadow: 0 0 0 1px #ccfbf1 inset;
+}
+
+.activity-year-cell.level-0 { background: var(--activity-week-level-0); }
+.activity-year-cell.level-1 { background: var(--activity-week-level-1); }
+.activity-year-cell.level-2 { background: var(--activity-week-level-2); }
+.activity-year-cell.level-3 { background: var(--activity-week-level-3); }
+.activity-year-cell.level-4 { background: var(--activity-week-level-4); }
+
+.activity-year-summary {
+  margin-top: 4px;
+}
+
 .activity-week-summary {
   border: 1px solid #dbe5ef;
   border-radius: 12px;
@@ -1706,6 +1864,12 @@ body {
   gap: 6px 12px;
 }
 
+.activity-week-summary-head-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
 .activity-week-summary-title {
   font-size: 0.66rem;
   text-transform: uppercase;
@@ -1716,6 +1880,49 @@ body {
 .activity-week-summary-meta {
   font-size: 0.62rem;
   color: #475569;
+}
+
+.activity-summary-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 0.58rem;
+  line-height: 1.35;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.activity-summary-toggle:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.activity-summary-toggle:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.activity-summary-plot-toggle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+}
+
+.activity-day-plot .activity-summary-plot-toggle {
+  bottom: 4px;
+}
+
+.activity-summary-inline {
+  margin: 0;
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 0 0;
 }
 
 .activity-week-summary-cards {
@@ -1836,8 +2043,8 @@ body {
 }
 
 .activity-legend {
-  border-bottom: 1px solid var(--line);
-  padding: 8px 10px;
+  margin-left: auto;
+  padding: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2458,6 +2665,19 @@ body {
     --activity-week-label-col: 86px;
     --activity-week-row-gap: 6px;
     --activity-week-grid-pad: 5px;
+  }
+
+  .activity-year-heatmap {
+    --activity-year-cell-size: 12.6px;
+  }
+
+  .activity-year-chart {
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 5px;
+  }
+
+  .activity-year-week-label {
+    font-size: 0.48rem;
   }
 
   .activity-week-day-button {
