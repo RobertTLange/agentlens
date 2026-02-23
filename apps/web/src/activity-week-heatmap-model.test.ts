@@ -138,6 +138,8 @@ describe("activity week heatmap model", () => {
     expect(model.days).toHaveLength(2);
     expect(model.days[0]?.cells[0]?.timeLabel).toBe("12:00 AM-12:30 AM");
     expect(model.days[0]?.cells[1]?.level).toBe(2);
+    expect(model.days[0]?.cells[0]?.activeByAgent.codex).toBe(1);
+    expect(model.days[0]?.cells[0]?.activeByAgent.claude).toBe(1);
   });
 
   it("aggregates weekly per-agent usage metrics", () => {

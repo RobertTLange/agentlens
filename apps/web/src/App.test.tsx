@@ -309,6 +309,86 @@ function makeActivityWeek(): AgentActivityWeek {
   };
 }
 
+function makeActivityYear(): AgentActivityWeek {
+  const slotMinutes = 30;
+  const slotMs = slotMinutes * 60_000;
+  const dayCount = 22;
+  const hourStartLocal = 7;
+  const hourEndLocal = 7;
+  const startDateLocal = "2026-02-01";
+  const endDateLocal = "2026-02-22";
+  const emptyAgentCounts = (): Record<TraceSummary["agent"], number> => ({
+    claude: 0,
+    codex: 0,
+    cursor: 0,
+    opencode: 0,
+    gemini: 0,
+    pi: 0,
+    unknown: 0,
+  });
+  const emptyEventCounts = (): Record<EventKind, number> => ({
+    system: 0,
+    assistant: 0,
+    user: 0,
+    tool_use: 0,
+    tool_result: 0,
+    reasoning: 0,
+    meta: 0,
+  });
+
+  const days = Array.from({ length: dayCount }, (_, dayIndex) => {
+    const date = new Date(Date.UTC(2026, 1, 1 + dayIndex));
+    const dateLocal = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    const windowStartMs = Date.UTC(2026, 1, 1 + dayIndex, 7, 0, 0);
+    const windowEndMs = windowStartMs + 24 * 60 * 60 * 1000;
+    const slotCount = 48;
+
+    const bins = Array.from({ length: slotCount }, (_, slotIndex) => {
+      const startMs = windowStartMs + slotIndex * slotMs;
+      const intensity = dayIndex % 5 === 0 && slotIndex % 8 === 0 ? 2 : dayIndex % 3 === 0 && slotIndex % 12 === 0 ? 1 : 0;
+      return {
+        startMs,
+        endMs: startMs + slotMs,
+        activeSessionCount: intensity,
+        activeTraceIds: intensity > 0 ? ["trace-a"] : [],
+        primaryTraceId: intensity > 0 ? "trace-a" : "",
+        activeByAgent: intensity > 0 ? { ...emptyAgentCounts(), codex: intensity } : emptyAgentCounts(),
+        eventCount: intensity > 0 ? intensity * 2 : 0,
+        eventKindCounts: intensity > 0 ? { ...emptyEventCounts(), assistant: intensity * 2 } : emptyEventCounts(),
+        dominantAgent: intensity > 0 ? ("codex" as const) : ("none" as const),
+        dominantEventKind: intensity > 0 ? ("assistant" as const) : ("none" as const),
+        isBreak: false,
+      };
+    });
+
+    const peakConcurrentSessions = bins.reduce((max, bin) => Math.max(max, bin.activeSessionCount), 0);
+    const peakConcurrentAtMs =
+      peakConcurrentSessions > 0
+        ? (bins.find((bin) => bin.activeSessionCount === peakConcurrentSessions)?.startMs ?? null)
+        : null;
+    return {
+      dateLocal,
+      windowStartMs,
+      windowEndMs,
+      totalSessionsInWindow: bins.some((bin) => bin.activeSessionCount > 0) ? 1 : 0,
+      peakConcurrentSessions,
+      peakConcurrentAtMs,
+      bins,
+    };
+  });
+
+  return {
+    tzOffsetMinutes: 0,
+    dayCount,
+    slotMinutes,
+    hourStartLocal,
+    hourEndLocal,
+    startDateLocal,
+    endDateLocal,
+    days,
+  };
+}
+
 function makeTracePage(summary: TraceSummary): TracePage {
   return makeTracePageWithEvents(summary, []);
 }
@@ -541,6 +621,7 @@ let missingAdHocEncodedPaths: Set<string>;
 let activityDay: AgentActivityDay;
 let activityDayByDate: Record<string, AgentActivityDay>;
 let activityWeek: AgentActivityWeek;
+let activityYear: AgentActivityWeek;
 
 beforeEach(() => {
   tracesById = {
@@ -562,6 +643,7 @@ beforeEach(() => {
   activityDay = makeActivityDay();
   activityDayByDate = { [activityDay.dateLocal]: activityDay };
   activityWeek = makeActivityWeek();
+  activityYear = makeActivityYear();
   window.history.replaceState(null, "", "/");
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
@@ -592,7 +674,10 @@ beforeEach(() => {
         return new Response(JSON.stringify({ activity: resolvedDay }), { status: 200 });
       }
       if (url.includes("/api/activity/week")) {
-        return new Response(JSON.stringify({ activity: activityWeek }), { status: 200 });
+        const parsed = new URL(url, "http://localhost");
+        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
+        const activity = Number.isFinite(dayCount) && dayCount > 7 ? activityYear : activityWeek;
+        return new Response(JSON.stringify({ activity }), { status: 200 });
       }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
@@ -679,7 +764,7 @@ describe("App sessions list live motion", () => {
     expect(document.querySelector("footer")).toBeNull();
   });
 
-  it("switches to the activity view and renders daily + weekly activity heatmaps", async () => {
+  it("switches to the activity view and renders daily, weekly, and yearly activity heatmaps", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
 
@@ -696,12 +781,27 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true));
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/week"))).toBe(true));
+    const dayRequestIndex = requestedUrls.findIndex((url) => url.includes("/api/activity/day"));
+    const weekRequestIndex = requestedUrls.findIndex((url) => {
+      if (!url.includes("/api/activity/week")) return false;
+      const parsed = new URL(url, "http://localhost");
+      return parsed.searchParams.get("day_count") === "7";
+    });
+    const yearRequestIndex = requestedUrls.findIndex((url) => {
+      if (!url.includes("/api/activity/week")) return false;
+      const parsed = new URL(url, "http://localhost");
+      const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
+      return Number.isFinite(dayCount) && dayCount > 7;
+    });
+    expect(dayRequestIndex).toBeGreaterThanOrEqual(0);
+    expect(weekRequestIndex).toBeGreaterThan(dayRequestIndex);
+    expect(yearRequestIndex).toBeGreaterThan(weekRequestIndex);
     expect(
       requestedUrls.some((url) => url.includes("/api/activity/week") && url.includes("hour_start=7") && url.includes("hour_end=7")),
     ).toBe(true);
     await waitFor(() => expect(document.querySelectorAll(".activity-bin-heat").length).toBe(activityDay.bins.length));
     await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
-    await waitFor(() => expect(document.querySelector(".activity-week-summary")).toBeTruthy());
+    await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
     const headerStatsText = document.querySelector(".activity-head-stats")?.textContent?.toLowerCase() ?? "";
     expect(headerStatsText).toContain("sessions 3 in window");
     expect(headerStatsText).toContain("peak 2");
@@ -709,8 +809,8 @@ describe("App sessions list live motion", () => {
     expect(headerStatsText).toContain("active bins 2");
     expect(document.querySelector(".activity-summary-cards")).toBeNull();
     expect(document.querySelector(".activity-day-title")?.textContent).toBe("Daily Activity");
-    expect(document.querySelector(".activity-week-title")?.textContent).toBe("Week Heatmap");
-    expect(document.querySelector(".activity-week-summary-title")?.textContent).toBe("Week Summary");
+    expect(document.querySelector(".activity-week-title")?.textContent).toBe("Weekly Activity");
+    expect(document.querySelector(".activity-year-title")?.textContent).toBe("Yearly Activity");
     expect(document.querySelector(".activity-session-segment.agent-border-codex")).toBeTruthy();
     expect(document.querySelector(".activity-bin-heat.is-break")).toBeTruthy();
     expect(document.querySelector(".activity-idle-cell.active")).toBeTruthy();
@@ -718,31 +818,92 @@ describe("App sessions list live motion", () => {
       (node) => node.getAttribute("style") ?? "",
     );
     expect(segmentStyles.some((style) => style.includes("--event-assistant-bg"))).toBe(true);
-    const summaryCards = Array.from(document.querySelectorAll(".activity-week-summary-card")).map(
-      (node) => node.textContent?.toLowerCase() ?? "",
-    );
-    expect(summaryCards.some((cardText) => cardText.includes("total unique sessions") && cardText.includes("1"))).toBe(true);
-    expect(summaryCards.some((cardText) => cardText.includes("most used agent") && cardText.includes("codex"))).toBe(true);
-    const tableHeaders = Array.from(document.querySelectorAll(".activity-week-summary-table th")).map((node) =>
+    expect(document.querySelector(".activity-day-summary")).toBeNull();
+    expect(document.querySelector(".activity-week-summary")).toBeNull();
+    expect(document.querySelector(".activity-year-summary")).toBeNull();
+    expect(document.querySelector(".activity-day-summary-table")).toBeNull();
+    expect(document.querySelector(".activity-week-summary-table")).toBeNull();
+    expect(document.querySelector(".activity-year-summary-table")).toBeNull();
+
+    const dayToggle = document.querySelector('.activity-summary-toggle[data-period="day"]');
+    const weekToggle = document.querySelector('.activity-summary-toggle[data-period="week"]');
+    const yearToggle = document.querySelector('.activity-summary-toggle[data-period="year"]');
+    if (
+      !(dayToggle instanceof HTMLButtonElement) ||
+      !(weekToggle instanceof HTMLButtonElement) ||
+      !(yearToggle instanceof HTMLButtonElement)
+    ) {
+      throw new Error("missing summary toggle button");
+    }
+    const dayPlot = document.querySelector(".activity-day-plot");
+    const weekPlot = document.querySelector(".activity-week-plot");
+    const yearPlot = document.querySelector(".activity-year-plot");
+    if (!(dayPlot instanceof HTMLElement) || !(weekPlot instanceof HTMLElement) || !(yearPlot instanceof HTMLElement)) {
+      throw new Error("missing activity plot containers");
+    }
+    expect(dayPlot.contains(dayToggle)).toBe(true);
+    expect(weekPlot.contains(weekToggle)).toBe(true);
+    expect(yearPlot.contains(yearToggle)).toBe(true);
+    expect(dayToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(weekToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(yearToggle.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => {
+      dayToggle.click();
+    });
+    const dayTimeline = document.querySelector(".activity-day-timeline");
+    if (!(dayTimeline instanceof HTMLElement)) {
+      throw new Error("missing daily timeline section");
+    }
+    await waitFor(() => expect(dayTimeline.querySelector(".activity-day-summary-table")).toBeTruthy());
+
+    act(() => {
+      weekToggle.click();
+    });
+    const weekHeatmap = document.querySelector(".activity-week-heatmap");
+    if (!(weekHeatmap instanceof HTMLElement)) {
+      throw new Error("missing week heatmap section");
+    }
+    const weekSummarySection = weekHeatmap.querySelector(".activity-week-summary");
+    if (!(weekSummarySection instanceof HTMLElement)) {
+      throw new Error("missing week summary section");
+    }
+    await waitFor(() => expect(weekSummarySection.querySelector(".activity-week-summary-table")).toBeTruthy());
+
+    const tableHeaders = Array.from(weekSummarySection.querySelectorAll(".activity-week-summary-table th")).map((node) =>
       node.textContent?.trim().toLowerCase(),
     );
     expect(tableHeaders).toContain("session-hours");
     expect(tableHeaders).toContain("in tokens");
     expect(tableHeaders).toContain("cache tokens");
     expect(tableHeaders).toContain("out tokens");
-    const firstSummaryRowText = document.querySelector(".activity-week-summary-table tbody tr")?.textContent?.toLowerCase() ?? "";
-    expect(firstSummaryRowText).toContain("codex");
-    expect(firstSummaryRowText).toContain("1.0k");
-    expect(firstSummaryRowText).toContain("500");
-    expect(firstSummaryRowText).toContain("400");
-    expect(document.querySelector(".activity-week-summary-agent-icon")).toBeTruthy();
-    const weekHeatmap = document.querySelector(".activity-week-heatmap");
-    const weekSummary = document.querySelector(".activity-week-summary");
-    expect(
-      weekHeatmap && weekSummary
-        ? (weekHeatmap.compareDocumentPosition(weekSummary) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
-        : false,
-    ).toBe(true);
+    const summaryRowTexts = Array.from(weekSummarySection.querySelectorAll(".activity-week-summary-table tbody tr")).map(
+      (node) => node.textContent?.toLowerCase() ?? "",
+    );
+    expect(summaryRowTexts.some((text) => text.includes("codex") && text.includes("1.0k"))).toBe(true);
+    expect(summaryRowTexts.some((text) => text.includes("500"))).toBe(true);
+    expect(summaryRowTexts.some((text) => text.includes("400"))).toBe(true);
+    expect(weekSummarySection.querySelector(".activity-week-summary-agent-icon")).toBeTruthy();
+
+    act(() => {
+      yearToggle.click();
+    });
+    const yearHeatmap = document.querySelector(".activity-year-heatmap");
+    if (!(yearHeatmap instanceof HTMLElement)) {
+      throw new Error("missing year heatmap section");
+    }
+    const yearSummarySection = yearHeatmap.querySelector(".activity-year-summary");
+    if (!(yearSummarySection instanceof HTMLElement)) {
+      throw new Error("missing year summary section");
+    }
+    await waitFor(() => expect(yearSummarySection.querySelector(".activity-year-summary-table")).toBeTruthy());
+
+    const summaryTitleTexts = Array.from(document.querySelectorAll(".activity-week-summary-title")).map(
+      (node) => node.textContent?.trim(),
+    );
+    expect(summaryTitleTexts).toContain("Day Summary");
+    expect(summaryTitleTexts).toContain("Week Summary");
+    expect(summaryTitleTexts).toContain("Year Summary");
   });
 
   it("updates Daily Activity when clicking a date label in Week Heatmap", async () => {
@@ -780,6 +941,132 @@ describe("App sessions list live motion", () => {
     expect(document.querySelector(`.activity-week-day-button[data-date-local="${targetDate}"]`)?.className).toContain(
       "active",
     );
+  });
+
+  it("reloads weekly heatmap when clicking an older day in Yearly Activity", async () => {
+    const targetDate = activityYear.days[0]?.dateLocal;
+    if (!targetDate) {
+      throw new Error("missing yearly activity target day");
+    }
+    activityDayByDate[targetDate] = makeActivityDayForDate(targetDate);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
+    const weeklyRequestsForTargetBefore = requestedUrls.filter((url) => {
+      if (!url.includes("/api/activity/week")) return false;
+      const parsed = new URL(url, "http://localhost");
+      return parsed.searchParams.get("day_count") === "7" && parsed.searchParams.get("end_date") === targetDate;
+    }).length;
+
+    const yearCell = document.querySelector(`.activity-year-cell[data-date-local="${targetDate}"]`);
+    if (!(yearCell instanceof HTMLButtonElement)) {
+      throw new Error(`missing year heatmap cell for ${targetDate}`);
+    }
+    act(() => {
+      yearCell.click();
+    });
+
+    await waitFor(() =>
+      expect(
+        requestedUrls.some((url) => url.includes("/api/activity/day") && url.includes(`date=${encodeURIComponent(targetDate)}`)),
+      ).toBe(true),
+    );
+    await waitFor(() => {
+      const weeklyRequestsForTargetAfter = requestedUrls.filter((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        return parsed.searchParams.get("day_count") === "7" && parsed.searchParams.get("end_date") === targetDate;
+      }).length;
+      expect(weeklyRequestsForTargetAfter).toBeGreaterThan(weeklyRequestsForTargetBefore);
+    });
+  });
+
+  it("updates Daily Activity when clicking a week heatmap cell", async () => {
+    const targetDate = "2026-02-19";
+    activityDayByDate[targetDate] = makeActivityDayForDate(targetDate);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+    const cellButton = document.querySelector(`.activity-week-cell[data-date-local="${targetDate}"]`);
+    if (!(cellButton instanceof HTMLButtonElement)) {
+      throw new Error(`missing week heatmap cell for ${targetDate}`);
+    }
+    act(() => {
+      cellButton.click();
+    });
+
+    await waitFor(() =>
+      expect(
+        requestedUrls.some((url) => url.includes("/api/activity/day") && url.includes(`date=${encodeURIComponent(targetDate)}`)),
+      ).toBe(true),
+    );
+    await waitFor(() => expect(document.querySelector(".activity-day-meta")?.textContent).toContain(targetDate));
+    expect(document.querySelector(`.activity-week-day-button[data-date-local="${targetDate}"]`)?.className).toContain(
+      "active",
+    );
+  });
+
+  it("shows per-agent session counts in week heatmap cell hover tooltip", async () => {
+    const targetDay = activityWeek.days.at(-1);
+    if (!targetDay) {
+      throw new Error("missing final day in week fixture");
+    }
+    const targetBin = targetDay.bins[12];
+    if (!targetBin) {
+      throw new Error("missing target week bin");
+    }
+    targetDay.totalSessionsInWindow = 2;
+    targetDay.peakConcurrentSessions = 2;
+    targetBin.activeSessionCount = 2;
+    targetBin.activeTraceIds = ["trace-c", "trace-a"];
+    targetBin.primaryTraceId = "trace-c";
+    targetBin.activeByAgent = { ...targetBin.activeByAgent, codex: 1, claude: 1 };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+    const tooltip = Array.from(document.querySelectorAll(".activity-week-cell"))
+      .map((node) => node.getAttribute("data-tooltip") ?? "")
+      .find((text) => text.includes("sessions by agent codex 1, claude 1"));
+
+    expect(tooltip).toBeTruthy();
+    expect(tooltip).not.toContain("primary ");
   });
 
   it("compresses timeline columns when inactivity exceeds four hours", async () => {
@@ -2288,12 +2575,14 @@ describe("App sessions list live motion", () => {
       lastEventTs: (selectedTrace.lastEventTs ?? selectedTrace.mtimeMs) + 1_000,
     };
     tracesById["trace-c"] = updatedSummary;
+    const detailRequestsBeforeRefresh = countTraceDetailRequests("trace-c");
 
     act(() => {
       source.emit("trace_updated", { summary: updatedSummary });
     });
     flushRafQueue();
 
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBeGreaterThan(detailRequestsBeforeRefresh));
     await waitFor(() => {
       flushRafQueue();
       expect(document.querySelectorAll(".event-card").length).toBe(2);
@@ -2314,6 +2603,71 @@ describe("App sessions list live motion", () => {
       throw new Error("missing expand button for expanded card after refresh");
     }
     expect(expandedButton.textContent).toBe("collapse");
+  });
+
+  it("keeps inspector focus on expanded event while appends continue updating", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) {
+      throw new Error("missing trace-c test fixture");
+    }
+    const firstEvent = makeEvent("event-expand-freeze-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(1));
+
+    const expandButton = document.querySelector(".event-card .expand-btn");
+    if (!(expandButton instanceof HTMLButtonElement)) {
+      throw new Error("missing expand button");
+    }
+
+    act(() => {
+      expandButton.click();
+    });
+    await waitFor(() => expect(document.querySelectorAll(".event-raw-json").length).toBe(1));
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-expand-freeze-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, appendedEvent]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+    const detailRequestsBeforeAppend = countTraceDetailRequests("trace-c");
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: 1 });
+    });
+    flushRafQueue();
+
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBeGreaterThan(detailRequestsBeforeAppend));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+
+    const expandedRawJson = document.querySelector(".event-raw-json");
+    if (!(expandedRawJson instanceof HTMLElement)) {
+      throw new Error("missing expanded raw json block after append");
+    }
+    expect(expandedRawJson.textContent).toContain("first payload");
+
+    const expandedCard = expandedRawJson.closest(".event-card");
+    if (!(expandedCard instanceof HTMLElement)) {
+      throw new Error("missing expanded event card after append");
+    }
+    expect(expandedCard.className).toContain("selected");
+    expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#4");
   });
 
   it("adds enter animation classes for newly appended timeline rows and event cards", async () => {
