@@ -1120,11 +1120,12 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     if (!autoFollow) return;
+    if (expandedEventIds.size > 0) return;
     if (timelineStripEvents.length === 0) return;
     const last = timelineStripEvents[timelineStripEvents.length - 1];
     if (!last) return;
     setSelectedEventId(last.eventId);
-  }, [autoFollow, timelineStripEvents]);
+  }, [autoFollow, expandedEventIds.size, timelineStripEvents]);
 
   useEffect(() => {
     if (!page) return;
