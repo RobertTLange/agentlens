@@ -44,6 +44,21 @@ node apps/cli/dist/main.js --browser
 
 Then open `http://127.0.0.1:8787`.
 
+### Remote tunnel helper
+
+Use `scripts/agentlens-remote.sh` to launch AgentLens remotely and port-forward to local browser.
+
+```bash
+# GCP (explicit target)
+./scripts/agentlens-remote.sh --connection gcp --zone <zone> --instance <login-vm>
+
+# Generic SSH
+./scripts/agentlens-remote.sh --connection ssh --ssh-base "ssh user@host"
+
+# Stop remote AgentLens
+./scripts/agentlens-remote.sh --kill --connection gcp --zone <zone> --instance <login-vm>
+```
+
 ## 60-Second Usage
 
 ```bash
