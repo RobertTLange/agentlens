@@ -64,12 +64,22 @@ interface ActivityViewProps {
   traceTokenTotalsById?: Readonly<Record<string, TraceTokenTotalsSnapshot | undefined>>;
 }
 
-function todayLocalDateString(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
+function formatLocalDateString(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function todayLocalDateString(now: Date = new Date()): string {
+  return formatLocalDateString(now);
+}
+
+function defaultSelectedActivityDateLocal(now: Date = new Date()): string {
+  if (now.getHours() >= WEEK_HOUR_START_LOCAL) return formatLocalDateString(now);
+  const previousDay = new Date(now);
+  previousDay.setDate(previousDay.getDate() - 1);
+  return formatLocalDateString(previousDay);
 }
 
 function dateLocalToUtcMs(dateLocal: string): number | null {
@@ -460,7 +470,7 @@ export function ActivityView({
   traceAgentById,
   traceTokenTotalsById,
 }: ActivityViewProps): JSX.Element {
-  const [selectedDateLocal, setSelectedDateLocal] = useState(() => todayLocalDateString());
+  const [selectedDateLocal, setSelectedDateLocal] = useState(() => defaultSelectedActivityDateLocal());
   const [selectedWeekEndDateLocal, setSelectedWeekEndDateLocal] = useState(() => todayLocalDateString());
   const [activity, setActivity] = useState<AgentActivityDay | null>(null);
   const [activityWeek, setActivityWeek] = useState<AgentActivityWeek | null>(null);

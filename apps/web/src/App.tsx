@@ -22,12 +22,15 @@ const AD_HOC_TRACE_ID_PREFIX = "adhoc:";
 const EVENT_ENTER_ANIMATION_MS = 180;
 const TRACE_ENTER_ANIMATION_MS = 620;
 const TIMELINE_LATEST_EPSILON_PX = 12;
+const EVENT_LIST_LATEST_EPSILON_PX = 12;
 const HEADER_FLASH_VISIBLE_MS = 2_400;
 const HEADER_FLASH_FADE_MS = 380;
 const CLOCK_TICK_MS = 10_000;
 const TIMELINE_EVENT_INITIAL_RENDER_LIMIT = 240;
 const TIMELINE_EVENT_RENDER_STEP = 240;
 const TIMELINE_EVENT_RENDER_PREFETCH_PX = 320;
+const TOOL_CALL_TYPES_PER_SUMMARY_ROW = 3;
+const TOOL_CALL_SUMMARY_ROW_LIMIT = 2;
 const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 const PRIMARY_RECENT_SESSION_COUNT = 20;
@@ -227,6 +230,19 @@ function readTimelineStripViewport(scroller: HTMLElement): { hasOverflow: boolea
   return { hasOverflow: true, atLatest };
 }
 
+function readEventListViewport(
+  scroller: HTMLElement,
+  timelineSortDirection: TimelineSortDirection,
+): { hasOverflow: boolean; atLatest: boolean } {
+  const hasOverflow = scroller.scrollHeight > scroller.clientHeight + 1;
+  if (!hasOverflow) return { hasOverflow: false, atLatest: true };
+  if (timelineSortDirection === "latest-first") {
+    return { hasOverflow: true, atLatest: scroller.scrollTop <= EVENT_LIST_LATEST_EPSILON_PX };
+  }
+  const distanceToBottom = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
+  return { hasOverflow: true, atLatest: distanceToBottom <= EVENT_LIST_LATEST_EPSILON_PX };
+}
+
 function createDefaultVisibleEventKinds(): Set<EventKind> {
   return new Set(DEFAULT_VISIBLE_EVENT_KINDS);
 }
@@ -297,10 +313,14 @@ export function App(): JSX.Element {
   const [timelineStripHasOverflow, setTimelineStripHasOverflow] = useState(false);
   const [timelineStripPinnedToLatest, setTimelineStripPinnedToLatest] = useState(true);
   const [timelineOffscreenAppendCount, setTimelineOffscreenAppendCount] = useState(0);
+  const [eventsPinnedToLatest, setEventsPinnedToLatest] = useState(true);
+  const [inspectorPendingAppendCount, setInspectorPendingAppendCount] = useState(0);
   const selectedIdRef = useRef("");
   const eventTypeFilterRef = useRef<HTMLDivElement | null>(null);
   const timelineStripRef = useRef<HTMLDivElement | null>(null);
+  const eventsScrollRef = useRef<HTMLDivElement | null>(null);
   const timelinePinnedToLatestRef = useRef(true);
+  const eventsPinnedToLatestRef = useRef(true);
   const timelineHasOverflowRef = useRef(false);
   const timelinePinnedStateRef = useRef(true);
   const previousTimelineTraceIdRef = useRef("");
@@ -483,7 +503,7 @@ export function App(): JSX.Element {
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([toolType, count]) => ({ toolType, count }));
   }, [filteredPageEvents]);
-  const toolCallTypeCountsPreview = toolCallTypeCounts.slice(0, 4);
+  const toolCallTypeCountsPreview = toolCallTypeCounts.slice(0, TOOL_CALL_TYPES_PER_SUMMARY_ROW * TOOL_CALL_SUMMARY_ROW_LIMIT);
   const hiddenToolCallTypeCount = Math.max(0, toolCallTypeCounts.length - toolCallTypeCountsPreview.length);
   const toolCallCountTotal = toolCallTypeCounts.reduce((sum, row) => sum + row.count, 0);
   const newestEventTsMs = useMemo(() => {
@@ -503,8 +523,8 @@ export function App(): JSX.Element {
   const heroStatusClassName = `hero-status mono${flashStatus ? " flash-active" : ""}${isFlashStatusFading ? " flash-fading" : ""}`;
   const toolCallTypeCountRows = useMemo(() => {
     const rows: Array<Array<{ toolType: string; count: number }>> = [];
-    for (let index = 0; index < toolCallTypeCountsPreview.length; index += 2) {
-      rows.push(toolCallTypeCountsPreview.slice(index, index + 2));
+    for (let index = 0; index < toolCallTypeCountsPreview.length; index += TOOL_CALL_TYPES_PER_SUMMARY_ROW) {
+      rows.push(toolCallTypeCountsPreview.slice(index, index + TOOL_CALL_TYPES_PER_SUMMARY_ROW));
     }
     return rows;
   }, [toolCallTypeCountsPreview]);
@@ -599,6 +619,7 @@ export function App(): JSX.Element {
       queuedEventFlushRafRef.current = null;
     }
     queuedEventIdsRef.current = [];
+    setInspectorPendingAppendCount((value) => (value === 0 ? value : 0));
   }, []);
 
   const scheduleEventEnterAnimationCleanup = useCallback((eventId: string): void => {
@@ -625,6 +646,7 @@ export function App(): JSX.Element {
     }
     const queued = queuedEventIdsRef.current;
     queuedEventIdsRef.current = [];
+    setInspectorPendingAppendCount((value) => (value === 0 ? value : 0));
     setVisibleEventIds((prev) => {
       const next = new Set(prev);
       for (const eventId of queued) next.add(eventId);
@@ -657,6 +679,63 @@ export function App(): JSX.Element {
     },
     [flushQueuedEvents],
   );
+
+  const queueEventsWithoutReveal = useCallback((eventIds: string[]): void => {
+    if (eventIds.length === 0) return;
+    const queuedEventIdSet = new Set(queuedEventIdsRef.current);
+    let queuedChanged = false;
+    for (const eventId of eventIds) {
+      if (queuedEventIdSet.has(eventId)) continue;
+      queuedEventIdSet.add(eventId);
+      queuedEventIdsRef.current.push(eventId);
+      queuedChanged = true;
+    }
+    if (!queuedChanged) return;
+    const queuedCount = queuedEventIdsRef.current.length;
+    setInspectorPendingAppendCount((value) => (value === queuedCount ? value : queuedCount));
+  }, []);
+
+  const applyEventListViewport = useCallback((nextViewport: { hasOverflow: boolean; atLatest: boolean }): void => {
+    eventsPinnedToLatestRef.current = nextViewport.atLatest;
+    setEventsPinnedToLatest((value) => (value === nextViewport.atLatest ? value : nextViewport.atLatest));
+  }, []);
+
+  const handleEventsScroll = useCallback(
+    (target: HTMLDivElement): void => {
+      maybeGrowTimelineRenderWindow(target);
+      applyEventListViewport(readEventListViewport(target, timelineSortDirection));
+    },
+    [applyEventListViewport, maybeGrowTimelineRenderWindow, timelineSortDirection],
+  );
+
+  const scrollEventsToLatest = useCallback(
+    (behavior: ScrollBehavior = "smooth"): void => {
+      const scroller = eventsScrollRef.current;
+      if (!scroller) return;
+      const latestTop = timelineSortDirection === "latest-first" ? 0 : scroller.scrollHeight;
+      if (typeof scroller.scrollTo === "function") {
+        scroller.scrollTo({ top: latestTop, behavior });
+      } else {
+        scroller.scrollTop = latestTop;
+      }
+    },
+    [timelineSortDirection],
+  );
+
+  const resumeInspectorFollow = useCallback((): void => {
+    const latestQueuedEventId = queuedEventIdsRef.current[queuedEventIdsRef.current.length - 1];
+    const latestVisibleEventId = timelineStripEvents[timelineStripEvents.length - 1]?.eventId ?? "";
+    setAutoFollow(true);
+    setExpandedEventIds(new Set<string>());
+    if (latestQueuedEventId || latestVisibleEventId) {
+      setSelectedEventId(latestQueuedEventId || latestVisibleEventId);
+    }
+    flushQueuedEvents();
+    scrollEventsToLatest("smooth");
+    eventsPinnedToLatestRef.current = true;
+    setEventsPinnedToLatest((value) => (value ? value : true));
+    setInspectorPendingAppendCount(0);
+  }, [flushQueuedEvents, scrollEventsToLatest, timelineStripEvents]);
 
   const handleTimelineStripScroll = useCallback((): void => {
     const scroller = timelineStripRef.current;
@@ -1121,11 +1200,12 @@ export function App(): JSX.Element {
   useEffect(() => {
     if (!autoFollow) return;
     if (expandedEventIds.size > 0) return;
+    if (!eventsPinnedToLatest) return;
     if (timelineStripEvents.length === 0) return;
     const last = timelineStripEvents[timelineStripEvents.length - 1];
     if (!last) return;
     setSelectedEventId(last.eventId);
-  }, [autoFollow, expandedEventIds.size, timelineStripEvents]);
+  }, [autoFollow, eventsPinnedToLatest, expandedEventIds.size, timelineStripEvents]);
 
   useEffect(() => {
     if (!page) return;
@@ -1201,6 +1281,31 @@ export function App(): JSX.Element {
   }, [applyTimelineStripViewport, filteredPageEvents.length, page, selectedId, visibleEventKindKey, visibleTimelineEvents.length]);
 
   useEffect(() => {
+    const scroller = eventsScrollRef.current;
+    if (!selectedId || !page || !scroller) {
+      eventsPinnedToLatestRef.current = true;
+      setEventsPinnedToLatest((value) => (value ? value : true));
+      return;
+    }
+    applyEventListViewport(readEventListViewport(scroller, timelineSortDirection));
+  }, [applyEventListViewport, page, selectedId, timelineEvents.length, timelineSortDirection]);
+
+  useEffect(() => {
+    const shouldPauseFollow = !autoFollow || expandedEventIds.size > 0 || !eventsPinnedToLatest;
+    if (shouldPauseFollow) {
+      const queuedCount = queuedEventIdsRef.current.length;
+      setInspectorPendingAppendCount((value) => (value === queuedCount ? value : queuedCount));
+      return;
+    }
+    if (queuedEventIdsRef.current.length === 0) {
+      setInspectorPendingAppendCount((value) => (value === 0 ? value : 0));
+      return;
+    }
+    flushQueuedEvents();
+    scrollEventsToLatest("smooth");
+  }, [autoFollow, eventsPinnedToLatest, expandedEventIds.size, flushQueuedEvents, scrollEventsToLatest]);
+
+  useEffect(() => {
     if (!selectedId || !page) {
       previousAnimatedTraceIdRef.current = "";
       previousAnimatedEventFilterKeyRef.current = visibleEventKindKey;
@@ -1264,11 +1369,29 @@ export function App(): JSX.Element {
       return next;
     });
 
-    queuedEventIdsRef.current = queuedEventIdsRef.current.filter((eventId) => currentEventIdSet.has(eventId));
+    const nextQueuedEventIds = queuedEventIdsRef.current.filter((eventId) => currentEventIdSet.has(eventId));
+    queuedEventIdsRef.current = nextQueuedEventIds;
+    const queuedCount = nextQueuedEventIds.length;
+    setInspectorPendingAppendCount((value) => (value === queuedCount ? value : queuedCount));
     if (appendedEventIds.length > 0) {
-      enqueueEventsForAppendReveal(appendedEventIds);
+      const shouldPauseReveal = !autoFollow || expandedEventIds.size > 0 || !eventsPinnedToLatestRef.current;
+      if (shouldPauseReveal) {
+        queueEventsWithoutReveal(appendedEventIds);
+      } else {
+        enqueueEventsForAppendReveal(appendedEventIds);
+      }
     }
-  }, [clearEventAppendQueue, enqueueEventsForAppendReveal, filteredPageEvents, page, selectedId, visibleEventKindKey]);
+  }, [
+    autoFollow,
+    clearEventAppendQueue,
+    enqueueEventsForAppendReveal,
+    expandedEventIds.size,
+    filteredPageEvents,
+    page,
+    queueEventsWithoutReveal,
+    selectedId,
+    visibleEventKindKey,
+  ]);
 
   const centerEventInView = (target: HTMLElement): void => {
     const scroller = target.closest(".events-scroll");
@@ -1810,6 +1933,11 @@ export function App(): JSX.Element {
                   <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
                   auto follow
                 </label>
+                {inspectorPendingAppendCount > 0 && (
+                  <button type="button" className="mono inspector-resume-follow-button" onClick={resumeInspectorFollow}>
+                    {`Jump to latest · ${inspectorPendingAppendCount} new`}
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1871,7 +1999,8 @@ export function App(): JSX.Element {
 
                 <div
                   className="events-scroll"
-                  onScroll={(event: UIEvent<HTMLDivElement>) => maybeGrowTimelineRenderWindow(event.currentTarget)}
+                  ref={eventsScrollRef}
+                  onScroll={(event: UIEvent<HTMLDivElement>) => handleEventsScroll(event.currentTarget)}
                 >
                   {renderedTimelineEvents.map((event) => {
                     const agentBadges = buildAgentBadges(event);

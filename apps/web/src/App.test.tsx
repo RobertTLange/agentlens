@@ -544,6 +544,22 @@ function getTimelineStripScroll(): HTMLDivElement {
   return scroller;
 }
 
+function getEventsScroll(): HTMLDivElement {
+  const scroller = document.querySelector(".events-scroll");
+  if (!(scroller instanceof HTMLDivElement)) {
+    throw new Error("missing events scroller");
+  }
+  return scroller;
+}
+
+function getInspectorResumeFollowButton(): HTMLButtonElement {
+  const button = document.querySelector(".inspector-resume-follow-button");
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error("missing inspector resume follow button");
+  }
+  return button;
+}
+
 function getTocTimestampByIndex(index: number): string {
   const tocRows = Array.from(document.querySelectorAll(".toc-row"));
   const row = tocRows.find((candidate) => candidate.querySelector(".toc-index")?.textContent?.trim() === `#${index}`);
@@ -582,6 +598,15 @@ function setTimelineStripMetrics(
   Object.defineProperty(scroller, "scrollLeft", { configurable: true, writable: true, value: metrics.scrollLeft });
 }
 
+function setEventsScrollMetrics(
+  scroller: HTMLDivElement,
+  metrics: { clientHeight: number; scrollHeight: number; scrollTop: number },
+): void {
+  Object.defineProperty(scroller, "clientHeight", { configurable: true, value: metrics.clientHeight });
+  Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: metrics.scrollHeight });
+  Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: metrics.scrollTop });
+}
+
 function flushRafQueue(): void {
   act(() => {
     for (const callback of rafQueue.splice(0)) {
@@ -602,6 +627,24 @@ function installTimelineStripScrollTo(scroller: HTMLDivElement) {
     }
     if (typeof y === "number") {
       scroller.scrollLeft = y;
+    }
+  });
+  Object.defineProperty(scroller, "scrollTo", { configurable: true, value: scrollToSpy });
+  return scrollToSpy;
+}
+
+function installEventsScrollTo(scroller: HTMLDivElement) {
+  const scrollToSpy = vi.fn((options?: ScrollToOptions | number, y?: number) => {
+    if (typeof options === "number") {
+      scroller.scrollTop = options;
+      return;
+    }
+    if (options && typeof options.top === "number") {
+      scroller.scrollTop = options.top;
+      return;
+    }
+    if (typeof y === "number") {
+      scroller.scrollTop = y;
     }
   });
   Object.defineProperty(scroller, "scrollTo", { configurable: true, value: scrollToSpy });
@@ -941,6 +984,43 @@ describe("App sessions list live motion", () => {
     expect(document.querySelector(`.activity-week-day-button[data-date-local="${targetDate}"]`)?.className).toContain(
       "active",
     );
+  });
+
+  it("defaults Daily Activity to previous activity day before 7am local", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let unmount: (() => void) | null = null;
+    try {
+      vi.setSystemTime(new Date(2026, 1, 26, 1, 26, 38));
+      const expectedDate = "2026-02-25";
+      const expectedDay = makeActivityDayForDate(expectedDate);
+      activityDay = expectedDay;
+      activityDayByDate = { [expectedDate]: expectedDay };
+
+      ({ unmount } = render(<App />));
+      await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+      const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+        node.textContent?.includes("Activity"),
+      );
+      if (!(activityButton instanceof HTMLButtonElement)) {
+        throw new Error("missing activity view switch button");
+      }
+      act(() => {
+        activityButton.click();
+      });
+
+      await waitFor(() => {
+        const dayRequest = requestedUrls.find((url) => url.includes("/api/activity/day"));
+        expect(dayRequest).toBeTruthy();
+        if (!dayRequest) return;
+        const parsed = new URL(dayRequest, "http://localhost");
+        expect(parsed.searchParams.get("date")).toBe(expectedDate);
+      });
+      await waitFor(() => expect(document.querySelector(".activity-day-meta")?.textContent).toContain(expectedDate));
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
   });
 
   it("reloads weekly heatmap when clicking an older day in Yearly Activity", async () => {
@@ -2206,21 +2286,69 @@ describe("App sessions list live motion", () => {
       searchText: "web search",
     };
 
-    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [toolUseEvent, toolResultEvent, webSearchEvent]);
+    const fileReadEvent: NormalizedEvent = {
+      ...makeEvent("event-file-read", { signature: "read file" }),
+      eventKind: "assistant",
+      toolType: "fs:read",
+      toolCallId: "call-2",
+      toolUseId: "call-2",
+      preview: "read config",
+      tocLabel: "Tool: read",
+      searchText: "tool read fs",
+    };
+
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [
+      toolUseEvent,
+      toolResultEvent,
+      webSearchEvent,
+      fileReadEvent,
+    ]);
 
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
 
     const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
-    expect(toolCallsValue).toBe("2");
+    expect(toolCallsValue).toBe("3");
     expect(toolCallsCard?.textContent).toContain("bash 1");
     expect(toolCallsCard?.textContent).toContain("web:search 1");
+    expect(toolCallsCard?.textContent).toContain("fs:read 1");
     const toolCallRows = toolCallsCard ? Array.from(toolCallsCard.querySelectorAll(".detail-summary-sub")) : [];
     expect(toolCallRows).toHaveLength(1);
-    expect(toolCallRows[0]?.textContent).toContain("bash 1 · web:search 1");
+    expect(toolCallRows[0]?.textContent).toContain("bash 1 · fs:read 1 · web:search 1");
     expect(toolCallsCard?.textContent).not.toContain("results");
     expect(toolCallsCard?.textContent).not.toContain("unmatched");
+  });
+
+  it("shows up to six tool types before rendering a more-types note", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const toolTypes = ["bash", "patch", "close_agent", "spawn_agent", "web:search", "fs:read"];
+    const typedEvents: NormalizedEvent[] = toolTypes.map((toolType, idx) => ({
+      ...makeEvent(`event-tool-type-${idx}`, { signature: toolType }),
+      eventKind: "assistant",
+      toolType,
+      toolCallId: `tool-call-${idx}`,
+      toolUseId: `tool-call-${idx}`,
+      preview: `${toolType} preview`,
+      tocLabel: `${toolType} label`,
+      searchText: `${toolType} search`,
+    }));
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, typedEvents);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+
+    const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
+    const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
+    expect(toolCallsValue).toBe("6");
+    const toolCallRows = toolCallsCard ? Array.from(toolCallsCard.querySelectorAll(".detail-summary-sub")) : [];
+    expect(toolCallRows).toHaveLength(2);
+    for (const toolType of toolTypes) {
+      expect(toolCallsCard?.textContent).toContain(`${toolType} 1`);
+    }
+    expect(toolCallsCard?.querySelector(".detail-summary-note")).toBeNull();
   });
 
   it("does not render snippet text under the event header preview", async () => {
@@ -2585,9 +2713,11 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBeGreaterThan(detailRequestsBeforeRefresh));
     await waitFor(() => {
       flushRafQueue();
-      expect(document.querySelectorAll(".event-card").length).toBe(2);
+      expect(document.querySelectorAll(".event-card").length).toBe(1);
     });
     await waitFor(() => expect(document.querySelectorAll(".event-raw-json").length).toBe(1));
+    const resumeButton = getInspectorResumeFollowButton();
+    expect(resumeButton.textContent).toContain("1 new");
 
     const expandedRawJson = document.querySelector(".event-raw-json");
     if (!(expandedRawJson instanceof HTMLElement)) {
@@ -2603,6 +2733,7 @@ describe("App sessions list live motion", () => {
       throw new Error("missing expand button for expanded card after refresh");
     }
     expect(expandedButton.textContent).toBe("collapse");
+    expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#4");
   });
 
   it("keeps inspector focus on expanded event while appends continue updating", async () => {
@@ -2652,9 +2783,11 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBeGreaterThan(detailRequestsBeforeAppend));
     await waitFor(() => {
       flushRafQueue();
-      expect(document.querySelectorAll(".event-card").length).toBe(2);
+      expect(document.querySelectorAll(".event-card").length).toBe(1);
     });
-    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(1));
+    const resumeButton = getInspectorResumeFollowButton();
+    expect(resumeButton.textContent).toContain("1 new");
 
     const expandedRawJson = document.querySelector(".event-raw-json");
     if (!(expandedRawJson instanceof HTMLElement)) {
@@ -2668,6 +2801,82 @@ describe("App sessions list live motion", () => {
     }
     expect(expandedCard.className).toContain("selected");
     expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#4");
+
+    act(() => {
+      resumeButton.click();
+    });
+
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
+    await waitFor(() => expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#5"));
+    expect(document.querySelector(".inspector-resume-follow-button")).toBeNull();
+  });
+
+  it("queues new events while scrolled away from latest and resumes on jump", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-scroll-pause-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(1));
+
+    const eventsScroller = getEventsScroll();
+    const eventsScrollToSpy = installEventsScrollTo(eventsScroller);
+    setEventsScrollMetrics(eventsScroller, { clientHeight: 120, scrollHeight: 420, scrollTop: 120 });
+    act(() => {
+      eventsScroller.dispatchEvent(new Event("scroll"));
+    });
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-scroll-pause-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent, appendedEvent]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+    const detailRequestsBeforeAppend = countTraceDetailRequests("trace-c");
+
+    act(() => {
+      source.emit("events_appended", { id: "trace-c", appended: 1 });
+    });
+    flushRafQueue();
+
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBeGreaterThan(detailRequestsBeforeAppend));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(1);
+    });
+
+    const resumeButton = getInspectorResumeFollowButton();
+    expect(resumeButton.textContent).toContain("1 new");
+    expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#4");
+
+    act(() => {
+      resumeButton.click();
+    });
+
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card").length).toBe(2);
+    });
+    await waitFor(() => expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#5"));
+    expect(eventsScrollToSpy).toHaveBeenCalled();
+    const lastCall = eventsScrollToSpy.mock.calls.at(-1)?.[0] as ScrollToOptions | undefined;
+    expect(lastCall).toMatchObject({ top: 0, behavior: "smooth" });
   });
 
   it("adds enter animation classes for newly appended timeline rows and event cards", async () => {
