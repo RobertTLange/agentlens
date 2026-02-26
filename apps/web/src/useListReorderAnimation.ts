@@ -8,6 +8,14 @@ function reducedMotionPreferred(): boolean {
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+function readItemTopInParent(node: HTMLElement): number {
+  const nodeRect = node.getBoundingClientRect();
+  const parent = node.parentElement;
+  if (!(parent instanceof HTMLElement)) return nodeRect.top;
+  const parentRect = parent.getBoundingClientRect();
+  return nodeRect.top - parentRect.top + parent.scrollTop;
+}
+
 export interface UseListReorderAnimationOptions {
   reorderTransition?: string;
   resetKey?: string;
@@ -35,7 +43,7 @@ export function useListReorderAnimation<T extends HTMLElement>(
     for (const itemId of itemIds) {
       const node = itemRefs.current.get(itemId);
       if (!node) continue;
-      nextTopByItemId.set(itemId, node.getBoundingClientRect().top);
+      nextTopByItemId.set(itemId, readItemTopInParent(node));
     }
 
     if (reducedMotionPreferred()) {
