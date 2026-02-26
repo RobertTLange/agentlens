@@ -943,6 +943,43 @@ describe("App sessions list live motion", () => {
     );
   });
 
+  it("defaults Daily Activity to previous activity day before 7am local", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let unmount: (() => void) | null = null;
+    try {
+      vi.setSystemTime(new Date(2026, 1, 26, 1, 26, 38));
+      const expectedDate = "2026-02-25";
+      const expectedDay = makeActivityDayForDate(expectedDate);
+      activityDay = expectedDay;
+      activityDayByDate = { [expectedDate]: expectedDay };
+
+      ({ unmount } = render(<App />));
+      await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+      const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+        node.textContent?.includes("Activity"),
+      );
+      if (!(activityButton instanceof HTMLButtonElement)) {
+        throw new Error("missing activity view switch button");
+      }
+      act(() => {
+        activityButton.click();
+      });
+
+      await waitFor(() => {
+        const dayRequest = requestedUrls.find((url) => url.includes("/api/activity/day"));
+        expect(dayRequest).toBeTruthy();
+        if (!dayRequest) return;
+        const parsed = new URL(dayRequest, "http://localhost");
+        expect(parsed.searchParams.get("date")).toBe(expectedDate);
+      });
+      await waitFor(() => expect(document.querySelector(".activity-day-meta")?.textContent).toContain(expectedDate));
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
+  });
+
   it("reloads weekly heatmap when clicking an older day in Yearly Activity", async () => {
     const targetDate = activityYear.days[0]?.dateLocal;
     if (!targetDate) {
