@@ -1225,6 +1225,26 @@ body {
   flex-wrap: wrap;
 }
 
+.inspector-resume-follow-button {
+  border: 1px solid #0f766e;
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: #ccfbf1;
+  color: #115e59;
+  font-size: 0.7rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.inspector-resume-follow-button:hover {
+  background: #99f6e4;
+}
+
+.inspector-resume-follow-button:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
 .event-kind-filter {
   position: relative;
 }
