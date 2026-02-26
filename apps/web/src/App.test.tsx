@@ -2286,21 +2286,69 @@ describe("App sessions list live motion", () => {
       searchText: "web search",
     };
 
-    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [toolUseEvent, toolResultEvent, webSearchEvent]);
+    const fileReadEvent: NormalizedEvent = {
+      ...makeEvent("event-file-read", { signature: "read file" }),
+      eventKind: "assistant",
+      toolType: "fs:read",
+      toolCallId: "call-2",
+      toolUseId: "call-2",
+      preview: "read config",
+      tocLabel: "Tool: read",
+      searchText: "tool read fs",
+    };
+
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [
+      toolUseEvent,
+      toolResultEvent,
+      webSearchEvent,
+      fileReadEvent,
+    ]);
 
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
 
     const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
-    expect(toolCallsValue).toBe("2");
+    expect(toolCallsValue).toBe("3");
     expect(toolCallsCard?.textContent).toContain("bash 1");
     expect(toolCallsCard?.textContent).toContain("web:search 1");
+    expect(toolCallsCard?.textContent).toContain("fs:read 1");
     const toolCallRows = toolCallsCard ? Array.from(toolCallsCard.querySelectorAll(".detail-summary-sub")) : [];
     expect(toolCallRows).toHaveLength(1);
-    expect(toolCallRows[0]?.textContent).toContain("bash 1 · web:search 1");
+    expect(toolCallRows[0]?.textContent).toContain("bash 1 · fs:read 1 · web:search 1");
     expect(toolCallsCard?.textContent).not.toContain("results");
     expect(toolCallsCard?.textContent).not.toContain("unmatched");
+  });
+
+  it("shows up to six tool types before rendering a more-types note", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const toolTypes = ["bash", "patch", "close_agent", "spawn_agent", "web:search", "fs:read"];
+    const typedEvents: NormalizedEvent[] = toolTypes.map((toolType, idx) => ({
+      ...makeEvent(`event-tool-type-${idx}`, { signature: toolType }),
+      eventKind: "assistant",
+      toolType,
+      toolCallId: `tool-call-${idx}`,
+      toolUseId: `tool-call-${idx}`,
+      preview: `${toolType} preview`,
+      tocLabel: `${toolType} label`,
+      searchText: `${toolType} search`,
+    }));
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, typedEvents);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+
+    const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
+    const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
+    expect(toolCallsValue).toBe("6");
+    const toolCallRows = toolCallsCard ? Array.from(toolCallsCard.querySelectorAll(".detail-summary-sub")) : [];
+    expect(toolCallRows).toHaveLength(2);
+    for (const toolType of toolTypes) {
+      expect(toolCallsCard?.textContent).toContain(`${toolType} 1`);
+    }
+    expect(toolCallsCard?.querySelector(".detail-summary-note")).toBeNull();
   });
 
   it("does not render snippet text under the event header preview", async () => {

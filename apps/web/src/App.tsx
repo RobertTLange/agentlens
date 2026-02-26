@@ -29,6 +29,8 @@ const CLOCK_TICK_MS = 10_000;
 const TIMELINE_EVENT_INITIAL_RENDER_LIMIT = 240;
 const TIMELINE_EVENT_RENDER_STEP = 240;
 const TIMELINE_EVENT_RENDER_PREFETCH_PX = 320;
+const TOOL_CALL_TYPES_PER_SUMMARY_ROW = 3;
+const TOOL_CALL_SUMMARY_ROW_LIMIT = 2;
 const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 const PRIMARY_RECENT_SESSION_COUNT = 20;
@@ -501,7 +503,7 @@ export function App(): JSX.Element {
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([toolType, count]) => ({ toolType, count }));
   }, [filteredPageEvents]);
-  const toolCallTypeCountsPreview = toolCallTypeCounts.slice(0, 4);
+  const toolCallTypeCountsPreview = toolCallTypeCounts.slice(0, TOOL_CALL_TYPES_PER_SUMMARY_ROW * TOOL_CALL_SUMMARY_ROW_LIMIT);
   const hiddenToolCallTypeCount = Math.max(0, toolCallTypeCounts.length - toolCallTypeCountsPreview.length);
   const toolCallCountTotal = toolCallTypeCounts.reduce((sum, row) => sum + row.count, 0);
   const newestEventTsMs = useMemo(() => {
@@ -521,8 +523,8 @@ export function App(): JSX.Element {
   const heroStatusClassName = `hero-status mono${flashStatus ? " flash-active" : ""}${isFlashStatusFading ? " flash-fading" : ""}`;
   const toolCallTypeCountRows = useMemo(() => {
     const rows: Array<Array<{ toolType: string; count: number }>> = [];
-    for (let index = 0; index < toolCallTypeCountsPreview.length; index += 2) {
-      rows.push(toolCallTypeCountsPreview.slice(index, index + 2));
+    for (let index = 0; index < toolCallTypeCountsPreview.length; index += TOOL_CALL_TYPES_PER_SUMMARY_ROW) {
+      rows.push(toolCallTypeCountsPreview.slice(index, index + TOOL_CALL_TYPES_PER_SUMMARY_ROW));
     }
     return rows;
   }, [toolCallTypeCountsPreview]);
