@@ -84,6 +84,8 @@ function makeTrace(
     errorCount: 0,
     toolUseCount: 0,
     toolResultCount: 0,
+    compactionCount: 0,
+    lastCompactionTs: null,
     unmatchedToolUses: 0,
     unmatchedToolResults: 0,
     activityStatus,
@@ -117,6 +119,7 @@ function makeTrace(
       tool_use: 0,
       tool_result: 0,
       reasoning: 0,
+      compaction: 0,
       meta: 0,
     },
   };
@@ -138,6 +141,7 @@ function makeOverview(traceCount: number): OverviewStats {
       tool_use: 0,
       tool_result: 0,
       reasoning: 0,
+      compaction: 0,
       meta: 0,
     },
     updatedAtMs: 1_000,
@@ -165,7 +169,7 @@ function makeActivityDay(): AgentActivityDay {
         primaryTraceId: "trace-c",
         activeByAgent: { claude: 1, codex: 1, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
         eventCount: 2,
-        eventKindCounts: { system: 0, assistant: 2, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, meta: 0 },
+        eventKindCounts: { system: 0, assistant: 2, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, compaction: 0, meta: 0 },
         dominantAgent: "codex",
         dominantEventKind: "assistant",
         isBreak: false,
@@ -178,7 +182,7 @@ function makeActivityDay(): AgentActivityDay {
         primaryTraceId: "",
         activeByAgent: { claude: 0, codex: 0, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
         eventCount: 0,
-        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, meta: 0 },
+        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, compaction: 0, meta: 0 },
         dominantAgent: "none",
         dominantEventKind: "none",
         isBreak: true,
@@ -191,7 +195,7 @@ function makeActivityDay(): AgentActivityDay {
         primaryTraceId: "trace-a",
         activeByAgent: { claude: 0, codex: 0, cursor: 1, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
         eventCount: 1,
-        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 1, tool_result: 0, reasoning: 0, meta: 0 },
+        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 1, tool_result: 0, reasoning: 0, compaction: 0, meta: 0 },
         dominantAgent: "cursor",
         dominantEventKind: "tool_use",
         isBreak: false,
@@ -204,7 +208,7 @@ function makeActivityDay(): AgentActivityDay {
         primaryTraceId: "",
         activeByAgent: { claude: 0, codex: 0, cursor: 0, opencode: 0, gemini: 0, pi: 0, unknown: 0 },
         eventCount: 0,
-        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, meta: 0 },
+        eventKindCounts: { system: 0, assistant: 0, user: 0, tool_use: 0, tool_result: 0, reasoning: 0, compaction: 0, meta: 0 },
         dominantAgent: "none",
         dominantEventKind: "none",
         isBreak: true,
@@ -259,6 +263,7 @@ function makeActivityWeek(): AgentActivityWeek {
     tool_use: 0,
     tool_result: 0,
     reasoning: 0,
+    compaction: 0,
     meta: 0,
   });
 
@@ -333,6 +338,7 @@ function makeActivityYear(): AgentActivityWeek {
     tool_use: 0,
     tool_result: 0,
     reasoning: 0,
+    compaction: 0,
     meta: 0,
   });
 
@@ -1181,6 +1187,7 @@ describe("App sessions list live motion", () => {
             tool_use: 0,
             tool_result: 0,
             reasoning: 0,
+            compaction: 0,
             meta: 0,
           },
           dominantAgent: isActive ? ("codex" as const) : ("none" as const),
@@ -1373,7 +1380,7 @@ describe("App sessions list live motion", () => {
     render(<App />);
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/trace/"))).toBe(true));
 
-    expect(getEventTypeFilterTrigger().textContent).toContain("event types 6/7");
+    expect(getEventTypeFilterTrigger().textContent).toContain("event types 7/8");
 
     act(() => {
       getEventTypeFilterTrigger().click();
@@ -1686,7 +1693,7 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePage(missingMetricsSummary);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
     let cards = Array.from(document.querySelectorAll(".detail-summary-card"));
     expect(cards[0]?.textContent).toContain("cost N/A");
@@ -1719,11 +1726,11 @@ describe("App sessions list live motion", () => {
 
   it("renders trace inspector summary cards with token/model/tool data", async () => {
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
 
     const cards = Array.from(document.querySelectorAll(".detail-summary-card"));
     const labels = cards.map((card) => card.querySelector(".detail-summary-title")?.textContent?.trim());
-    expect(labels).toEqual(["tokens", "models", "tool calls"]);
+    expect(labels).toEqual(["tokens", "models", "tool calls", "compaction"]);
 
     expect(cards[0]?.textContent).toContain("out");
     expect(cards[0]?.textContent).toContain("ctx");
@@ -1743,7 +1750,7 @@ describe("App sessions list live motion", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
 
     const tokensCard = document.querySelector(".detail-summary-card");
     expect(tokensCard?.textContent).toContain("cost N/A");
@@ -2216,7 +2223,7 @@ describe("App sessions list live motion", () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
     await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
 
     const tocTag = document.querySelector(".toc-row .kind-tool-type");
     expect(tocTag?.textContent?.trim()).toBe("bash");
@@ -2305,7 +2312,7 @@ describe("App sessions list live motion", () => {
     ]);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
 
     const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
@@ -2338,7 +2345,7 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, typedEvents);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(3));
+    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
 
     const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
@@ -2407,6 +2414,7 @@ describe("App sessions list live motion", () => {
           tool_use: 1,
           tool_result: 2,
           reasoning: 0,
+          compaction: 0,
           meta: 0,
         },
       },
@@ -2461,6 +2469,7 @@ describe("App sessions list live motion", () => {
           tool_use: 0,
           tool_result: 0,
           reasoning: 2,
+          compaction: 0,
           meta: 1,
         },
       },

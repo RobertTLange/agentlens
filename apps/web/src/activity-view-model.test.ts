@@ -22,6 +22,7 @@ function makeEventCounts(overrides: Partial<Record<EventKind, number>> = {}): Re
     tool_use: overrides.tool_use ?? 0,
     tool_result: overrides.tool_result ?? 0,
     reasoning: overrides.reasoning ?? 0,
+    compaction: 0,
     meta: overrides.meta ?? 0,
   };
 }

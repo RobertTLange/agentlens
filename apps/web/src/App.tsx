@@ -35,7 +35,7 @@ const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 const PRIMARY_RECENT_SESSION_COUNT = 20;
 const OLDER_TRACE_PAGE_SIZE = 40;
-const EVENT_KIND_OPTIONS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "meta"];
+const EVENT_KIND_OPTIONS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"];
 const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
   system: "system",
   assistant: "assistant",
@@ -43,6 +43,7 @@ const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
   tool_use: "tool use",
   tool_result: "tool result",
   reasoning: "reasoning",
+  compaction: "compaction",
   meta: "meta",
 };
 const DEFAULT_VISIBLE_EVENT_KINDS: EventKind[] = EVENT_KIND_OPTIONS.filter((kind) => kind !== "meta");
@@ -467,8 +468,11 @@ export function App(): JSX.Element {
   const selectedTraceUpdatedMs = selectedTraceSummary
     ? Math.max(selectedTraceSummary.lastEventTs ?? 0, selectedTraceSummary.mtimeMs)
     : null;
+  const selectedTraceCompactionSummary = selectedTraceSummary
+    ? ` · compact ${selectedTraceSummary.compactionCount}${selectedTraceSummary.lastCompactionTs ? ` (${fmtTimeAgo(selectedTraceSummary.lastCompactionTs, clockNowMs)})` : ""}`
+    : "";
   const selectedTraceMeta = selectedTraceSummary
-    ? `${selectedTraceSummary.agent} · ${selectedTraceEventCount} ${selectedTraceEventCount === 1 ? "event" : "events"} · updated ${fmtTimeAgo(selectedTraceUpdatedMs, clockNowMs)}`
+    ? `${selectedTraceSummary.agent} · ${selectedTraceEventCount} ${selectedTraceEventCount === 1 ? "event" : "events"} · updated ${fmtTimeAgo(selectedTraceUpdatedMs, clockNowMs)}${selectedTraceCompactionSummary}`
     : selectedAdHocPath
       ? `ad-hoc file · ${selectedAdHocPath}`
     : "Pick a session to inspect.";
@@ -1994,6 +1998,16 @@ export function App(): JSX.Element {
                     {hiddenToolCallTypeCount > 0 && (
                       <div className="detail-summary-note mono">{`+${hiddenToolCallTypeCount} more types`}</div>
                     )}
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-head mono">
+                      <div className="detail-summary-title">compaction</div>
+                      <div className="detail-summary-value">{formatCompactNumber(page.summary.compactionCount)}</div>
+                    </div>
+                    <div className="detail-summary-sub mono">{`last ${fmtTime(page.summary.lastCompactionTs)}`}</div>
+                    <div className="detail-summary-sub mono">
+                      {page.summary.lastCompactionTs ? fmtTimeAgo(page.summary.lastCompactionTs, clockNowMs) : "not observed"}
+                    </div>
                   </article>
                 </section>
 
