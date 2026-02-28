@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="apps/web/public/favicon.png" alt="AgentLens logo" width="160" />
+  <img src="docs/logo.png" alt="AgentLens logo" width="160" />
 </p>
 
 <h1 align="center">AgentLens</h1>
@@ -47,6 +47,8 @@ Then open `http://127.0.0.1:8787`.
 ### Remote tunnel helper
 
 Use `scripts/agentlens-remote.sh` to launch AgentLens remotely and port-forward to local browser.
+Use this when your agents run on a remote host: the script starts AgentLens on that host, indexes that host's trace files, and exposes it locally via the forwarded URL.
+If sessions are missing, update source roots in the remote `~/.agentlens/config.toml`.
 
 ```bash
 # GCP (explicit target)
@@ -95,6 +97,17 @@ node -e 'const p=process.argv[1]; console.log(`http://localhost:8787/trace-file/
 ## Activity View
 
 ![AgentLens Daily Activity view](docs/activity-2026-02-22.png)
+
+### How Activity Is Computed
+
+- Session status:
+  - `waiting_input`: explicit wait markers (plus text fallback).
+  - `running`: unmatched tool call or recent activity inside running TTL.
+  - `idle`: no active signal or TTL timeout.
+- Timeline/heatmap bins are computed from timestamped events per session, split into active segments when gaps exceed 20 minutes.
+- A bin is active when any segment overlaps it; AgentLens also counts events in that bin and derives dominant agent/event kind for coloring.
+- `Daily Activity` uses a local `07:00 -> next 07:00` window (today truncates at `now`); `Week Heatmap` applies the same binning across each selected day window.
+- Breaks are contiguous zero-activity bins lasting at least `break_min` (default `10` minutes).
 
 ## Docs
 
