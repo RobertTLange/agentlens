@@ -33,6 +33,7 @@ const EVENT_KIND_KEYS: EventKind[] = [
   "tool_use",
   "tool_result",
   "reasoning",
+  "compaction",
   "meta",
 ];
 
@@ -105,6 +106,7 @@ function emptyEventKindCounts(): Record<EventKind, number> {
     tool_use: 0,
     tool_result: 0,
     reasoning: 0,
+    compaction: 0,
     meta: 0,
   };
 }
@@ -413,6 +415,8 @@ function summarize(
   let errorCount = 0;
   let toolUseCount = 0;
   let toolResultCount = 0;
+  let compactionCount = 0;
+  let lastCompactionTs: number | null = null;
   let firstEventTs: number | null = null;
   let lastEventTs: number | null = null;
 
@@ -433,6 +437,12 @@ function summarize(
     if (event.eventKind === "tool_result") {
       toolResultCount += 1;
       if (event.toolUseId) toolResultIds.add(event.toolUseId);
+    }
+    if (event.eventKind === "compaction") {
+      compactionCount += 1;
+      if (event.timestampMs !== null) {
+        lastCompactionTs = lastCompactionTs === null ? event.timestampMs : Math.max(lastCompactionTs, event.timestampMs);
+      }
     }
     if (event.timestampMs !== null) {
       // Preserve file order semantics: start = first timestamped event in file, updated = last.
@@ -483,6 +493,8 @@ function summarize(
     errorCount,
     toolUseCount,
     toolResultCount,
+    compactionCount,
+    lastCompactionTs,
     unmatchedToolUses,
     unmatchedToolResults,
     activityStatus: activityStatus.status,

@@ -10,7 +10,7 @@ import type {
 import type { TraceIndex } from "@agentlens/core";
 
 const AGENT_KIND_KEYS: AgentKind[] = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"];
-const EVENT_KIND_KEYS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "meta"];
+const EVENT_KIND_KEYS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"];
 const DEFAULT_BIN_MINUTES = 5;
 const DEFAULT_BREAK_MINUTES = 10;
 const DEFAULT_DAY_HOUR_START_LOCAL = 7;
@@ -153,6 +153,7 @@ function createEmptyEventKindCounts(): Record<EventKind, number> {
     tool_use: 0,
     tool_result: 0,
     reasoning: 0,
+    compaction: 0,
     meta: 0,
   };
 }

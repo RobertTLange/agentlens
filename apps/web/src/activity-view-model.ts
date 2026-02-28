@@ -2,7 +2,7 @@ import type { AgentActivityBin, AgentActivityDay, AgentKind } from "@agentlens/c
 import { kindClassSuffix } from "./view-model.js";
 
 const AGENT_KIND_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "pi", "unknown"];
-const EVENT_KIND_ORDER = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "meta"] as const;
+const EVENT_KIND_ORDER = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"] as const;
 type EventKindKey = (typeof EVENT_KIND_ORDER)[number];
 const EVENT_KIND_PASTEL_BY_KIND: Record<EventKindKey, string> = {
   system: "var(--event-system-bg)",
@@ -11,6 +11,7 @@ const EVENT_KIND_PASTEL_BY_KIND: Record<EventKindKey, string> = {
   tool_use: "var(--event-tool-use-bg)",
   tool_result: "var(--event-tool-result-bg)",
   reasoning: "var(--event-reasoning-bg)",
+  compaction: "var(--event-compaction-bg)",
   meta: "var(--event-meta-bg)",
 };
 
