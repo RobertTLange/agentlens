@@ -160,6 +160,58 @@ export class CodexParser implements TraceParser {
         continue;
       }
 
+      if (rawType === "compacted") {
+        const payload = asRecord(value.payload);
+        const compactedMessage = asString(payload.message).trim();
+        const replacementHistoryCount = asArray(payload.replacement_history).length;
+        const replacementHistorySummary =
+          replacementHistoryCount > 0 ? `replacement history entries: ${replacementHistoryCount}` : "";
+        const preview = normalizePreview(compactedMessage || replacementHistorySummary || "Context compacted");
+        pushEvent(
+          {
+            timestampMs,
+            sessionId,
+            eventKind: "compaction",
+            rawType,
+            role: "system",
+            preview,
+            textBlocks: [compactedMessage, replacementHistorySummary].filter(Boolean),
+            parentEventId,
+            tocLabel: "Context compacted",
+            searchChunks: [rawType, "compaction", compactedMessage, replacementHistorySummary],
+            raw: value,
+          },
+          row.offset,
+        );
+        continue;
+      }
+
+      if (rawType === "event_msg") {
+        const payload = asRecord(value.payload);
+        const payloadType = asString(payload.type).toLowerCase();
+        if (payloadType === "context_compacted") {
+          const detailText = compactText(payload.message || payload.info || payload.summary || payload.reason || payload.details);
+          const preview = normalizePreview(detailText || "Context compacted");
+          pushEvent(
+            {
+              timestampMs,
+              sessionId,
+              eventKind: "compaction",
+              rawType: payloadType,
+              role: "system",
+              preview,
+              textBlocks: detailText ? [detailText] : [],
+              parentEventId,
+              tocLabel: "Context compacted",
+              searchChunks: [rawType, payloadType, "compaction", detailText],
+              raw: value,
+            },
+            row.offset,
+          );
+          continue;
+        }
+      }
+
       if (rawType === "response_item") {
         const payload = asRecord(value.payload);
         const payloadType = asString(payload.type).toLowerCase();

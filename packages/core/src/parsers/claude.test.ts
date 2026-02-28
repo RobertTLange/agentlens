@@ -91,4 +91,42 @@ describe("ClaudeParser", () => {
     expect(reasoningEvent?.tocLabel).toContain("The user asked about weather in Moscow");
     expect(reasoningEvent?.textBlocks[0]).toContain("The user asked about weather in Moscow");
   });
+
+  it("normalizes compact_boundary system rows to compaction events", () => {
+    const parser = new ClaudeParser();
+    const text = JSON.stringify({
+      type: "system",
+      subtype: "compact_boundary",
+      sessionId: "sess-1",
+      content: "Conversation compacted",
+      compactMetadata: { trigger: "manual", preTokens: 32886 },
+    });
+
+    const output = parser.parse(makeDiscoveredFile(), text);
+    expect(output.events).toHaveLength(1);
+
+    const compactionEvent = output.events[0];
+    expect(compactionEvent?.eventKind).toBe("compaction");
+    expect(compactionEvent?.tocLabel).toBe("Context compacted");
+    expect(compactionEvent?.rawType).toBe("compact_boundary");
+    expect(compactionEvent?.preview).toContain("Conversation compacted");
+  });
+
+  it("falls back to a stable compact boundary label when content and metadata are empty", () => {
+    const parser = new ClaudeParser();
+    const text = JSON.stringify({
+      type: "system",
+      subtype: "compact_boundary",
+      sessionId: "sess-1",
+      compactMetadata: {},
+    });
+
+    const output = parser.parse(makeDiscoveredFile(), text);
+    expect(output.events).toHaveLength(1);
+
+    const compactionEvent = output.events[0];
+    expect(compactionEvent?.eventKind).toBe("compaction");
+    expect(compactionEvent?.preview).toBe("Context compacted");
+    expect(compactionEvent?.tocLabel).toBe("Context compacted");
+  });
 });

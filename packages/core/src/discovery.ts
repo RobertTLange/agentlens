@@ -66,6 +66,10 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
       .normalize(input)
       .split(path.sep)
       .some((part) => part.toLowerCase() === segment.toLowerCase());
+  const isClaudeCompactionSidechainFile = (input: string): boolean => {
+    const normalized = input.replace(/\\/g, "/").toLowerCase();
+    return normalized.includes("/subagents/") && /\/agent-acompact-[^/]+\.jsonl$/.test(normalized);
+  };
 
   const includeGlobsForSessionDirectory = (root: string, logType: AgentKind): string[] => {
     if (logType === "codex") {
@@ -164,6 +168,9 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
     }
 
     for (const filePath of matches) {
+      if (entry.logType === "claude" && isClaudeCompactionSidechainFile(filePath)) {
+        continue;
+      }
       try {
         const fileStat = await stat(filePath);
         const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);

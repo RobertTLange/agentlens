@@ -73,6 +73,9 @@ export class ClaudeParser implements TraceParser {
       const rowSessionId = asString(value.session_id || value.sessionId);
       sessionId ||= rowSessionId;
       const parentEventId = asString(value.parentUuid || value.parent_uuid || value.parent_event_id);
+      const subtype = asString(value.subtype).toLowerCase();
+      const compactMetadata = asRecord(value.compactMetadata);
+      const compactMetadataText = Object.keys(compactMetadata).length > 0 ? compactText(compactMetadata) : "";
 
       const pushEvent = (seed: Omit<Parameters<typeof makeEvent>[0], "traceId" | "index" | "offset">, offset: number): void => {
         events.push(
@@ -85,6 +88,28 @@ export class ClaudeParser implements TraceParser {
         );
         eventIndex += 1;
       };
+
+      if (rawType === "system" && subtype === "compact_boundary") {
+        const compactedSummary = compactText(value.content) || compactMetadataText || "Context compacted";
+        const preview = normalizePreview(compactedSummary);
+        pushEvent(
+          {
+            timestampMs,
+            sessionId,
+            eventKind: "compaction",
+            rawType: subtype || rawType,
+            role: "system",
+            preview,
+            textBlocks: compactedSummary ? [compactedSummary] : [],
+            parentEventId,
+            tocLabel: "Context compacted",
+            searchChunks: [rawType, subtype, "compaction", compactedSummary],
+            raw: value,
+          },
+          row.offset,
+        );
+        continue;
+      }
 
       if (rawType === "user" || rawType === "assistant" || rawType === "system") {
         const message = asRecord(value.message);

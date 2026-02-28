@@ -24,7 +24,7 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
     enabled: true,
     roots: ["~/.claude/projects"],
     includeGlobs: ["**/*.jsonl"],
-    excludeGlobs: [],
+    excludeGlobs: ["**/subagents/agent-acompact-*.jsonl"],
     maxDepth: 8,
     agentHint: "claude",
   },

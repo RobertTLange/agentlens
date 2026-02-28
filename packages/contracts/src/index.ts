@@ -7,6 +7,7 @@ export type EventKind =
   | "tool_use"
   | "tool_result"
   | "reasoning"
+  | "compaction"
   | "meta";
 
 export type SessionActivityStatus = "running" | "waiting_input" | "idle";
@@ -169,6 +170,8 @@ export interface TraceSummary {
   errorCount: number;
   toolUseCount: number;
   toolResultCount: number;
+  compactionCount: number;
+  lastCompactionTs: number | null;
   unmatchedToolUses: number;
   unmatchedToolResults: number;
   activityStatus: SessionActivityStatus;

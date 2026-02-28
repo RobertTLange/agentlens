@@ -46,6 +46,7 @@ describe("config", () => {
     for (const sourceName of defaultEnabledSources) {
       expect(config.sources[sourceName]?.enabled).toBe(true);
     }
+    expect(config.sources.claude_projects?.excludeGlobs).toContain("**/subagents/agent-acompact-*.jsonl");
   });
 
   it("infers gemini log type from legacy sessionJsonlDirectories paths", () => {
