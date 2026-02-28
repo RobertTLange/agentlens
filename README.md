@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="apps/web/public/favicon.png" alt="AgentLens logo" width="160" />
+  <img src="docs/logo.png" alt="AgentLens logo" width="160" />
 </p>
 
 <h1 align="center">AgentLens</h1>
