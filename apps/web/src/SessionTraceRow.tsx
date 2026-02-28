@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SessionActivityStatus, TraceSummary } from "@agentlens/contracts";
 import { iconForAgent, pathTail } from "./view-model.js";
 
@@ -9,6 +9,7 @@ const ACTIVITY_SPARKLINE_PADDING = 1.5;
 const COMPOSITION_PIE_SIZE = 18;
 const COMPOSITION_PIE_CENTER = COMPOSITION_PIE_SIZE / 2;
 const COMPOSITION_PIE_RADIUS = COMPOSITION_PIE_CENTER - 0.6;
+const TRACE_ROW_PULSE_MS = 940;
 
 interface SessionTraceRowProps {
   trace: TraceSummary;
@@ -459,6 +460,49 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
   const compositionPie = buildCompositionPie(trace);
   const compositionTooltip = describeCompositionTooltip(compositionPie);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const pulseRafRef = useRef<number | null>(null);
+  const pulseClearTimerRef = useRef<number | null>(null);
+  const latestPulseSeqRef = useRef(0);
+  const [isPulseActive, setIsPulseActive] = useState(false);
+
+  useEffect(() => {
+    if (pulseSeq <= 0 || pulseSeq === latestPulseSeqRef.current) return;
+    latestPulseSeqRef.current = pulseSeq;
+
+    if (pulseRafRef.current !== null) {
+      window.cancelAnimationFrame(pulseRafRef.current);
+      pulseRafRef.current = null;
+    }
+    if (pulseClearTimerRef.current !== null) {
+      window.clearTimeout(pulseClearTimerRef.current);
+      pulseClearTimerRef.current = null;
+    }
+
+    // Drop + re-add class to restart the pulse animation without remounting the row.
+    setIsPulseActive(false);
+    pulseRafRef.current = window.requestAnimationFrame(() => {
+      pulseRafRef.current = null;
+      setIsPulseActive(true);
+      pulseClearTimerRef.current = window.setTimeout(() => {
+        pulseClearTimerRef.current = null;
+        setIsPulseActive(false);
+      }, TRACE_ROW_PULSE_MS);
+    });
+  }, [pulseSeq]);
+
+  useEffect(
+    () => () => {
+      if (pulseRafRef.current !== null) {
+        window.cancelAnimationFrame(pulseRafRef.current);
+        pulseRafRef.current = null;
+      }
+      if (pulseClearTimerRef.current !== null) {
+        window.clearTimeout(pulseClearTimerRef.current);
+        pulseClearTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   return (
     <div
@@ -476,7 +520,7 @@ export function SessionTraceRow(props: SessionTraceRowProps): JSX.Element {
       role="button"
       tabIndex={0}
     >
-      <div key={`pulse-${pulseSeq}`} className={`trace-row-inner ${pulseSeq > 0 ? "pulse" : ""}`}>
+      <div className={`trace-row-inner ${isPulseActive ? "pulse" : ""}`}>
         <div className="trace-topline">
           <span className="trace-session-name mono" title={sessionName}>
             {sessionName}

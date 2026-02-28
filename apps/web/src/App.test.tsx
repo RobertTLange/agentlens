@@ -2040,6 +2040,45 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelector(".hero-status")?.textContent).toContain("Input sent_tmux"));
   });
 
+  it("keeps send input focus and value while live updates arrive", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    const currentSummary = tracesById["trace-c"];
+    if (!currentSummary) {
+      throw new Error("missing trace-c fixture");
+    }
+
+    const inputField = getTraceInputField("trace-c");
+    act(() => {
+      inputField.focus();
+      fireEvent.change(inputField, { target: { value: "Continue typing" } });
+    });
+
+    expect(document.activeElement).toBe(inputField);
+    expect(inputField.value).toBe("Continue typing");
+
+    const updatedSummary: TraceSummary = {
+      ...currentSummary,
+      mtimeMs: currentSummary.mtimeMs + 1_000,
+      lastEventTs: (currentSummary.lastEventTs ?? currentSummary.mtimeMs) + 1_000,
+    };
+    tracesById["trace-c"] = updatedSummary;
+
+    act(() => {
+      source.emit("trace_updated", { summary: updatedSummary });
+    });
+    flushRafQueue();
+
+    await waitFor(() => expect(getTraceInputField("trace-c")).toBe(inputField));
+    await waitFor(() => expect(getTraceInputField("trace-c").value).toBe("Continue typing"));
+    expect(document.activeElement).toBe(inputField);
+  });
+
   it("shows input error in the session row when input endpoint rejects", async () => {
     inputResponsesByTraceId["trace-c"] = {
       status: 409,
@@ -2564,6 +2603,7 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("trace_updated", { summary: updatedB });
     });
+    flushRafQueue();
 
     await waitFor(() =>
       expect(getTraceRow("trace-b").querySelector(".trace-row-inner.pulse")).not.toBeNull(),
@@ -2575,6 +2615,7 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("trace_added", { summary: addedD });
     });
+    flushRafQueue();
 
     await waitFor(() => expect(getTraceRow("trace-d").querySelector(".trace-row-inner.pulse")).not.toBeNull());
   });
