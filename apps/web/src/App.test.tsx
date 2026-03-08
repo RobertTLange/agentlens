@@ -840,21 +840,22 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true));
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/week"))).toBe(true));
-    const dayRequestIndex = requestedUrls.findIndex((url) => url.includes("/api/activity/day"));
-    const weekRequestIndex = requestedUrls.findIndex((url) => {
-      if (!url.includes("/api/activity/week")) return false;
-      const parsed = new URL(url, "http://localhost");
-      return parsed.searchParams.get("day_count") === "7";
-    });
-    const yearRequestIndex = requestedUrls.findIndex((url) => {
-      if (!url.includes("/api/activity/week")) return false;
-      const parsed = new URL(url, "http://localhost");
-      const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
-      return Number.isFinite(dayCount) && dayCount > 7;
-    });
-    expect(dayRequestIndex).toBeGreaterThanOrEqual(0);
-    expect(weekRequestIndex).toBeGreaterThan(dayRequestIndex);
-    expect(yearRequestIndex).toBeGreaterThan(weekRequestIndex);
+    expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true);
+    expect(
+      requestedUrls.some((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        return parsed.searchParams.get("day_count") === "7";
+      }),
+    ).toBe(true);
+    expect(
+      requestedUrls.some((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
+        return Number.isFinite(dayCount) && dayCount > 7;
+      }),
+    ).toBe(true);
     expect(
       requestedUrls.some((url) => url.includes("/api/activity/week") && url.includes("hour_start=7") && url.includes("hour_end=7")),
     ).toBe(true);
@@ -965,6 +966,143 @@ describe("App sessions list live motion", () => {
     expect(summaryTitleTexts).toContain("Year Summary");
   });
 
+  it("starts day, week, and year activity requests without waiting for earlier responses", async () => {
+    const deferredResponses = new Map<string, { resolve: (response: Response) => void }>();
+    const activityRequests: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+        const method = String(init?.method ?? "GET").toUpperCase();
+        requestedUrls.push(url);
+        if (url.includes("/api/overview")) {
+          return Promise.resolve(new Response(JSON.stringify({ overview }), { status: 200 }));
+        }
+        if (url.includes("/api/traces")) {
+          return Promise.resolve(new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 }));
+        }
+        if (method === "GET" && (url.includes("/api/activity/day") || url.includes("/api/activity/week"))) {
+          activityRequests.push(url);
+          return new Promise<Response>((resolve) => {
+            deferredResponses.set(url, { resolve });
+          });
+        }
+        return Promise.resolve(new Response("{}", { status: 404 }));
+      }) as typeof fetch,
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(activityRequests.length).toBe(3));
+    expect(activityRequests.some((url) => url.includes("/api/activity/day"))).toBe(true);
+    expect(
+      activityRequests.some((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        return parsed.searchParams.get("day_count") === "7";
+      }),
+    ).toBe(true);
+    expect(
+      activityRequests.some((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
+        return Number.isFinite(dayCount) && dayCount > 7;
+      }),
+    ).toBe(true);
+
+    for (const url of activityRequests) {
+      const deferred = deferredResponses.get(url);
+      if (!deferred) continue;
+      if (url.includes("/api/activity/day")) {
+        deferred.resolve(new Response(JSON.stringify({ activity: activityDay }), { status: 200 }));
+        continue;
+      }
+      const parsed = new URL(url, "http://localhost");
+      const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
+      deferred.resolve(
+        new Response(JSON.stringify({ activity: Number.isFinite(dayCount) && dayCount > 7 ? activityYear : activityWeek }), {
+          status: 200,
+        }),
+      );
+    }
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
+  });
+
+  it("does not re-fetch yearly activity on the 30 second refresh cadence", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let unmount: (() => void) | null = null;
+
+    try {
+      ({ unmount } = render(<App />));
+      await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+      const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+        node.textContent?.includes("Activity"),
+      );
+      if (!(activityButton instanceof HTMLButtonElement)) {
+        throw new Error("missing activity view switch button");
+      }
+
+      act(() => {
+        activityButton.click();
+      });
+
+      await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
+
+      const yearRequestCountBefore = requestedUrls.filter((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
+        return Number.isFinite(dayCount) && dayCount > 7;
+      }).length;
+      const weekRequestCountBefore = requestedUrls.filter((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        return parsed.searchParams.get("day_count") === "7";
+      }).length;
+      const dayRequestCountBefore = requestedUrls.filter((url) => url.includes("/api/activity/day")).length;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(31_000);
+      });
+
+      const yearRequestCountAfter = requestedUrls.filter((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
+        return Number.isFinite(dayCount) && dayCount > 7;
+      }).length;
+      const weekRequestCountAfter = requestedUrls.filter((url) => {
+        if (!url.includes("/api/activity/week")) return false;
+        const parsed = new URL(url, "http://localhost");
+        return parsed.searchParams.get("day_count") === "7";
+      }).length;
+      const dayRequestCountAfter = requestedUrls.filter((url) => url.includes("/api/activity/day")).length;
+
+      expect(yearRequestCountAfter).toBe(yearRequestCountBefore);
+      expect(weekRequestCountAfter).toBeGreaterThan(weekRequestCountBefore);
+      expect(dayRequestCountAfter).toBeGreaterThan(dayRequestCountBefore);
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
+  });
+
   it("updates Daily Activity when clicking a date label in Week Heatmap", async () => {
     const targetDate = "2026-02-20";
     activityDayByDate[targetDate] = makeActivityDayForDate(targetDate);
@@ -989,6 +1127,43 @@ describe("App sessions list live motion", () => {
     }
     act(() => {
       dateButton.click();
+    });
+
+    await waitFor(() =>
+      expect(
+        requestedUrls.some((url) => url.includes("/api/activity/day") && url.includes(`date=${encodeURIComponent(targetDate)}`)),
+      ).toBe(true),
+    );
+    await waitFor(() => expect(document.querySelector(".activity-day-meta")?.textContent).toContain(targetDate));
+    expect(document.querySelector(`.activity-week-day-button[data-date-local="${targetDate}"]`)?.className).toContain(
+      "active",
+    );
+  });
+
+  it("updates Daily Activity when clicking a weekly activity row", async () => {
+    const targetDate = "2026-02-21";
+    activityDayByDate[targetDate] = makeActivityDayForDate(targetDate);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-row").length).toBeGreaterThan(0));
+    const row = document.querySelector(`.activity-week-row[data-date-local="${targetDate}"]`);
+    if (!(row instanceof HTMLDivElement)) {
+      throw new Error(`missing week heatmap row for ${targetDate}`);
+    }
+    act(() => {
+      row.click();
     });
 
     await waitFor(() =>
