@@ -1947,7 +1947,10 @@ export function App(): JSX.Element {
 
             {page ? (
               <>
-                <section className="detail-summary-cards" aria-label="trace inspector summary cards">
+                <section
+                  className={`detail-summary-cards ${page.summary.compactionCount > 0 ? "detail-summary-cards-four-up" : ""}`.trim()}
+                  aria-label="trace inspector summary cards"
+                >
                   <article className="detail-summary-card">
                     <div className="detail-summary-head mono">
                       <div className="detail-summary-title">tokens</div>

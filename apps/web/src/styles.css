@@ -1336,6 +1336,11 @@ body {
   gap: 8px;
 }
 
+.detail-summary-cards.detail-summary-cards-four-up {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
 .detail-summary-card {
   border: 1px solid #dbeafe;
   border-radius: 10px;
@@ -1343,6 +1348,12 @@ body {
   padding: 7px 8px;
   display: grid;
   gap: 4px;
+  min-width: 0;
+}
+
+.detail-summary-cards.detail-summary-cards-four-up .detail-summary-card {
+  padding: 6px 7px;
+  gap: 3px;
 }
 
 .detail-summary-head {
@@ -1357,12 +1368,22 @@ body {
   font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  min-width: 0;
 }
 
 .detail-summary-value {
   font-size: 0.95rem;
   color: #0f172a;
   white-space: nowrap;
+  min-width: 0;
+}
+
+.detail-summary-cards.detail-summary-cards-four-up .detail-summary-title {
+  font-size: 0.62rem;
+}
+
+.detail-summary-cards.detail-summary-cards-four-up .detail-summary-value {
+  font-size: 0.88rem;
 }
 
 .detail-summary-sub {
@@ -1373,9 +1394,17 @@ body {
   white-space: nowrap;
 }
 
+.detail-summary-cards.detail-summary-cards-four-up .detail-summary-sub {
+  font-size: 0.62rem;
+}
+
 .detail-summary-note {
   font-size: 0.64rem;
   color: #0369a1;
+}
+
+.detail-summary-cards.detail-summary-cards-four-up .detail-summary-note {
+  font-size: 0.6rem;
 }
 
 .activity-panel {
@@ -2623,7 +2652,7 @@ body {
 }
 
 @media (max-width: 1150px) {
-  .detail-summary-cards {
+  .detail-summary-cards:not(.detail-summary-cards-four-up) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

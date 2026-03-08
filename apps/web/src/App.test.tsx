@@ -1738,6 +1738,9 @@ describe("App sessions list live motion", () => {
     render(<App />);
     await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
 
+    const summaryGrid = document.querySelector(".detail-summary-cards");
+    expect(summaryGrid?.className).not.toContain("detail-summary-cards-four-up");
+
     const cards = getDetailSummaryCards();
     const labels = cards.map((card) => card.querySelector(".detail-summary-title")?.textContent?.trim());
     expect(labels).toEqual(["tokens", "models", "tool calls"]);
@@ -1763,6 +1766,9 @@ describe("App sessions list live motion", () => {
 
     render(<App />);
     await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(4));
+
+    const summaryGrid = document.querySelector(".detail-summary-cards");
+    expect(summaryGrid?.className).toContain("detail-summary-cards-four-up");
 
     const compactionCard = findDetailSummaryCard("compaction");
     expect(compactionCard).toBeTruthy();
