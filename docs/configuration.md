@@ -30,6 +30,18 @@ agentlens config set scan.includeMetaDefault true
 - `[cost]`: model pricing tables + estimation policy
 - `[models]`: context window defaults/overrides
 
+## Pricing Defaults
+
+Vendor pricing defaults are checked in under `packages/core/src/generatedPricing.ts`.
+
+Refresh them from the official Anthropic/OpenAI docs with:
+
+```bash
+npm run sync:pricing
+```
+
+Tiered defaults include long-context thresholds and Anthropic split cache-write rates when available.
+
 ## Practical Scan Settings
 
 ```toml

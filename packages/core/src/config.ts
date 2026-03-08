@@ -229,7 +229,7 @@ function normalizeCostModelRate(value: unknown): CostModelRate | null {
   const candidate = value as Partial<CostModelRate>;
   const model = String(candidate.model ?? "").trim();
   if (!model) return null;
-  return {
+  const normalized: CostModelRate = {
     model,
     inputPer1MUsd: toFiniteNumber(candidate.inputPer1MUsd) ?? 0,
     outputPer1MUsd: toFiniteNumber(candidate.outputPer1MUsd) ?? 0,
@@ -237,12 +237,52 @@ function normalizeCostModelRate(value: unknown): CostModelRate | null {
     cachedCreatePer1MUsd: toFiniteNumber(candidate.cachedCreatePer1MUsd) ?? 0,
     reasoningOutputPer1MUsd: toFiniteNumber(candidate.reasoningOutputPer1MUsd) ?? 0,
   };
+  const cachedCreate5mPer1MUsd = toFiniteNumber(candidate.cachedCreate5mPer1MUsd);
+  if (cachedCreate5mPer1MUsd !== null) normalized.cachedCreate5mPer1MUsd = cachedCreate5mPer1MUsd;
+  const cachedCreate1hPer1MUsd = toFiniteNumber(candidate.cachedCreate1hPer1MUsd);
+  if (cachedCreate1hPer1MUsd !== null) normalized.cachedCreate1hPer1MUsd = cachedCreate1hPer1MUsd;
+  const longContextThresholdTokens = toFiniteNumber(candidate.longContextThresholdTokens);
+  if (longContextThresholdTokens !== null) normalized.longContextThresholdTokens = longContextThresholdTokens;
+  const longContextInputPer1MUsd = toFiniteNumber(candidate.longContextInputPer1MUsd);
+  if (longContextInputPer1MUsd !== null) normalized.longContextInputPer1MUsd = longContextInputPer1MUsd;
+  const longContextOutputPer1MUsd = toFiniteNumber(candidate.longContextOutputPer1MUsd);
+  if (longContextOutputPer1MUsd !== null) normalized.longContextOutputPer1MUsd = longContextOutputPer1MUsd;
+  const longContextCachedReadPer1MUsd = toFiniteNumber(candidate.longContextCachedReadPer1MUsd);
+  if (longContextCachedReadPer1MUsd !== null) normalized.longContextCachedReadPer1MUsd = longContextCachedReadPer1MUsd;
+  const longContextCachedCreatePer1MUsd = toFiniteNumber(candidate.longContextCachedCreatePer1MUsd);
+  if (longContextCachedCreatePer1MUsd !== null) normalized.longContextCachedCreatePer1MUsd = longContextCachedCreatePer1MUsd;
+  const longContextCachedCreate5mPer1MUsd = toFiniteNumber(candidate.longContextCachedCreate5mPer1MUsd);
+  if (longContextCachedCreate5mPer1MUsd !== null) {
+    normalized.longContextCachedCreate5mPer1MUsd = longContextCachedCreate5mPer1MUsd;
+  }
+  const longContextCachedCreate1hPer1MUsd = toFiniteNumber(candidate.longContextCachedCreate1hPer1MUsd);
+  if (longContextCachedCreate1hPer1MUsd !== null) {
+    normalized.longContextCachedCreate1hPer1MUsd = longContextCachedCreate1hPer1MUsd;
+  }
+  const longContextReasoningOutputPer1MUsd = toFiniteNumber(candidate.longContextReasoningOutputPer1MUsd);
+  if (longContextReasoningOutputPer1MUsd !== null) {
+    normalized.longContextReasoningOutputPer1MUsd = longContextReasoningOutputPer1MUsd;
+  }
+  const contextWindowTokens = toFiniteNumber(candidate.contextWindowTokens);
+  if (contextWindowTokens !== null) normalized.contextWindowTokens = contextWindowTokens;
+  return normalized;
 }
 
 function mergeCost(input?: Partial<CostConfig>): CostConfig {
   const defaults = DEFAULT_CONFIG.cost;
-  const ratesInput = Array.isArray(input?.modelRates) ? input.modelRates : defaults.modelRates;
-  const rates = ratesInput.map(normalizeCostModelRate).filter((value): value is CostModelRate => value !== null);
+  const defaultRates = defaults.modelRates.map(normalizeCostModelRate).filter((value): value is CostModelRate => value !== null);
+  const inputRates = Array.isArray(input?.modelRates)
+    ? input.modelRates.map(normalizeCostModelRate).filter((value): value is CostModelRate => value !== null)
+    : [];
+  const rateByModel = new Map(defaultRates.map((rate) => [rate.model, rate] as const));
+  for (const rate of inputRates) {
+    rateByModel.set(rate.model, rate);
+  }
+  const appendedInputRates = inputRates.filter((rate) => !defaultRates.some((defaultRate) => defaultRate.model === rate.model));
+  const rates = [
+    ...defaultRates.map((rate) => rateByModel.get(rate.model) ?? rate),
+    ...appendedInputRates,
+  ];
   return {
     enabled: input?.enabled ?? defaults.enabled,
     currency: typeof input?.currency === "string" && input.currency.trim() ? input.currency : defaults.currency,
@@ -254,7 +294,7 @@ function mergeCost(input?: Partial<CostConfig>): CostConfig {
 function mergeModels(input?: Partial<ModelsConfig>): ModelsConfig {
   const defaults = DEFAULT_CONFIG.models;
   const defaultWindow = toFiniteNumber(input?.defaultContextWindowTokens);
-  const contextWindows =
+  const normalizedInputContextWindows =
     Array.isArray(input?.contextWindows) && input.contextWindows.length > 0
       ? input.contextWindows
           .map((entry) => {
@@ -264,7 +304,18 @@ function mergeModels(input?: Partial<ModelsConfig>): ModelsConfig {
             return { model, contextWindowTokens: Math.round(contextWindowTokens) };
           })
           .filter((entry): entry is { model: string; contextWindowTokens: number } => entry !== null)
-      : defaults.contextWindows;
+      : [];
+  const windowByModel = new Map(defaults.contextWindows.map((entry) => [entry.model, entry] as const));
+  for (const entry of normalizedInputContextWindows) {
+    windowByModel.set(entry.model, entry);
+  }
+  const appendedInputContextWindows = normalizedInputContextWindows.filter(
+    (entry) => !defaults.contextWindows.some((defaultEntry) => defaultEntry.model === entry.model),
+  );
+  const contextWindows = [
+    ...defaults.contextWindows.map((entry) => windowByModel.get(entry.model) ?? entry),
+    ...appendedInputContextWindows,
+  ];
 
   return {
     defaultContextWindowTokens:
