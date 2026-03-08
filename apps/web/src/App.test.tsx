@@ -417,6 +417,16 @@ function makeTracePageWithEvents(summary: TraceSummary, events: NormalizedEvent[
   };
 }
 
+function getDetailSummaryCards(): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>(".detail-summary-card"));
+}
+
+function findDetailSummaryCard(title: string): HTMLElement | undefined {
+  return getDetailSummaryCards().find(
+    (card) => card.querySelector(".detail-summary-title")?.textContent?.trim() === title,
+  );
+}
+
 function makeEvent(eventId: string, raw: Record<string, unknown>): NormalizedEvent {
   return {
     eventId,
@@ -1693,9 +1703,9 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePage(missingMetricsSummary);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
-    let cards = Array.from(document.querySelectorAll(".detail-summary-card"));
+    let cards = getDetailSummaryCards();
     expect(cards[0]?.textContent).toContain("cost N/A");
     expect(cards[1]?.textContent).toContain("0 shown");
 
@@ -1718,19 +1728,19 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(2));
     await waitFor(() => {
-      cards = Array.from(document.querySelectorAll(".detail-summary-card"));
+      cards = getDetailSummaryCards();
       expect(cards[0]?.textContent).not.toContain("cost N/A");
       expect(cards[1]?.textContent).toContain("gpt-5.3-codex");
     });
   });
 
-  it("renders trace inspector summary cards with token/model/tool data", async () => {
+  it("renders trace inspector summary cards without a compaction card when none occurred", async () => {
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
 
-    const cards = Array.from(document.querySelectorAll(".detail-summary-card"));
+    const cards = getDetailSummaryCards();
     const labels = cards.map((card) => card.querySelector(".detail-summary-title")?.textContent?.trim());
-    expect(labels).toEqual(["tokens", "models", "tool calls", "compaction"]);
+    expect(labels).toEqual(["tokens", "models", "tool calls"]);
 
     expect(cards[0]?.textContent).toContain("out");
     expect(cards[0]?.textContent).toContain("ctx");
@@ -1739,6 +1749,25 @@ describe("App sessions list live motion", () => {
     expect(cards[2]?.textContent).toContain("types -");
     expect(cards[2]?.textContent).not.toContain("results");
     expect(cards[2]?.textContent).not.toContain("unmatched");
+    expect(findDetailSummaryCard("compaction")).toBeUndefined();
+  });
+
+  it("renders a compaction summary card when a compaction event occurred", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c fixture");
+    tracePagesById["trace-c"] = makeTracePage({
+      ...selectedTrace,
+      compactionCount: 2,
+      lastCompactionTs: selectedTrace.lastEventTs ? selectedTrace.lastEventTs - 1_000 : 1_000,
+    });
+
+    render(<App />);
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(4));
+
+    const compactionCard = findDetailSummaryCard("compaction");
+    expect(compactionCard).toBeTruthy();
+    expect(compactionCard?.querySelector(".detail-summary-value")?.textContent?.trim()).toBe("2");
+    expect(compactionCard?.textContent).not.toContain("not observed");
   });
 
   it("shows N/A cost when summary cost estimate is unknown", async () => {
@@ -1750,7 +1779,7 @@ describe("App sessions list live motion", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
 
     const tokensCard = document.querySelector(".detail-summary-card");
     expect(tokensCard?.textContent).toContain("cost N/A");
@@ -2262,7 +2291,7 @@ describe("App sessions list live motion", () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
     await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
 
     const tocTag = document.querySelector(".toc-row .kind-tool-type");
     expect(tocTag?.textContent?.trim()).toBe("bash");
@@ -2270,7 +2299,7 @@ describe("App sessions list live motion", () => {
     const cardTag = document.querySelector(".event-card .event-top .kind-tool-type");
     expect(cardTag?.textContent?.trim()).toBe("bash");
 
-    const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
+    const toolCallsCard = findDetailSummaryCard("tool calls");
     expect(toolCallsCard?.textContent).toContain("bash 1");
   });
 
@@ -2351,9 +2380,9 @@ describe("App sessions list live motion", () => {
     ]);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
 
-    const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
+    const toolCallsCard = findDetailSummaryCard("tool calls");
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
     expect(toolCallsValue).toBe("3");
     expect(toolCallsCard?.textContent).toContain("bash 1");
@@ -2384,9 +2413,9 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, typedEvents);
 
     render(<App />);
-    await waitFor(() => expect(document.querySelectorAll(".detail-summary-card").length).toBe(4));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
 
-    const toolCallsCard = document.querySelectorAll(".detail-summary-card")[2];
+    const toolCallsCard = findDetailSummaryCard("tool calls");
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
     expect(toolCallsValue).toBe("6");
     const toolCallRows = toolCallsCard ? Array.from(toolCallsCard.querySelectorAll(".detail-summary-sub")) : [];

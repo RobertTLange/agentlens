@@ -1999,16 +1999,18 @@ export function App(): JSX.Element {
                       <div className="detail-summary-note mono">{`+${hiddenToolCallTypeCount} more types`}</div>
                     )}
                   </article>
-                  <article className="detail-summary-card">
-                    <div className="detail-summary-head mono">
-                      <div className="detail-summary-title">compaction</div>
-                      <div className="detail-summary-value">{formatCompactNumber(page.summary.compactionCount)}</div>
-                    </div>
-                    <div className="detail-summary-sub mono">{`last ${fmtTime(page.summary.lastCompactionTs)}`}</div>
-                    <div className="detail-summary-sub mono">
-                      {page.summary.lastCompactionTs ? fmtTimeAgo(page.summary.lastCompactionTs, clockNowMs) : "not observed"}
-                    </div>
-                  </article>
+                  {page.summary.compactionCount > 0 && (
+                    <article className="detail-summary-card">
+                      <div className="detail-summary-head mono">
+                        <div className="detail-summary-title">compaction</div>
+                        <div className="detail-summary-value">{formatCompactNumber(page.summary.compactionCount)}</div>
+                      </div>
+                      <div className="detail-summary-sub mono">{`last ${fmtTime(page.summary.lastCompactionTs)}`}</div>
+                      <div className="detail-summary-sub mono">
+                        {page.summary.lastCompactionTs ? fmtTimeAgo(page.summary.lastCompactionTs, clockNowMs) : "not observed"}
+                      </div>
+                    </article>
+                  )}
                 </section>
 
                 <div
