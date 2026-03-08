@@ -19,6 +19,8 @@ describe("config", () => {
     expect(config.cost.unknownModelPolicy).toBe("n_a");
     expect(config.cost.modelRates.length).toBeGreaterThan(0);
     expect(config.cost.modelRates.some((rate) => rate.model === "gpt-5.3-codex")).toBe(true);
+    expect(config.cost.modelRates.some((rate) => rate.model === "gpt-5.4")).toBe(true);
+    expect(config.cost.modelRates.some((rate) => rate.model === "claude-sonnet-4.6")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "claude-opus-4-5-20251101")).toBe(true);
     expect(config.models.defaultContextWindowTokens).toBeGreaterThan(0);
     expect(config.models.contextWindows.some((entry) => entry.model === "gpt-5.2-codex")).toBe(true);
@@ -30,6 +32,24 @@ describe("config", () => {
     expect(
       config.models.contextWindows.some(
         (entry) => entry.model === "claude-sonnet-4-5-20250929" && entry.contextWindowTokens === 200_000,
+      ),
+    ).toBe(true);
+    expect(
+      config.models.contextWindows.some((entry) => entry.model === "gpt-5.4" && entry.contextWindowTokens === 1_050_000),
+    ).toBe(true);
+    expect(
+      config.models.contextWindows.some(
+        (entry) => entry.model === "claude-opus-4.6" && entry.contextWindowTokens === 200_000,
+      ),
+    ).toBe(true);
+    expect(
+      config.models.contextWindows.some(
+        (entry) => entry.model === "claude-sonnet-4.6" && entry.contextWindowTokens === 200_000,
+      ),
+    ).toBe(true);
+    expect(
+      config.models.contextWindows.some(
+        (entry) => entry.model === "claude-haiku-4.5" && entry.contextWindowTokens === 200_000,
       ),
     ).toBe(true);
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
@@ -139,7 +159,12 @@ inputPer1MUsd = 1.25
 outputPer1MUsd = 2.5
 cachedReadPer1MUsd = 0.5
 cachedCreatePer1MUsd = 0.75
+cachedCreate5mPer1MUsd = 0.75
+cachedCreate1hPer1MUsd = 1.25
 reasoningOutputPer1MUsd = 3.0
+longContextThresholdTokens = 272000
+longContextInputPer1MUsd = 2.5
+contextWindowTokens = 400000
 
 [models]
 defaultContextWindowTokens = 123456
@@ -173,13 +198,52 @@ maxResidentEventsPerWarmTrace = 20
     const config = await loadConfig(configPath);
     expect(config.traceInspector.topModelCount).toBe(2);
     expect(config.redaction.replacement).toBe("[MASK]");
-    expect(config.cost.modelRates[0]?.model).toBe("gpt-5.3-codex");
+    const gpt53CodexRate = config.cost.modelRates.find((rate) => rate.model === "gpt-5.3-codex");
+    expect(gpt53CodexRate?.cachedCreate1hPer1MUsd).toBe(1.25);
+    expect(gpt53CodexRate?.longContextThresholdTokens).toBe(272000);
+    expect(gpt53CodexRate?.contextWindowTokens).toBe(400000);
     expect(config.models.defaultContextWindowTokens).toBe(123456);
-    expect(config.models.contextWindows[0]?.contextWindowTokens).toBe(272000);
+    expect(config.models.contextWindows.find((entry) => entry.model === "gpt-5.3-codex")?.contextWindowTokens).toBe(272000);
     expect(config.scan.mode).toBe("fixed");
     expect(config.scan.intervalSeconds).toBe(7);
     expect(config.scan.batchDebounceMs).toBe(88);
     expect(config.retention.strategy).toBe("full_memory");
     expect(config.retention.hotTraceCount).toBe(9);
+  });
+
+  it("merges legacy explicit pricing and context entries onto new defaults", () => {
+    const config = mergeConfig({
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.3-codex",
+            inputPer1MUsd: 9,
+            outputPer1MUsd: 10,
+            cachedReadPer1MUsd: 1,
+            cachedCreatePer1MUsd: 2,
+            reasoningOutputPer1MUsd: 3,
+          },
+        ],
+      },
+      models: {
+        defaultContextWindowTokens: 200_000,
+        contextWindows: [{ model: "gpt-5.3-codex", contextWindowTokens: 123_000 }],
+      },
+    });
+
+    const codexRate = config.cost.modelRates.find((rate) => rate.model === "gpt-5.3-codex");
+    const gpt54Rate = config.cost.modelRates.find((rate) => rate.model === "gpt-5.4");
+    const codexWindow = config.models.contextWindows.find((entry) => entry.model === "gpt-5.3-codex");
+    const gpt54Window = config.models.contextWindows.find((entry) => entry.model === "gpt-5.4");
+
+    expect(codexRate?.inputPer1MUsd).toBe(9);
+    expect(codexRate?.outputPer1MUsd).toBe(10);
+    expect(gpt54Rate?.inputPer1MUsd).toBe(1.25);
+    expect(gpt54Rate?.longContextThresholdTokens).toBe(272_000);
+    expect(codexWindow?.contextWindowTokens).toBe(123_000);
+    expect(gpt54Window?.contextWindowTokens).toBe(1_050_000);
   });
 });

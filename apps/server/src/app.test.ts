@@ -1617,7 +1617,7 @@ describe("server api", () => {
     };
     expect(configPayload.config.scan.intervalSeconds).toBe(3);
     expect(configPayload.config.cost.enabled).toBe(false);
-    expect(configPayload.config.cost.modelRates[0]?.model).toBe("gpt-5.3-codex");
+    expect(configPayload.config.cost.modelRates.some((rate) => rate.model === "gpt-5.3-codex")).toBe(true);
 
     await server.close();
   }, 20_000);

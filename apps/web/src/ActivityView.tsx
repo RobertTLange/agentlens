@@ -472,9 +472,11 @@ export function ActivityView({
 }: ActivityViewProps): JSX.Element {
   const [selectedDateLocal, setSelectedDateLocal] = useState(() => defaultSelectedActivityDateLocal());
   const [selectedWeekEndDateLocal, setSelectedWeekEndDateLocal] = useState(() => todayLocalDateString());
+  const [todayDateLocal, setTodayDateLocal] = useState(() => todayLocalDateString());
   const [activity, setActivity] = useState<AgentActivityDay | null>(null);
   const [activityWeek, setActivityWeek] = useState<AgentActivityWeek | null>(null);
   const [activityYear, setActivityYear] = useState<AgentActivityWeek | null>(null);
+  const [isDayLoading, setIsDayLoading] = useState(true);
   const [isWeekLoading, setIsWeekLoading] = useState(true);
   const [isYearLoading, setIsYearLoading] = useState(true);
   const [isDaySummaryExpanded, setIsDaySummaryExpanded] = useState(false);
@@ -482,12 +484,23 @@ export function ActivityView({
   const [isYearSummaryExpanded, setIsYearSummaryExpanded] = useState(false);
   const [status, setStatus] = useState("Loading daily activity...");
 
+  const selectActivityDate = useCallback(
+    (dateLocal: string, source: "week" | "year"): void => {
+      setSelectedDateLocal(dateLocal);
+      if (source === "year") {
+        setSelectedWeekEndDateLocal(isOlderThanCurrentWeekWindow(dateLocal) ? dateLocal : todayDateLocal);
+      }
+    },
+    [todayDateLocal],
+  );
+
   const fetchDayActivity = useCallback(async (dateLocal: string): Promise<void> => {
     const tzOffsetMinutes = new Date().getTimezoneOffset();
     const binMinutes = deriveBinMinutesForViewport(window.innerWidth || 1280);
     const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const dayUrl = `${API}/api/activity/day?date=${encodeURIComponent(dateLocal)}&tz_offset_min=${tzOffsetMinutes}&bin_min=${binMinutes}&break_min=${BREAK_MINUTES}`;
 
+    setIsDayLoading(true);
     try {
       const dayResponse = await fetch(dayUrl, { cache: "no-store" });
       if (!dayResponse.ok) {
@@ -499,6 +512,8 @@ export function ActivityView({
       setStatus(`Daily updated ${refreshedAt}`);
     } catch (error) {
       setStatus(`Daily activity failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsDayLoading(false);
     }
   }, []);
 
@@ -530,8 +545,7 @@ export function ActivityView({
     }
   }, []);
 
-  const fetchYearActivity = useCallback(async (): Promise<void> => {
-    const endDateLocal = todayLocalDateString();
+  const fetchYearActivity = useCallback(async (endDateLocal: string): Promise<void> => {
     const tzOffsetMinutes = new Date().getTimezoneOffset();
     const dayCount = yearDayCountForDateLocal(endDateLocal);
     const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -561,31 +575,69 @@ export function ActivityView({
   }, []);
 
   useEffect(() => {
-    let inFlight = false;
+    const intervalId = window.setInterval(() => {
+      const nextTodayDateLocal = todayLocalDateString();
+      setTodayDateLocal((current) => (current === nextTodayDateLocal ? current : nextTodayDateLocal));
+    }, REFRESH_INTERVAL_MS);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
     let isDisposed = false;
-    const refreshSequence = async (): Promise<void> => {
+    let inFlight = false;
+    const refreshDay = async (): Promise<void> => {
       if (inFlight || isDisposed) return;
       inFlight = true;
       try {
         await fetchDayActivity(selectedDateLocal);
-        if (isDisposed) return;
-        await fetchWeekActivity(selectedWeekEndDateLocal);
-        if (isDisposed) return;
-        await fetchYearActivity();
       } finally {
         inFlight = false;
       }
     };
 
-    void refreshSequence();
+    void refreshDay();
     const intervalId = window.setInterval(() => {
-      void refreshSequence();
+      void refreshDay();
     }, REFRESH_INTERVAL_MS);
     return () => {
       isDisposed = true;
       window.clearInterval(intervalId);
     };
-  }, [fetchDayActivity, fetchWeekActivity, fetchYearActivity, selectedDateLocal, selectedWeekEndDateLocal]);
+  }, [fetchDayActivity, selectedDateLocal]);
+
+  useEffect(() => {
+    let isDisposed = false;
+    let inFlight = false;
+    const refreshWeek = async (): Promise<void> => {
+      if (inFlight || isDisposed) return;
+      inFlight = true;
+      try {
+        await fetchWeekActivity(selectedWeekEndDateLocal);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void refreshWeek();
+    if (selectedWeekEndDateLocal !== todayDateLocal) {
+      return () => {
+        isDisposed = true;
+      };
+    }
+    const intervalId = window.setInterval(() => {
+      void refreshWeek();
+    }, REFRESH_INTERVAL_MS);
+    return () => {
+      isDisposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [fetchWeekActivity, selectedWeekEndDateLocal, todayDateLocal]);
+
+  useEffect(() => {
+    void fetchYearActivity(todayDateLocal);
+  }, [fetchYearActivity, todayDateLocal]);
 
   const model = useMemo(() => (activity ? buildActivityViewModel(activity) : null), [activity]);
   const weekModel = useMemo(() => (activityWeek ? buildActivityWeekHeatmapModel(activityWeek) : null), [activityWeek]);
@@ -616,7 +668,8 @@ export function ActivityView({
     [activity?.binMinutes, model],
   );
   const showSegmentLabels = binCount > 0 && binCount <= 120;
-  const headerStatus = !weekModel && isWeekLoading ? "Loading daily, week, year..." : status;
+  const headerStatus =
+    isDayLoading && isWeekLoading && isYearLoading ? "Loading daily, week, year..." : status;
   const timelineStyle = useMemo(
     () =>
       ({
@@ -647,8 +700,8 @@ export function ActivityView({
         </div>
       </div>
 
-      {activity && model ? (
-        <>
+      <>
+        {activity && model ? (
           <section className="activity-day-timeline" aria-label="daily activity timeline">
             <div className="activity-day-plot">
               <div className="activity-day-head">
@@ -755,210 +808,223 @@ export function ActivityView({
               />
             ) : null}
           </section>
+        ) : isDayLoading ? (
+          <section className="activity-day-timeline activity-day-loading" aria-label="daily activity timeline loading">
+            <div className="activity-day-head">
+              <div className="mono activity-day-title">Daily Activity</div>
+              <div className="mono activity-day-meta">Loading...</div>
+            </div>
+          </section>
+        ) : (
+          <section className="activity-day-timeline activity-day-empty" aria-label="daily activity timeline unavailable">
+            <div className="empty">{status}</div>
+          </section>
+        )}
 
-          {weekModel ? (
-            <section className="activity-week-heatmap" aria-label="weekly activity heatmap">
-              <div className="activity-week-plot">
-                <div className="activity-week-head">
-                  <div className="mono activity-week-title">Weekly Activity</div>
-                  <div className="mono activity-week-meta">{`${weekModel.startDateLabel}-${weekModel.endDateLabel} · ${weekModel.windowLabel} · ${weekModel.slotMinutes}m bins`}</div>
+        {weekModel ? (
+          <section className="activity-week-heatmap" aria-label="weekly activity heatmap">
+            <div className="activity-week-plot">
+              <div className="activity-week-head">
+                <div className="mono activity-week-title">Weekly Activity</div>
+                <div className="mono activity-week-meta">{`${weekModel.startDateLabel}-${weekModel.endDateLabel} · ${weekModel.windowLabel} · ${weekModel.slotMinutes}m bins`}</div>
+              </div>
+              <div className="activity-week-scale" aria-hidden="true">
+                {weekModel.scaleLabels.map((label) => (
+                  <span key={label.key} className="mono activity-week-scale-label" style={{ left: `${label.leftPct}%` }}>
+                    {label.label}
+                  </span>
+                ))}
+              </div>
+              <div className="activity-week-grid">
+                {weekModel.days.map((day) => (
+                  <div
+                    key={day.dateLocal}
+                    className="activity-week-row"
+                    data-date-local={day.dateLocal}
+                    onClick={() => {
+                      selectActivityDate(day.dateLocal, "week");
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className={`mono activity-week-day-button ${selectedDateLocal === day.dateLocal ? "active" : ""}`}
+                      data-date-local={day.dateLocal}
+                      aria-pressed={selectedDateLocal === day.dateLocal}
+                      onClick={() => {
+                        selectActivityDate(day.dateLocal, "week");
+                      }}
+                      title={`Show Daily Activity for ${day.dateLocal}`}
+                    >
+                      {`${day.dayLabel} · ${formatCompactNumber(day.totalSessionsInWindow)}`}
+                    </button>
+                    <div
+                      className="activity-week-row-cells"
+                      style={
+                        {
+                          "--activity-week-slot-count": String(Math.max(1, weekModel.slotCount)),
+                        } as CSSProperties
+                      }
+                    >
+                      {day.cells.map((cell) => {
+                        const tooltip = buildWeekCellTooltip(day, cell);
+                        return (
+                          <button
+                            key={cell.key}
+                            type="button"
+                            className={`activity-week-cell level-${cell.level} ${selectedDateLocal === day.dateLocal ? "active" : ""}`}
+                            data-date-local={day.dateLocal}
+                            data-time-label={cell.timeLabel}
+                            data-tooltip={tooltip}
+                            onClick={() => {
+                              selectActivityDate(day.dateLocal, "week");
+                            }}
+                            aria-label={`Show Daily Activity for ${day.dateLocal} at ${cell.timeLabel}`}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="activity-week-legend" aria-hidden="true">
+                <span className="mono">less</span>
+                <span className="activity-week-legend-swatch level-0" />
+                <span className="activity-week-legend-swatch level-1" />
+                <span className="activity-week-legend-swatch level-2" />
+                <span className="activity-week-legend-swatch level-3" />
+                <span className="activity-week-legend-swatch level-4" />
+                <span className="mono">more</span>
+              </div>
+              {weeklyUsageSummary ? (
+                <button
+                  type="button"
+                  className="mono activity-summary-toggle activity-summary-plot-toggle"
+                  data-period="week"
+                  aria-expanded={isWeekSummaryExpanded}
+                  onClick={() => {
+                    setIsWeekSummaryExpanded((current) => !current);
+                  }}
+                >
+                  {isWeekSummaryExpanded ? "Hide Week Summary" : "Show Week Summary"}
+                </button>
+              ) : null}
+            </div>
+            {weeklyUsageSummary && isWeekSummaryExpanded ? (
+              <UsageSummarySection
+                periodKey="week"
+                title="Week Summary"
+                meta={`${weekModel.startDateLabel}-${weekModel.endDateLabel} · ranked by session-hours`}
+                emptyLabel="No weekly agent activity yet."
+                summary={weeklyUsageSummary}
+                className="activity-summary-inline"
+              />
+            ) : null}
+          </section>
+        ) : isWeekLoading ? (
+          <section className="activity-week-heatmap activity-week-loading" aria-label="weekly activity heatmap loading">
+            <div className="activity-week-head">
+              <div className="mono activity-week-title">Weekly Activity</div>
+              <div className="mono activity-week-meta">Loading...</div>
+            </div>
+          </section>
+        ) : null}
+
+        {yearModel ? (
+          <section className="activity-year-heatmap" aria-label="yearly activity heatmap">
+            <div className="activity-year-plot">
+              <div className="activity-year-head">
+                <div className="mono activity-year-title">Yearly Activity</div>
+                <div className="mono activity-year-meta">
+                  {`${yearModel.yearLabel} · ${yearModel.startDateLabel}-${yearModel.endDateLabel} · daily aggregation`}
                 </div>
-                <div className="activity-week-scale" aria-hidden="true">
-                  {weekModel.scaleLabels.map((label) => (
-                    <span key={label.key} className="mono activity-week-scale-label" style={{ left: `${label.leftPct}%` }}>
-                      {label.label}
+              </div>
+              <div className="activity-year-chart">
+                <div className="activity-year-weekday-axis" aria-hidden="true">
+                  {yearModel.weekdayLabels.map((label, weekdayIndex) => (
+                    <span
+                      key={`${label}-${weekdayIndex}`}
+                      className={`mono activity-year-weekday-label ${weekdayIndex % 2 === 0 ? "show" : ""}`}
+                    >
+                      {weekdayIndex % 2 === 0 ? label : ""}
                     </span>
                   ))}
                 </div>
-                <div className="activity-week-grid">
-                  {weekModel.days.map((day) => (
-                    <div key={day.dateLocal} className="activity-week-row">
-                      <button
-                        type="button"
-                        className={`mono activity-week-day-button ${selectedDateLocal === day.dateLocal ? "active" : ""}`}
-                        data-date-local={day.dateLocal}
-                        aria-pressed={selectedDateLocal === day.dateLocal}
-                        onClick={() => {
-                          setSelectedDateLocal(day.dateLocal);
-                        }}
-                        title={`Show Daily Activity for ${day.dateLocal}`}
-                      >
-                        {`${day.dayLabel} · ${formatCompactNumber(day.totalSessionsInWindow)}`}
-                      </button>
-                      <div
-                        className="activity-week-row-cells"
-                        style={
-                          {
-                            "--activity-week-slot-count": String(Math.max(1, weekModel.slotCount)),
-                          } as CSSProperties
-                        }
-                      >
-                        {day.cells.map((cell) => {
-                          const tooltip = buildWeekCellTooltip(day, cell);
-                          return (
-                            <button
-                              key={cell.key}
-                              type="button"
-                              className={`activity-week-cell level-${cell.level} ${selectedDateLocal === day.dateLocal ? "active" : ""}`}
-                              data-date-local={day.dateLocal}
-                              data-time-label={cell.timeLabel}
-                              data-tooltip={tooltip}
-                              onClick={() => {
-                                setSelectedDateLocal(day.dateLocal);
-                              }}
-                              aria-label={`Show Daily Activity for ${day.dateLocal} at ${cell.timeLabel}`}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="activity-week-legend" aria-hidden="true">
-                  <span className="mono">less</span>
-                  <span className="activity-week-legend-swatch level-0" />
-                  <span className="activity-week-legend-swatch level-1" />
-                  <span className="activity-week-legend-swatch level-2" />
-                  <span className="activity-week-legend-swatch level-3" />
-                  <span className="activity-week-legend-swatch level-4" />
-                  <span className="mono">more</span>
-                </div>
-                {weeklyUsageSummary ? (
-                  <button
-                    type="button"
-                    className="mono activity-summary-toggle activity-summary-plot-toggle"
-                    data-period="week"
-                    aria-expanded={isWeekSummaryExpanded}
-                    onClick={() => {
-                      setIsWeekSummaryExpanded((current) => !current);
-                    }}
+                <div className="activity-year-grid-wrap">
+                  <div
+                    className="activity-year-week-labels"
+                    style={{ "--activity-year-week-count": String(Math.max(1, yearModel.weekCount)) } as CSSProperties}
+                    aria-hidden="true"
                   >
-                    {isWeekSummaryExpanded ? "Hide Week Summary" : "Show Week Summary"}
-                  </button>
-                ) : null}
-              </div>
-              {weeklyUsageSummary && isWeekSummaryExpanded ? (
-                <UsageSummarySection
-                  periodKey="week"
-                  title="Week Summary"
-                  meta={`${weekModel.startDateLabel}-${weekModel.endDateLabel} · ranked by session-hours`}
-                  emptyLabel="No weekly agent activity yet."
-                  summary={weeklyUsageSummary}
-                  className="activity-summary-inline"
-                />
-              ) : null}
-            </section>
-          ) : isWeekLoading ? (
-            <section className="activity-week-heatmap activity-week-loading" aria-label="weekly activity heatmap loading">
-              <div className="activity-week-head">
-                <div className="mono activity-week-title">Weekly Activity</div>
-                <div className="mono activity-week-meta">Loading...</div>
-              </div>
-            </section>
-          ) : null}
-
-          {yearModel ? (
-            <section className="activity-year-heatmap" aria-label="yearly activity heatmap">
-              <div className="activity-year-plot">
-                <div className="activity-year-head">
-                  <div className="mono activity-year-title">Yearly Activity</div>
-                  <div className="mono activity-year-meta">
-                    {`${yearModel.yearLabel} · ${yearModel.startDateLabel}-${yearModel.endDateLabel} · daily aggregation`}
-                  </div>
-                </div>
-                <div className="activity-year-chart">
-                  <div className="activity-year-weekday-axis" aria-hidden="true">
-                    {yearModel.weekdayLabels.map((label, weekdayIndex) => (
-                      <span
-                        key={`${label}-${weekdayIndex}`}
-                        className={`mono activity-year-weekday-label ${weekdayIndex % 2 === 0 ? "show" : ""}`}
-                      >
-                        {weekdayIndex % 2 === 0 ? label : ""}
+                    {yearModel.weekLabels.map((label) => (
+                      <span key={label.key} className="mono activity-year-week-label" style={{ gridColumn: `${label.weekIndex + 1}` }}>
+                        {label.label}
                       </span>
                     ))}
                   </div>
-                  <div className="activity-year-grid-wrap">
-                    <div
-                      className="activity-year-week-labels"
-                      style={{ "--activity-year-week-count": String(Math.max(1, yearModel.weekCount)) } as CSSProperties}
-                      aria-hidden="true"
-                    >
-                      {yearModel.weekLabels.map((label) => (
-                        <span key={label.key} className="mono activity-year-week-label" style={{ gridColumn: `${label.weekIndex + 1}` }}>
-                          {label.label}
-                        </span>
-                      ))}
-                    </div>
-                    <div
-                      className="activity-year-grid"
-                      style={{ "--activity-year-week-count": String(Math.max(1, yearModel.weekCount)) } as CSSProperties}
-                    >
-                      {yearModel.cells.map((cell) => (
-                        <button
-                          key={cell.key}
-                          type="button"
-                          className={`activity-year-cell level-${cell.level} ${selectedDateLocal === cell.dateLocal ? "active" : ""}`}
-                          data-date-local={cell.dateLocal}
-                          style={{ gridColumn: `${cell.weekIndex + 1}`, gridRow: `${cell.weekdayIndex + 1}` }}
-                          onClick={() => {
-                            setSelectedDateLocal(cell.dateLocal);
-                            setSelectedWeekEndDateLocal(
-                              isOlderThanCurrentWeekWindow(cell.dateLocal) ? cell.dateLocal : todayLocalDateString(),
-                            );
-                          }}
-                          title={buildYearCellTooltip(cell)}
-                          aria-label={`Show Daily Activity for ${cell.dateLocal}`}
-                        />
-                      ))}
-                    </div>
+                  <div
+                    className="activity-year-grid"
+                    style={{ "--activity-year-week-count": String(Math.max(1, yearModel.weekCount)) } as CSSProperties}
+                  >
+                    {yearModel.cells.map((cell) => (
+                      <button
+                        key={cell.key}
+                        type="button"
+                        className={`activity-year-cell level-${cell.level} ${selectedDateLocal === cell.dateLocal ? "active" : ""}`}
+                        data-date-local={cell.dateLocal}
+                        style={{ gridColumn: `${cell.weekIndex + 1}`, gridRow: `${cell.weekdayIndex + 1}` }}
+                        onClick={() => {
+                          selectActivityDate(cell.dateLocal, "year");
+                        }}
+                        title={buildYearCellTooltip(cell)}
+                        aria-label={`Show Daily Activity for ${cell.dateLocal}`}
+                      />
+                    ))}
                   </div>
                 </div>
-                <div className="activity-week-legend" aria-hidden="true">
-                  <span className="mono">less</span>
-                  <span className="activity-week-legend-swatch level-0" />
-                  <span className="activity-week-legend-swatch level-1" />
-                  <span className="activity-week-legend-swatch level-2" />
-                  <span className="activity-week-legend-swatch level-3" />
-                  <span className="activity-week-legend-swatch level-4" />
-                  <span className="mono">more</span>
-                </div>
-                {yearlyUsageSummary ? (
-                  <button
-                    type="button"
-                    className="mono activity-summary-toggle activity-summary-plot-toggle"
-                    data-period="year"
-                    aria-expanded={isYearSummaryExpanded}
-                    onClick={() => {
-                      setIsYearSummaryExpanded((current) => !current);
-                    }}
-                  >
-                    {isYearSummaryExpanded ? "Hide Year Summary" : "Show Year Summary"}
-                  </button>
-                ) : null}
               </div>
-              {yearlyUsageSummary && isYearSummaryExpanded ? (
-                <UsageSummarySection
-                  periodKey="year"
-                  title="Year Summary"
-                  meta={`${yearModel.startDateLabel}-${yearModel.endDateLabel} · ranked by session-hours`}
-                  emptyLabel="No yearly agent activity yet."
-                  summary={yearlyUsageSummary}
-                  className="activity-summary-inline"
-                />
+              <div className="activity-week-legend" aria-hidden="true">
+                <span className="mono">less</span>
+                <span className="activity-week-legend-swatch level-0" />
+                <span className="activity-week-legend-swatch level-1" />
+                <span className="activity-week-legend-swatch level-2" />
+                <span className="activity-week-legend-swatch level-3" />
+                <span className="activity-week-legend-swatch level-4" />
+                <span className="mono">more</span>
+              </div>
+              {yearlyUsageSummary ? (
+                <button
+                  type="button"
+                  className="mono activity-summary-toggle activity-summary-plot-toggle"
+                  data-period="year"
+                  aria-expanded={isYearSummaryExpanded}
+                  onClick={() => {
+                    setIsYearSummaryExpanded((current) => !current);
+                  }}
+                >
+                  {isYearSummaryExpanded ? "Hide Year Summary" : "Show Year Summary"}
+                </button>
               ) : null}
-            </section>
-          ) : isYearLoading ? (
-            <section className="activity-year-heatmap activity-year-loading" aria-label="yearly activity heatmap loading">
-              <div className="activity-year-head">
-                <div className="mono activity-year-title">Yearly Activity</div>
-                <div className="mono activity-year-meta">Loading...</div>
-              </div>
-            </section>
-          ) : null}
-        </>
-      ) : (
-        <div className="empty">{status}</div>
-      )}
+            </div>
+            {yearlyUsageSummary && isYearSummaryExpanded ? (
+              <UsageSummarySection
+                periodKey="year"
+                title="Year Summary"
+                meta={`${yearModel.startDateLabel}-${yearModel.endDateLabel} · ranked by session-hours`}
+                emptyLabel="No yearly agent activity yet."
+                summary={yearlyUsageSummary}
+                className="activity-summary-inline"
+              />
+            ) : null}
+          </section>
+        ) : isYearLoading ? (
+          <section className="activity-year-heatmap activity-year-loading" aria-label="yearly activity heatmap loading">
+            <div className="activity-year-head">
+              <div className="mono activity-year-title">Yearly Activity</div>
+              <div className="mono activity-year-meta">Loading...</div>
+            </div>
+          </section>
+        ) : null}
+      </>
     </section>
   );
 }

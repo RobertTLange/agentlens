@@ -1,4 +1,5 @@
 import type { AppConfig, SessionLogDirectoryConfig, SourceProfileConfig } from "@agentlens/contracts";
+import { DEFAULT_CONTEXT_WINDOWS, DEFAULT_PRICING_MODEL_RATES } from "./generatedPricing.js";
 
 export const DEFAULT_SESSION_LOG_DIRECTORIES: SessionLogDirectoryConfig[] = [
   { directory: "~/.codex", logType: "codex" },
@@ -117,75 +118,10 @@ export const DEFAULT_CONFIG: AppConfig = {
     enabled: true,
     currency: "USD",
     unknownModelPolicy: "n_a",
-    modelRates: [
-      {
-        model: "gpt-5.2-codex",
-        inputPer1MUsd: 1.5,
-        outputPer1MUsd: 6,
-        cachedReadPer1MUsd: 0.375,
-        cachedCreatePer1MUsd: 0.375,
-        reasoningOutputPer1MUsd: 0,
-      },
-      {
-        model: "gpt-5.3-codex",
-        inputPer1MUsd: 1.5,
-        outputPer1MUsd: 6,
-        cachedReadPer1MUsd: 0.375,
-        cachedCreatePer1MUsd: 0.375,
-        reasoningOutputPer1MUsd: 0,
-      },
-      {
-        model: "gpt-5.2",
-        inputPer1MUsd: 1.75,
-        outputPer1MUsd: 14,
-        cachedReadPer1MUsd: 0.175,
-        cachedCreatePer1MUsd: 0.175,
-        reasoningOutputPer1MUsd: 0,
-      },
-      {
-        model: "claude-opus-4-5-20251101",
-        inputPer1MUsd: 5,
-        outputPer1MUsd: 25,
-        cachedReadPer1MUsd: 0.5,
-        cachedCreatePer1MUsd: 6.25,
-        reasoningOutputPer1MUsd: 0,
-      },
-      {
-        model: "claude-opus-4-6",
-        inputPer1MUsd: 5,
-        outputPer1MUsd: 25,
-        cachedReadPer1MUsd: 0.5,
-        cachedCreatePer1MUsd: 6.25,
-        reasoningOutputPer1MUsd: 0,
-      },
-      {
-        model: "claude-sonnet-4-5-20250929",
-        inputPer1MUsd: 3,
-        outputPer1MUsd: 15,
-        cachedReadPer1MUsd: 0.3,
-        cachedCreatePer1MUsd: 3.75,
-        reasoningOutputPer1MUsd: 0,
-      },
-      {
-        model: "claude-haiku-4-5-20251001",
-        inputPer1MUsd: 1,
-        outputPer1MUsd: 5,
-        cachedReadPer1MUsd: 0.1,
-        cachedCreatePer1MUsd: 1.25,
-        reasoningOutputPer1MUsd: 0,
-      },
-    ],
+    modelRates: DEFAULT_PRICING_MODEL_RATES,
   },
   models: {
     defaultContextWindowTokens: 200_000,
-    contextWindows: [
-      { model: "gpt-5.2-codex", contextWindowTokens: 400_000 },
-      { model: "gpt-5.3-codex", contextWindowTokens: 400_000 },
-      { model: "gpt-5.2", contextWindowTokens: 400_000 },
-      { model: "claude-opus-4-5-20251101", contextWindowTokens: 200_000 },
-      { model: "claude-opus-4-6", contextWindowTokens: 200_000 },
-      { model: "claude-sonnet-4-5-20250929", contextWindowTokens: 200_000 },
-      { model: "claude-haiku-4-5-20251001", contextWindowTokens: 200_000 },
-    ],
+    contextWindows: DEFAULT_CONTEXT_WINDOWS,
   },
 };

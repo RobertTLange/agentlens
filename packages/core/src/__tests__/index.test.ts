@@ -2035,6 +2035,141 @@ describe("trace index", () => {
     expect(summary?.costEstimateUsd).toBe(0.0001);
   });
 
+  it("applies GPT-5.4 long-context pricing per codex token-count row", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-gpt54-tiered.jsonl");
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T12:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-gpt54-tiered", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T12:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.4-2026-02-28" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T12:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 100_000,
+                cached_input_tokens: 10_000,
+                output_tokens: 10_000,
+                reasoning_output_tokens: 0,
+                total_tokens: 120_000,
+              },
+              last_token_usage: {
+                input_tokens: 100_000,
+                cached_input_tokens: 10_000,
+                output_tokens: 10_000,
+                reasoning_output_tokens: 0,
+                total_tokens: 120_000,
+              },
+              model_context_window: 1_050_000,
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T12:00:03.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 400_000,
+                cached_input_tokens: 30_000,
+                output_tokens: 20_000,
+                reasoning_output_tokens: 0,
+                total_tokens: 450_000,
+              },
+              last_token_usage: {
+                input_tokens: 300_000,
+                cached_input_tokens: 20_000,
+                output_tokens: 10_000,
+                reasoning_output_tokens: 0,
+                total_tokens: 330_000,
+              },
+              model_context_window: 1_050_000,
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.4",
+            inputPer1MUsd: 1.25,
+            outputPer1MUsd: 7.5,
+            cachedReadPer1MUsd: 0.125,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+            longContextThresholdTokens: 272_000,
+            longContextInputPer1MUsd: 2.5,
+            longContextOutputPer1MUsd: 11.25,
+            contextWindowTokens: 1_050_000,
+          },
+        ],
+      },
+      models: {
+        defaultContextWindowTokens: 200_000,
+        contextWindows: [{ model: "gpt-5.4", contextWindowTokens: 1_050_000 }],
+      },
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.contextWindowPct).toBeCloseTo(30.47619, 5);
+    expect(summary?.costEstimateUsd).toBe(1.06625);
+  });
+
   it("deduplicates repeated claude usage rows by request id for cost estimation", async () => {
     const root = await createTempRoot();
     const claudeDir = path.join(root, ".claude", "projects", "proj");
@@ -2161,6 +2296,109 @@ describe("trace index", () => {
 
     const summary = index.getSummaries()[0];
     expect(summary?.costEstimateUsd).toBe(0.001065);
+  });
+
+  it("applies Claude long-context pricing and alias normalization from assistant usage rows", async () => {
+    const root = await createTempRoot();
+    const claudeDir = path.join(root, ".claude", "projects", "proj");
+    await mkdir(claudeDir, { recursive: true });
+
+    const claudePath = path.join(claudeDir, "session-cost-tiered.jsonl");
+    await writeFile(
+      claudePath,
+      [
+        JSON.stringify({
+          type: "assistant",
+          sessionId: "claude-tiered-sess",
+          uuid: "u1",
+          requestId: "req_tiered_1",
+          message: {
+            model: "claude-sonnet-4-6-20260219",
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "tiered" }],
+            usage: {
+              input_tokens: 100_000,
+              cache_creation_input_tokens: 10_000,
+              cache_read_input_tokens: 120_000,
+              cache_creation: { ephemeral_5m_input_tokens: 5_000, ephemeral_1h_input_tokens: 5_000 },
+              output_tokens: 50_000,
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "claude-sonnet-4.6",
+            inputPer1MUsd: 3,
+            outputPer1MUsd: 15,
+            cachedReadPer1MUsd: 0.3,
+            cachedCreatePer1MUsd: 3.75,
+            cachedCreate5mPer1MUsd: 3.75,
+            cachedCreate1hPer1MUsd: 6,
+            reasoningOutputPer1MUsd: 0,
+            longContextThresholdTokens: 200_000,
+            longContextInputPer1MUsd: 6,
+            longContextOutputPer1MUsd: 22.5,
+            longContextCachedReadPer1MUsd: 0.6,
+            longContextCachedCreatePer1MUsd: 7.5,
+            longContextCachedCreate5mPer1MUsd: 7.5,
+            longContextCachedCreate1hPer1MUsd: 12,
+            contextWindowTokens: 1_000_000,
+          },
+        ],
+      },
+      models: {
+        defaultContextWindowTokens: 200_000,
+        contextWindows: [{ model: "claude-sonnet-4.6", contextWindowTokens: 1_000_000 }],
+      },
+      sources: {
+        claude_projects: {
+          name: "claude_projects",
+          enabled: true,
+          roots: [path.join(root, ".claude", "projects")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    expect(summary?.contextWindowPct).toBe(23);
+    expect(summary?.costEstimateUsd).toBe(1.8945);
   });
 
   it("redacts secret-like values from event previews and raw payloads", async () => {

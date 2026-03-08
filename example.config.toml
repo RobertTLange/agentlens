@@ -113,59 +113,118 @@ unknownModelPolicy = "n_a"
 
 [[cost.modelRates]]
 model = "gpt-5.2-codex"
-inputPer1MUsd = 1.5
-cachedReadPer1MUsd = 0.375
-cachedCreatePer1MUsd = 0.375
-outputPer1MUsd = 6
+inputPer1MUsd = 1.75
+cachedReadPer1MUsd = 0.175
+cachedCreatePer1MUsd = 0
+outputPer1MUsd = 14
 reasoningOutputPer1MUsd = 0
+contextWindowTokens = 400000
 
 [[cost.modelRates]]
 model = "gpt-5.3-codex"
-inputPer1MUsd = 1.5
-cachedReadPer1MUsd = 0.375
-cachedCreatePer1MUsd = 0.375
-outputPer1MUsd = 6
+inputPer1MUsd = 1.75
+cachedReadPer1MUsd = 0.175
+cachedCreatePer1MUsd = 0
+outputPer1MUsd = 14
 reasoningOutputPer1MUsd = 0
+contextWindowTokens = 400000
 
 [[cost.modelRates]]
 model = "gpt-5.2"
-inputPer1MUsd = 1.75
-cachedReadPer1MUsd = 0.175
-cachedCreatePer1MUsd = 0.175
-outputPer1MUsd = 14
+inputPer1MUsd = 0.875
+cachedReadPer1MUsd = 0.0875
+cachedCreatePer1MUsd = 0
+outputPer1MUsd = 7
 reasoningOutputPer1MUsd = 0
+contextWindowTokens = 400000
+
+[[cost.modelRates]]
+model = "gpt-5.4"
+inputPer1MUsd = 1.25
+cachedReadPer1MUsd = 0.13
+cachedCreatePer1MUsd = 0
+outputPer1MUsd = 7.5
+reasoningOutputPer1MUsd = 0
+longContextThresholdTokens = 272000
+longContextInputPer1MUsd = 2.5
+longContextOutputPer1MUsd = 11.25
+contextWindowTokens = 1050000
 
 [[cost.modelRates]]
 model = "claude-opus-4-5-20251101"
 inputPer1MUsd = 5
 cachedReadPer1MUsd = 0.5
 cachedCreatePer1MUsd = 6.25
+cachedCreate5mPer1MUsd = 6.25
+cachedCreate1hPer1MUsd = 10
 outputPer1MUsd = 25
 reasoningOutputPer1MUsd = 0
+contextWindowTokens = 200000
 
 [[cost.modelRates]]
-model = "claude-opus-4-6"
+model = "claude-opus-4.6"
 inputPer1MUsd = 5
 cachedReadPer1MUsd = 0.5
 cachedCreatePer1MUsd = 6.25
+cachedCreate5mPer1MUsd = 6.25
+cachedCreate1hPer1MUsd = 10
 outputPer1MUsd = 25
 reasoningOutputPer1MUsd = 0
+longContextThresholdTokens = 200000
+longContextInputPer1MUsd = 10
+longContextOutputPer1MUsd = 37.5
+longContextCachedReadPer1MUsd = 1
+longContextCachedCreatePer1MUsd = 12.5
+longContextCachedCreate5mPer1MUsd = 12.5
+longContextCachedCreate1hPer1MUsd = 20
+contextWindowTokens = 200000
 
 [[cost.modelRates]]
 model = "claude-sonnet-4-5-20250929"
 inputPer1MUsd = 3
 cachedReadPer1MUsd = 0.3
 cachedCreatePer1MUsd = 3.75
+cachedCreate5mPer1MUsd = 3.75
+cachedCreate1hPer1MUsd = 6
 outputPer1MUsd = 15
 reasoningOutputPer1MUsd = 0
+longContextThresholdTokens = 200000
+longContextInputPer1MUsd = 6
+longContextOutputPer1MUsd = 22.5
+longContextCachedReadPer1MUsd = 0.6
+longContextCachedCreatePer1MUsd = 7.5
+longContextCachedCreate5mPer1MUsd = 7.5
+longContextCachedCreate1hPer1MUsd = 12
+contextWindowTokens = 200000
 
 [[cost.modelRates]]
-model = "claude-haiku-4-5-20251001"
+model = "claude-sonnet-4.6"
+inputPer1MUsd = 3
+cachedReadPer1MUsd = 0.3
+cachedCreatePer1MUsd = 3.75
+cachedCreate5mPer1MUsd = 3.75
+cachedCreate1hPer1MUsd = 6
+outputPer1MUsd = 15
+reasoningOutputPer1MUsd = 0
+longContextThresholdTokens = 200000
+longContextInputPer1MUsd = 6
+longContextOutputPer1MUsd = 22.5
+longContextCachedReadPer1MUsd = 0.6
+longContextCachedCreatePer1MUsd = 7.5
+longContextCachedCreate5mPer1MUsd = 7.5
+longContextCachedCreate1hPer1MUsd = 12
+contextWindowTokens = 200000
+
+[[cost.modelRates]]
+model = "claude-haiku-4.5"
 inputPer1MUsd = 1
 cachedReadPer1MUsd = 0.1
 cachedCreatePer1MUsd = 1.25
+cachedCreate5mPer1MUsd = 1.25
+cachedCreate1hPer1MUsd = 2
 outputPer1MUsd = 5
 reasoningOutputPer1MUsd = 0
+contextWindowTokens = 200000
 
 [models]
 defaultContextWindowTokens = 200000
@@ -173,8 +232,10 @@ contextWindows = [
   { model = "gpt-5.2-codex", contextWindowTokens = 400000 },
   { model = "gpt-5.3-codex", contextWindowTokens = 400000 },
   { model = "gpt-5.2", contextWindowTokens = 400000 },
+  { model = "gpt-5.4", contextWindowTokens = 1050000 },
   { model = "claude-opus-4-5-20251101", contextWindowTokens = 200000 },
-  { model = "claude-opus-4-6", contextWindowTokens = 200000 },
+  { model = "claude-opus-4.6", contextWindowTokens = 200000 },
   { model = "claude-sonnet-4-5-20250929", contextWindowTokens = 200000 },
-  { model = "claude-haiku-4-5-20251001", contextWindowTokens = 200000 }
+  { model = "claude-sonnet-4.6", contextWindowTokens = 200000 },
+  { model = "claude-haiku-4.5", contextWindowTokens = 200000 }
 ]

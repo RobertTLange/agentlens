@@ -42,6 +42,7 @@ const WAITING_INPUT_PATTERN =
 const WAITING_PROMPT_PATTERN =
   /\b(?:do\s+you\s+want(?:\s+me)?|would\s+you\s+like(?:\s+me)?|should\s+i\b|can\s+you\s+confirm|please\s+confirm|let\s+me\s+know\s+if\s+you(?:'d)?\s+like|which\s+(?:option|approach)|choose\s+(?:one|an?\s+option)|pick\s+(?:one|an?\s+option)|approve(?:\s+this)?|permission\s+to)\b/i;
 const ACTIVITY_BIN_COUNT = 12;
+const ACTIVE_IDLE_GAP_MS = 20 * 60_000;
 const MATERIALIZED_TTL_MS = 5 * 60_000;
 const DIRTY_BATCH_LIMIT = 64;
 
@@ -51,6 +52,7 @@ interface TraceEntry {
   residentEvents: NormalizedEvent[];
   cachedFullEvents: NormalizedEvent[] | null;
   cachedRawEvents: NormalizedEvent[] | null;
+  activityArtifacts: SessionActivityArtifacts | null;
   pinnedMaterializedAtMs: number;
 }
 
@@ -85,6 +87,17 @@ interface ActivityBinsMeta {
   binMinutes?: number;
 }
 
+interface SessionActivitySpan {
+  startMs: number;
+  endMs: number;
+}
+
+interface SessionActivityArtifacts {
+  eventCount: number;
+  eventTimestamps: number[];
+  activeSegments: SessionActivitySpan[];
+}
+
 interface RefreshStats {
   parsedFileCount: number;
   dirtyPathCount: number;
@@ -108,6 +121,46 @@ function emptyEventKindCounts(): Record<EventKind, number> {
     reasoning: 0,
     compaction: 0,
     meta: 0,
+  };
+}
+
+function collectTimestampMs(events: ReadonlyArray<{ timestampMs: number | null }>): number[] {
+  const timestamps: number[] = [];
+  for (const event of events) {
+    const timestampMs = event.timestampMs;
+    if (timestampMs === null || !Number.isFinite(timestampMs) || timestampMs <= 0) continue;
+    timestamps.push(timestampMs);
+  }
+  timestamps.sort((left, right) => left - right);
+  return timestamps;
+}
+
+function buildActiveSegmentsFromEventTimestamps(eventTimestamps: number[]): SessionActivitySpan[] {
+  if (eventTimestamps.length === 0) return [];
+  const segments: SessionActivitySpan[] = [];
+  let segmentStartMs = eventTimestamps[0] ?? 0;
+  let previousTsMs = segmentStartMs;
+
+  for (let index = 1; index < eventTimestamps.length; index += 1) {
+    const nextTsMs = eventTimestamps[index] ?? previousTsMs;
+    const gapMs = Math.max(0, nextTsMs - previousTsMs);
+    if (gapMs > ACTIVE_IDLE_GAP_MS) {
+      segments.push({ startMs: segmentStartMs, endMs: previousTsMs });
+      segmentStartMs = nextTsMs;
+    }
+    previousTsMs = nextTsMs;
+  }
+
+  segments.push({ startMs: segmentStartMs, endMs: previousTsMs });
+  return segments;
+}
+
+function buildSessionActivityArtifacts(events: NormalizedEvent[]): SessionActivityArtifacts {
+  const eventTimestamps = collectTimestampMs(events);
+  return {
+    eventCount: events.length,
+    eventTimestamps,
+    activeSegments: buildActiveSegmentsFromEventTimestamps(eventTimestamps),
   };
 }
 
@@ -656,6 +709,10 @@ export class TraceIndex extends EventEmitter {
     };
   }
 
+  getStreamVersion(): number {
+    return this.streamVersion;
+  }
+
   getTopTools(limit = 12): NamedCount[] {
     const counts = new Map<string, number>();
     for (const entry of this.entries.values()) {
@@ -1155,6 +1212,7 @@ export class TraceIndex extends EventEmitter {
         residentEvents: redactedEvents,
         cachedFullEvents: redactedEvents,
         cachedRawEvents: parsed.events,
+        activityArtifacts: null,
         pinnedMaterializedAtMs: current?.pinnedMaterializedAtMs ?? 0,
       });
       this.cursorById.set(file.id, {
@@ -1183,6 +1241,7 @@ export class TraceIndex extends EventEmitter {
         residentEvents: [],
         cachedFullEvents: [],
         cachedRawEvents: [],
+        activityArtifacts: null,
         pinnedMaterializedAtMs: 0,
       });
       this.cursorById.set(file.id, {
@@ -1278,6 +1337,7 @@ export class TraceIndex extends EventEmitter {
       residentEvents: mergedEvents,
       cachedFullEvents: mergedEvents,
       cachedRawEvents: mergedRawEvents,
+      activityArtifacts: null,
       pinnedMaterializedAtMs: current.pinnedMaterializedAtMs,
     });
     this.cursorById.set(file.id, {
@@ -1444,6 +1504,7 @@ export class TraceIndex extends EventEmitter {
     );
     entry.cachedFullEvents = redactedEvents;
     entry.cachedRawEvents = parsed.events;
+    entry.activityArtifacts = null;
     entry.pinnedMaterializedAtMs = nowMs();
     entry.summary = {
       ...refreshedSummary,
@@ -1463,6 +1524,20 @@ export class TraceIndex extends EventEmitter {
       summary: found.summary,
       events,
     };
+  }
+
+  getSessionActivityArtifacts(id: string): Readonly<SessionActivityArtifacts> {
+    const found = this.entries.get(id);
+    if (!found) {
+      throw new Error(`unknown trace id: ${id}`);
+    }
+    if (found.activityArtifacts && found.activityArtifacts.eventCount === found.summary.eventCount) {
+      return found.activityArtifacts;
+    }
+    const events = this.hydrateEventsForEntry(found);
+    const artifacts = buildSessionActivityArtifacts(events);
+    found.activityArtifacts = artifacts;
+    return artifacts;
   }
 
   getTracePage(id: string, options: TracePageOptions = {}): TracePage {

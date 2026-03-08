@@ -10,6 +10,7 @@ import fastifyStatic from "@fastify/static";
 import type { AppConfig, SessionDetail, TraceSummary } from "@agentlens/contracts";
 import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 import { buildAgentActivityDay, buildAgentActivityWeek } from "./activity.js";
+import { ActivityResponseCache, DEFAULT_ACTIVITY_CACHE_TTL_MS } from "./activity-cache.js";
 
 const execFileAsync = promisify(execFile);
 const STOP_SIGNAL_WAIT_MS = 1_200;
@@ -2016,6 +2017,7 @@ export function resolveDefaultWebDistPath(packagedWebDistPath: string, monorepoW
 export async function createServer(options: CreateServerOptions): Promise<FastifyInstance> {
   const server = Fastify({ logger: false });
   const traceIndex = options.traceIndex;
+  const activityCache = new ActivityResponseCache(DEFAULT_ACTIVITY_CACHE_TTL_MS);
   const configPath = options.configPath ?? DEFAULT_CONFIG_PATH;
   const stopTraceSession = options.stopTraceSession ?? stopTraceSessionProcess;
   const openTraceSession = options.openTraceSession ?? openTraceSessionProcess;
@@ -2050,6 +2052,8 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         ...(query.tz_offset_min !== undefined ? { tzOffsetMinutes: Number.parseInt(query.tz_offset_min, 10) } : {}),
         ...(query.bin_min !== undefined ? { binMinutes: Number.parseInt(query.bin_min, 10) } : {}),
         ...(query.break_min !== undefined ? { breakMinutes: Number.parseInt(query.break_min, 10) } : {}),
+        cache: activityCache,
+        cacheVersion: traceIndex.getStreamVersion(),
       };
       const activity = buildAgentActivityDay(traceIndex, activityOptions);
       return { activity };
@@ -2077,6 +2081,8 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         ...(query.slot_min !== undefined ? { slotMinutes: Number.parseInt(query.slot_min, 10) } : {}),
         ...(query.hour_start !== undefined ? { hourStartLocal: Number.parseInt(query.hour_start, 10) } : {}),
         ...(query.hour_end !== undefined ? { hourEndLocal: Number.parseInt(query.hour_end, 10) } : {}),
+        cache: activityCache,
+        cacheVersion: traceIndex.getStreamVersion(),
       };
       const activity = buildAgentActivityWeek(traceIndex, activityOptions);
       return { activity };

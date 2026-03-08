@@ -1,4 +1,5 @@
 import type { AgentKind, AppConfig, ModelTokenShare, NormalizedEvent, TokenTotals } from "@agentlens/contracts";
+import { estimateUsageCost, resolveContextWindowTokens } from "./pricing.js";
 import { asRecord, asString } from "./utils.js";
 
 interface SessionMetrics {
@@ -77,6 +78,25 @@ function tokenTotalsFromUsageRecord(usageRecord: Record<string, unknown>): Token
   return finalizeTokenTotals(totals);
 }
 
+function claudeCacheCreationBreakdown(usageRecord: Record<string, unknown>): {
+  cachedCreateTokens: number;
+  cachedCreate5mTokens: number;
+  cachedCreate1hTokens: number;
+} {
+  const cacheCreation = asRecord(usageRecord.cache_creation);
+  const cachedCreate5mTokens = toNumber(cacheCreation.ephemeral_5m_input_tokens);
+  const cachedCreate1hTokens = toNumber(cacheCreation.ephemeral_1h_input_tokens);
+  const cachedCreateTokens = Math.max(
+    toNumber(usageRecord.cache_creation_input_tokens),
+    cachedCreate5mTokens + cachedCreate1hTokens,
+  );
+  return {
+    cachedCreateTokens,
+    cachedCreate5mTokens,
+    cachedCreate1hTokens,
+  };
+}
+
 function tokenTotalsFromCodexUsageRecord(record: Record<string, unknown>): TokenTotals {
   const totals = emptyTokenTotals();
   totals.inputTokens = toNumber(record.input_tokens);
@@ -86,6 +106,28 @@ function tokenTotalsFromCodexUsageRecord(record: Record<string, unknown>): Token
   totals.reasoningOutputTokens = toNumber(record.reasoning_output_tokens);
   totals.totalTokens = toNumber(record.total_tokens);
   return finalizeTokenTotals(totals);
+}
+
+function codexInputIncludesCached(record: Record<string, unknown>): boolean {
+  const inputTokens = toNumber(record.input_tokens);
+  const cachedReadTokens = toNumber(record.cached_input_tokens);
+  const outputTokens = toNumber(record.output_tokens);
+  const reasoningOutputTokens = toNumber(record.reasoning_output_tokens);
+  const totalTokens = toNumber(record.total_tokens);
+  if (cachedReadTokens <= 0 || totalTokens <= 0) return false;
+  return inputTokens + cachedReadTokens + outputTokens + reasoningOutputTokens > totalTokens;
+}
+
+function codexPromptTokens(record: Record<string, unknown>): number {
+  const inputTokens = toNumber(record.input_tokens);
+  const cachedReadTokens = toNumber(record.cached_input_tokens);
+  return codexInputIncludesCached(record) ? inputTokens : inputTokens + cachedReadTokens;
+}
+
+function codexBillableInputTokens(record: Record<string, unknown>): number {
+  const inputTokens = toNumber(record.input_tokens);
+  const cachedReadTokens = toNumber(record.cached_input_tokens);
+  return codexInputIncludesCached(record) ? Math.max(0, inputTokens - cachedReadTokens) : inputTokens;
 }
 
 function tokenTotalsFromOpenCodeTokensRecord(record: Record<string, unknown>): TokenTotals {
@@ -123,18 +165,7 @@ function tokenTotalsFromPiUsageRecord(record: Record<string, unknown>): TokenTot
 }
 
 function contextWindowResolver(config: AppConfig): (model: string) => number {
-  const byModel = new Map<string, number>();
-  for (const entry of config.models.contextWindows) {
-    const model = entry.model.trim();
-    if (!model || !Number.isFinite(entry.contextWindowTokens) || entry.contextWindowTokens <= 0) continue;
-    byModel.set(model, entry.contextWindowTokens);
-  }
-  const fallback = config.models.defaultContextWindowTokens;
-  return (model: string): number => {
-    const direct = byModel.get(model);
-    if (direct) return direct;
-    return fallback > 0 ? fallback : 0;
-  };
+  return (model: string): number => resolveContextWindowTokens(model, config);
 }
 
 function buildTopModelShares(modelTokenTotals: Map<string, number>, topN: number): ModelTokenShare[] {
@@ -156,19 +187,22 @@ function estimateCost(
 ): number | null {
   if (!costConfig.enabled) return null;
 
-  const rateByModel = new Map(costConfig.modelRates.map((rate) => [rate.model, rate] as const));
   let total = 0;
   for (const [model, tokens] of perModel) {
-    const rate = rateByModel.get(model);
-    if (!rate) {
-      if (costConfig.unknownModelPolicy === "n_a") return null;
-      continue;
-    }
-    total += (tokens.inputTokens / 1_000_000) * rate.inputPer1MUsd;
-    total += (tokens.cachedReadTokens / 1_000_000) * rate.cachedReadPer1MUsd;
-    total += (tokens.cachedCreateTokens / 1_000_000) * rate.cachedCreatePer1MUsd;
-    total += (tokens.outputTokens / 1_000_000) * rate.outputPer1MUsd;
-    total += (tokens.reasoningOutputTokens / 1_000_000) * rate.reasoningOutputPer1MUsd;
+    const cost = estimateUsageCost(
+      {
+        model,
+        promptTokens: tokens.inputTokens + tokens.cachedReadTokens + tokens.cachedCreateTokens,
+        inputTokens: tokens.inputTokens,
+        cachedReadTokens: tokens.cachedReadTokens,
+        cachedCreateTokens: tokens.cachedCreateTokens,
+        outputTokens: tokens.outputTokens,
+        reasoningOutputTokens: tokens.reasoningOutputTokens,
+      },
+      costConfig,
+    );
+    if (cost === null) return null;
+    total += cost;
   }
   return Number(total.toFixed(6));
 }
@@ -183,12 +217,9 @@ function buildClaudeUsageDedupKey(raw: Record<string, unknown>, message: Record<
   return "";
 }
 
-function codexTokensForCost(totals: TokenTotals): TokenTotals {
-  return {
-    ...totals,
-    // Codex reports cached tokens as part of input; subtract once for pricing.
-    inputTokens: Math.max(0, totals.inputTokens - totals.cachedReadTokens - totals.cachedCreateTokens),
-  };
+function finalizeCostTotal(costKnown: boolean, total: number): number | null {
+  if (!costKnown) return null;
+  return Number(total.toFixed(6));
 }
 
 function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): SessionMetrics {
@@ -196,6 +227,8 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
   const totals = emptyTokenTotals();
   const modelBreakdown = new Map<string, TokenTotals>();
   let maxContextPct: number | null = null;
+  let costTotal = 0;
+  let costKnown = config.cost.enabled;
   const seenRows = new Set<Record<string, unknown>>();
   const seenUsageKeys = new Set<string>();
 
@@ -215,6 +248,7 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
     }
     const model = asString(message.model) || "<unknown>";
     const usageTotals = tokenTotalsFromUsageRecord(usage);
+    const cacheCreation = claudeCacheCreationBreakdown(usage);
     addTokenTotals(totals, usageTotals);
 
     const existing = modelBreakdown.get(model) ?? emptyTokenTotals();
@@ -226,6 +260,26 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
     if (window > 0 && promptTokens > 0) {
       const pct = (promptTokens / window) * 100;
       maxContextPct = maxContextPct === null ? pct : Math.max(maxContextPct, pct);
+    }
+
+    const cost = estimateUsageCost(
+      {
+        model,
+        promptTokens,
+        inputTokens: usageTotals.inputTokens,
+        cachedReadTokens: usageTotals.cachedReadTokens,
+        cachedCreateTokens: cacheCreation.cachedCreateTokens,
+        cachedCreate5mTokens: cacheCreation.cachedCreate5mTokens,
+        cachedCreate1hTokens: cacheCreation.cachedCreate1hTokens,
+        outputTokens: usageTotals.outputTokens,
+        reasoningOutputTokens: usageTotals.reasoningOutputTokens,
+      },
+      config.cost,
+    );
+    if (cost === null) {
+      costKnown = false;
+    } else {
+      costTotal += cost;
     }
   }
 
@@ -241,7 +295,7 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
     ),
     modelTokenSharesEstimated: false,
     contextWindowPct: maxContextPct,
-    costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+    costEstimateUsd: finalizeCostTotal(costKnown, costTotal),
   };
 }
 
@@ -259,6 +313,8 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
   let latestTotals = emptyTokenTotals();
   let prevTotalTokens: number | null = null;
   let maxContextPct: number | null = null;
+  let costTotal = 0;
+  let costKnown = config.cost.enabled;
   const modelTotalDeltas = new Map<string, number>();
 
   for (const row of rows) {
@@ -288,41 +344,44 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
 
     const windowFromEvent = toNumber(info.model_context_window);
     const window = windowFromEvent > 0 ? windowFromEvent : resolveWindow(currentModel);
-    const promptTokens =
-      toNumber(lastUsage.input_tokens) + toNumber(lastUsage.cached_input_tokens) + toNumber(lastUsage.cache_creation_input_tokens);
-    const fallbackPromptTokens = promptTokens > 0 ? promptTokens : toNumber(lastUsage.total_tokens);
+    const pricedUsage = Object.keys(lastUsage).length > 0 ? lastUsage : totalUsage;
+    const promptTokens = codexPromptTokens(pricedUsage);
+    const fallbackPromptTokens = promptTokens > 0 ? promptTokens : toNumber(pricedUsage.total_tokens);
     if (window > 0 && fallbackPromptTokens > 0) {
       const pct = (fallbackPromptTokens / window) * 100;
       maxContextPct = maxContextPct === null ? pct : Math.max(maxContextPct, pct);
+    }
+
+    if (currentModel) {
+      const cost = estimateUsageCost(
+        {
+          model: currentModel,
+          promptTokens: fallbackPromptTokens,
+          inputTokens: codexBillableInputTokens(pricedUsage),
+          cachedReadTokens: toNumber(pricedUsage.cached_input_tokens),
+          cachedCreateTokens: 0,
+          outputTokens: toNumber(pricedUsage.output_tokens),
+          reasoningOutputTokens: toNumber(pricedUsage.reasoning_output_tokens),
+        },
+        config.cost,
+      );
+      if (cost === null) {
+        costKnown = false;
+      } else {
+        costTotal += cost;
+      }
     }
   }
 
   const tokenTotals = finalizeTokenTotals(latestTotals);
   const topShares = buildTopModelShares(modelTotalDeltas, config.traceInspector.topModelCount);
 
-  const modelBreakdown = new Map<string, TokenTotals>();
-  const allModelShares = [...modelTotalDeltas.entries()].filter(([, tokens]) => tokens > 0);
-  const shareTotal = allModelShares.reduce((sum, [, tokens]) => sum + tokens, 0);
-  if (shareTotal > 0) {
-    for (const [model, modelTokens] of allModelShares) {
-      const ratio = modelTokens / shareTotal;
-      modelBreakdown.set(model, codexTokensForCost({
-        inputTokens: tokenTotals.inputTokens * ratio,
-        cachedReadTokens: tokenTotals.cachedReadTokens * ratio,
-        cachedCreateTokens: tokenTotals.cachedCreateTokens * ratio,
-        outputTokens: tokenTotals.outputTokens * ratio,
-        reasoningOutputTokens: tokenTotals.reasoningOutputTokens * ratio,
-        totalTokens: tokenTotals.totalTokens * ratio,
-      }));
-    }
-  }
-
   return {
     tokenTotals,
     modelTokenSharesTop: topShares,
     modelTokenSharesEstimated: topShares.length > 0,
     contextWindowPct: maxContextPct,
-    costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+    costEstimateUsd: finalizeCostTotal(costKnown, costTotal),
   };
 }
 
@@ -331,6 +390,8 @@ function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): Se
   const totals = emptyTokenTotals();
   const modelBreakdown = new Map<string, TokenTotals>();
   let maxContextPct: number | null = null;
+  let costTotal = 0;
+  let costKnown = config.cost.enabled;
   const seenAssistantMessageIds = new Set<string>();
 
   for (const event of events) {
@@ -362,6 +423,24 @@ function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): Se
       const pct = (promptTokens / window) * 100;
       maxContextPct = maxContextPct === null ? pct : Math.max(maxContextPct, pct);
     }
+
+    const cost = estimateUsageCost(
+      {
+        model: modelId || model,
+        promptTokens,
+        inputTokens: usageTotals.inputTokens,
+        cachedReadTokens: usageTotals.cachedReadTokens,
+        cachedCreateTokens: usageTotals.cachedCreateTokens,
+        outputTokens: usageTotals.outputTokens,
+        reasoningOutputTokens: usageTotals.reasoningOutputTokens,
+      },
+      config.cost,
+    );
+    if (cost === null) {
+      costKnown = false;
+    } else {
+      costTotal += cost;
+    }
   }
 
   for (const [model, modelTotals] of modelBreakdown) {
@@ -376,7 +455,7 @@ function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): Se
     ),
     modelTokenSharesEstimated: false,
     contextWindowPct: maxContextPct,
-    costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+    costEstimateUsd: finalizeCostTotal(costKnown, costTotal),
   };
 }
 
@@ -505,6 +584,8 @@ function derivePiMetrics(events: NormalizedEvent[], config: AppConfig): SessionM
 
   let embeddedCostTotal = 0;
   let embeddedCostKnown = false;
+  let estimatedCostTotal = 0;
+  let estimatedCostKnown = config.cost.enabled;
 
   for (const event of events) {
     const raw = asRecord(event.raw);
@@ -543,6 +624,24 @@ function derivePiMetrics(events: NormalizedEvent[], config: AppConfig): SessionM
         embeddedCostKnown = true;
       }
     }
+
+    const estimatedCost = estimateUsageCost(
+      {
+        model,
+        promptTokens,
+        inputTokens: usageTotals.inputTokens,
+        cachedReadTokens: usageTotals.cachedReadTokens,
+        cachedCreateTokens: usageTotals.cachedCreateTokens,
+        outputTokens: usageTotals.outputTokens,
+        reasoningOutputTokens: usageTotals.reasoningOutputTokens,
+      },
+      config.cost,
+    );
+    if (estimatedCost === null) {
+      estimatedCostKnown = false;
+    } else {
+      estimatedCostTotal += estimatedCost;
+    }
   }
 
   for (const [model, modelTotals] of modelBreakdown) {
@@ -557,7 +656,9 @@ function derivePiMetrics(events: NormalizedEvent[], config: AppConfig): SessionM
     ),
     modelTokenSharesEstimated: false,
     contextWindowPct: maxContextPct,
-    costEstimateUsd: embeddedCostKnown ? Number(embeddedCostTotal.toFixed(6)) : null,
+    costEstimateUsd: embeddedCostKnown
+      ? Number(embeddedCostTotal.toFixed(6))
+      : finalizeCostTotal(estimatedCostKnown, estimatedCostTotal),
   };
 }
 
