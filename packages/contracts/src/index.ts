@@ -65,7 +65,18 @@ export interface CostModelRate {
   outputPer1MUsd: number;
   cachedReadPer1MUsd: number;
   cachedCreatePer1MUsd: number;
+  cachedCreate5mPer1MUsd?: number;
+  cachedCreate1hPer1MUsd?: number;
   reasoningOutputPer1MUsd: number;
+  longContextThresholdTokens?: number;
+  longContextInputPer1MUsd?: number;
+  longContextOutputPer1MUsd?: number;
+  longContextCachedReadPer1MUsd?: number;
+  longContextCachedCreatePer1MUsd?: number;
+  longContextCachedCreate5mPer1MUsd?: number;
+  longContextCachedCreate1hPer1MUsd?: number;
+  longContextReasoningOutputPer1MUsd?: number;
+  contextWindowTokens?: number;
 }
 
 export interface CostConfig {
