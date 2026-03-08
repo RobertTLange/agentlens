@@ -8,6 +8,7 @@ import type {
   TraceSummary,
 } from "@agentlens/contracts";
 import type { TraceIndex } from "@agentlens/core";
+import type { ActivityResponseCache } from "./activity-cache.js";
 
 const AGENT_KIND_KEYS: AgentKind[] = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"];
 const EVENT_KIND_KEYS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"];
@@ -35,6 +36,8 @@ export interface BuildAgentActivityDayOptions {
   binMinutes?: number;
   breakMinutes?: number;
   nowMs?: number;
+  cache?: ActivityResponseCache;
+  cacheVersion?: number;
 }
 
 export interface BuildAgentActivityWeekOptions {
@@ -45,6 +48,8 @@ export interface BuildAgentActivityWeekOptions {
   hourStartLocal?: number;
   hourEndLocal?: number;
   nowMs?: number;
+  cache?: ActivityResponseCache;
+  cacheVersion?: number;
 }
 
 interface SessionSpan {
@@ -52,7 +57,7 @@ interface SessionSpan {
   endMs: number;
 }
 
-interface WindowActivityResult {
+export interface WindowActivityResult {
   bins: AgentActivityBin[];
   totalSessionsInWindow: number;
   peakConcurrentSessions: number;
@@ -166,37 +171,6 @@ function resolveSessionSpan(summary: TraceSummary): SessionSpan {
   return { startMs, endMs };
 }
 
-function collectTimestampMs(events: ReadonlyArray<{ timestampMs: number | null }>): number[] {
-  const timestamps: number[] = [];
-  for (const event of events) {
-    const timestampMs = event.timestampMs;
-    if (timestampMs === null || !Number.isFinite(timestampMs) || timestampMs <= 0) continue;
-    timestamps.push(timestampMs);
-  }
-  timestamps.sort((left, right) => left - right);
-  return timestamps;
-}
-
-function buildActiveSegmentsFromEventTimestamps(eventTimestamps: number[]): SessionSpan[] {
-  if (eventTimestamps.length === 0) return [];
-  const segments: SessionSpan[] = [];
-  let segmentStartMs = eventTimestamps[0] ?? 0;
-  let previousTsMs = segmentStartMs;
-
-  for (let index = 1; index < eventTimestamps.length; index += 1) {
-    const nextTsMs = eventTimestamps[index] ?? previousTsMs;
-    const gapMs = Math.max(0, nextTsMs - previousTsMs);
-    if (gapMs > ACTIVE_IDLE_GAP_MS) {
-      segments.push({ startMs: segmentStartMs, endMs: previousTsMs });
-      segmentStartMs = nextTsMs;
-    }
-    previousTsMs = nextTsMs;
-  }
-
-  segments.push({ startMs: segmentStartMs, endMs: previousTsMs });
-  return segments;
-}
-
 function pickDominantAgent(counts: Record<AgentKind, number>): AgentKind | "none" {
   let dominant: AgentKind | "none" = "none";
   let dominantCount = 0;
@@ -263,7 +237,7 @@ function applyBreakMarkers(bins: AgentActivityBin[], breakMinutes: number): void
   markRunIfBreak(runStart, bins.length);
 }
 
-function buildWindowActivity(
+function computeWindowActivity(
   traceIndex: TraceIndex,
   windowStartMs: number,
   windowEndMs: number,
@@ -308,8 +282,8 @@ function buildWindowActivity(
   if (binCount > 0) {
     for (const summary of inWindowSummaries) {
       const detail = traceIndex.getSessionDetail(summary.id);
-      const eventTimestamps = collectTimestampMs(detail.events);
-      const activeSegments = buildActiveSegmentsFromEventTimestamps(eventTimestamps);
+      const activityArtifacts = traceIndex.getSessionActivityArtifacts(summary.id);
+      const activeSegments: SessionSpan[] = activityArtifacts.activeSegments;
 
       for (const segment of activeSegments) {
         if (segment.endMs < windowStartMs || segment.startMs >= windowEndMs) continue;
@@ -374,6 +348,34 @@ function buildWindowActivity(
   };
 }
 
+function buildWindowActivity(
+  traceIndex: TraceIndex,
+  windowStartMs: number,
+  windowEndMs: number,
+  binMinutes: number,
+  breakMinutes: number,
+  options: {
+    cache?: ActivityResponseCache;
+    cacheVersion?: number;
+    nowMs: number;
+  },
+): WindowActivityResult {
+  if (!options.cache || options.cacheVersion === undefined) {
+    return computeWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes);
+  }
+  return options.cache.getOrBuildWindow(
+    options.cacheVersion,
+    options.nowMs,
+    {
+      windowStartMs,
+      windowEndMs,
+      binMinutes,
+      breakMinutes,
+    },
+    () => computeWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes),
+  );
+}
+
 export function buildAgentActivityDay(
   traceIndex: TraceIndex,
   options: BuildAgentActivityDayOptions = {},
@@ -394,12 +396,44 @@ export function buildAgentActivityDay(
   const binMinutes = clamp(requestedBinMinutes ?? DEFAULT_BIN_MINUTES, MIN_BIN_MINUTES, MAX_BIN_MINUTES);
   const breakMinutes = clamp(requestedBreakMinutes ?? DEFAULT_BREAK_MINUTES, MIN_BREAK_MINUTES, MAX_BREAK_MINUTES);
 
+  if (options.cache && options.cacheVersion !== undefined) {
+    const { cache: _cache, cacheVersion: _cacheVersion, ...uncachedOptions } = options;
+    return options.cache.getOrBuildDay(
+      options.cacheVersion,
+      nowMs,
+      {
+        dateLocal,
+        tzOffsetMinutes,
+        binMinutes,
+        breakMinutes,
+      },
+      () =>
+        buildAgentActivityDay(traceIndex, {
+          ...uncachedOptions,
+          nowMs,
+          dateLocal,
+          tzOffsetMinutes,
+          binMinutes,
+          breakMinutes,
+        }),
+    );
+  }
+
   const dayStartMs = windowStartMsForDateLocal(dateLocal, tzOffsetMinutes);
   const windowStartMs = dayStartMs + DEFAULT_DAY_HOUR_START_LOCAL * 60 * 60_000;
   const windowEndOfDayMs = windowStartMs + DAY_MS;
   const todayLocal = toLocalDateString(nowMs, tzOffsetMinutes);
   const windowEndMs = dateLocal === todayLocal ? Math.max(windowStartMs, Math.min(windowEndOfDayMs, nowMs)) : windowEndOfDayMs;
-  const windowActivity = buildWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes);
+  const windowActivity = buildWindowActivity(
+    traceIndex,
+    windowStartMs,
+    windowEndMs,
+    binMinutes,
+    breakMinutes,
+    options.cache && options.cacheVersion !== undefined
+      ? { cache: options.cache, cacheVersion: options.cacheVersion, nowMs }
+      : { nowMs },
+  );
 
   return {
     dateLocal,
@@ -450,6 +484,33 @@ export function buildAgentActivityWeek(
     throw new Error("slot_min too large for hour window");
   }
 
+  if (options.cache && options.cacheVersion !== undefined) {
+    const { cache: _cache, cacheVersion: _cacheVersion, ...uncachedOptions } = options;
+    return options.cache.getOrBuildWeek(
+      options.cacheVersion,
+      nowMs,
+      {
+        endDateLocal,
+        tzOffsetMinutes,
+        dayCount,
+        slotMinutes,
+        hourStartLocal,
+        hourEndLocal,
+      },
+      () =>
+        buildAgentActivityWeek(traceIndex, {
+          ...uncachedOptions,
+          nowMs,
+          endDateLocal,
+          tzOffsetMinutes,
+          dayCount,
+          slotMinutes,
+          hourStartLocal,
+          hourEndLocal,
+        }),
+    );
+  }
+
   const windowDurationMs = windowMinutes * 60_000;
   const days: AgentActivityWeekDay[] = [];
   const todayLocal = toLocalDateString(nowMs, tzOffsetMinutes);
@@ -463,7 +524,16 @@ export function buildAgentActivityWeek(
       dateLocal === todayLocal
         ? Math.max(windowStartMs, Math.min(nominalWindowEndMs, nowMs))
         : nominalWindowEndMs;
-    const windowActivity = buildWindowActivity(traceIndex, windowStartMs, windowEndMs, slotMinutes, DEFAULT_BREAK_MINUTES);
+    const windowActivity = buildWindowActivity(
+      traceIndex,
+      windowStartMs,
+      windowEndMs,
+      slotMinutes,
+      DEFAULT_BREAK_MINUTES,
+      options.cache && options.cacheVersion !== undefined
+        ? { cache: options.cache, cacheVersion: options.cacheVersion, nowMs }
+        : { nowMs },
+    );
     days.push({
       dateLocal,
       windowStartMs,
