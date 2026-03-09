@@ -11,6 +11,7 @@
 <p align="center">
   <img alt="Node.js 18+" src="https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-ESM-3178C6?logo=typescript&logoColor=white" />
+  <a href="https://roberttlange.com/blog/03-agentlens"><img alt="Blog Post" src="https://img.shields.io/badge/Blog-Post-FF5722?logo=hashnode&logoColor=white" /></a>
 </p>
 
 When agent workflows fail, most debugging time goes into piecing together scattered logs, tool calls, and session state. AgentLens gives you one local place to inspect traces live, compare sessions quickly, and jump from summary to event-level detail in seconds.
