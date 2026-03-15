@@ -394,6 +394,38 @@ async function startHealthServer(): Promise<{ port: number; close: () => Promise
   };
 }
 
+async function startBoundNonAgentLensServer(): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = createServer((request, response) => {
+    if (request.url === "/api/healthz") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end("busy");
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to start bound server");
+  }
+  return {
+    port: address.port,
+    close: async () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      }),
+  };
+}
+
 async function waitForHealth(url: string, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -584,6 +616,77 @@ describe("cli", () => {
       expect(output).toContain(`AgentLens already running: http://127.0.0.1:${healthServer.port}`);
     } finally {
       await healthServer.close();
+    }
+  });
+
+  it("heals stale pid metadata when reusing running server in --browser mode", async () => {
+    const healthServer = await startHealthServer();
+    const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-reused-"));
+    const pidPath = path.join(runtimeDir, "server.pid");
+    await writeFile(
+      pidPath,
+      JSON.stringify(
+        {
+          pid: 999999,
+          host: "127.0.0.1",
+          port: 1,
+          url: "http://127.0.0.1:1",
+          logPath: path.join(runtimeDir, "logs", "server.log"),
+          startedAt: "2026-03-15T00:00:00.000Z",
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf8",
+    );
+
+    try {
+      const output = await runCliWithEnvAsync(
+        ["--browser", "--host", "127.0.0.1", "--port", String(healthServer.port)],
+        { AGENTLENS_SKIP_OPEN: "1", AGENTLENS_RUNTIME_DIR: runtimeDir },
+      );
+      expect(output).toContain(`AgentLens already running: http://127.0.0.1:${healthServer.port}`);
+
+      const pidInfo = JSON.parse(await readFile(pidPath, "utf8")) as {
+        host?: string;
+        pid?: number;
+        port?: number;
+        url?: string;
+      };
+      expect(pidInfo.host).toBe("127.0.0.1");
+      expect(pidInfo.port).toBe(healthServer.port);
+      expect(pidInfo.url).toBe(`http://127.0.0.1:${healthServer.port}`);
+      expect(pidInfo.pid).not.toBe(999999);
+    } finally {
+      await healthServer.close();
+    }
+  });
+
+  it("does not rewrite pid metadata when only a non-AgentLens service is bound to the port", async () => {
+    const boundServer = await startBoundNonAgentLensServer();
+    const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-bound-"));
+    const pidPath = path.join(runtimeDir, "server.pid");
+    const stalePayload = {
+      pid: 999999,
+      host: "127.0.0.1",
+      port: 1,
+      url: "http://127.0.0.1:1",
+      logPath: path.join(runtimeDir, "logs", "server.log"),
+      startedAt: "2026-03-15T00:00:00.000Z",
+    };
+    await writeFile(pidPath, JSON.stringify(stalePayload, null, 2) + "\n", "utf8");
+
+    try {
+      const output = await runCliWithEnvAsync(
+        ["--browser", "--host", "127.0.0.1", "--port", String(boundServer.port)],
+        { AGENTLENS_SKIP_OPEN: "1", AGENTLENS_RUNTIME_DIR: runtimeDir },
+      );
+      expect(output).toContain(`AgentLens already running: http://127.0.0.1:${boundServer.port}`);
+
+      const pidInfo = JSON.parse(await readFile(pidPath, "utf8"));
+      expect(pidInfo).toEqual(stalePayload);
+    } finally {
+      await boundServer.close();
     }
   });
 

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -34,6 +34,15 @@ export interface LaunchBrowserResult {
 interface OpenCommand {
   command: string;
   args: string[];
+}
+
+interface RuntimeState {
+  host: string;
+  logPath?: string;
+  pid?: number;
+  pidPath: string;
+  port: number;
+  url: string;
 }
 
 function resolveHost(host?: string): string {
@@ -154,6 +163,71 @@ async function isPortBound(host: string, port: number, timeoutMs = 500): Promise
   });
 }
 
+async function resolveListeningPid(port: number): Promise<number | undefined> {
+  if (process.platform === "win32") {
+    return undefined;
+  }
+  try {
+    const stdout = await new Promise<string>((resolve, reject) => {
+      execFile("lsof", ["-nP", `-iTCP:${String(port)}`, "-sTCP:LISTEN", "-Fp"], (error, fileStdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(fileStdout);
+      });
+    });
+    const pidLine = stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .find((line) => /^p\d+$/u.test(line));
+    if (!pidLine) {
+      return undefined;
+    }
+    const pid = Number(pidLine.slice(1));
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeRuntimeState({
+  host,
+  logPath,
+  pid,
+  pidPath,
+  port,
+  url,
+}: RuntimeState): Promise<void> {
+  if (typeof logPath === "string") {
+    await mkdir(path.dirname(logPath), { recursive: true });
+  }
+  await mkdir(path.dirname(pidPath), { recursive: true });
+  await writeFile(
+    pidPath,
+    JSON.stringify(
+      {
+        ...(typeof pid === "number" ? { pid } : {}),
+        host,
+        port,
+        url,
+        ...(typeof logPath === "string" ? { logPath } : {}),
+        startedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
+
+function getRuntimePaths(runtimeDir: string): { logPath: string; pidPath: string } {
+  return {
+    logPath: path.join(runtimeDir, "logs", "server.log"),
+    pidPath: path.join(runtimeDir, "server.pid"),
+  };
+}
+
 async function spawnServer({
   host,
   port,
@@ -165,8 +239,7 @@ async function spawnServer({
   configPath: string;
   runtimeDir: string;
 }): Promise<{ pid: number; pidPath: string; logPath: string }> {
-  const logPath = path.join(runtimeDir, "logs", "server.log");
-  const pidPath = path.join(runtimeDir, "server.pid");
+  const { logPath, pidPath } = getRuntimePaths(runtimeDir);
   await mkdir(path.dirname(logPath), { recursive: true });
   await mkdir(path.dirname(pidPath), { recursive: true });
 
@@ -197,22 +270,14 @@ async function spawnServer({
 
     child.unref();
 
-    await writeFile(
+    await writeRuntimeState({
+      host,
+      logPath,
+      pid,
       pidPath,
-      JSON.stringify(
-        {
-          pid,
-          host,
-          port,
-          url: toBaseUrl(host, port),
-          logPath,
-          startedAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      ) + "\n",
-      "utf8",
-    );
+      port,
+      url: toBaseUrl(host, port),
+    });
 
     return { pid, pidPath, logPath };
   } finally {
@@ -232,8 +297,20 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   const url = toBaseUrl(host, port);
   const healthUrl = `${url}/api/healthz`;
   const skipOpen = shouldSkipOpen(options.skipOpen);
+  const { pidPath } = getRuntimePaths(runtimeDir);
+  const healthy = await isServerHealthy(healthUrl);
 
-  if ((await isServerHealthy(healthUrl)) || (await isPortBound(host, port))) {
+  if (healthy || (await isPortBound(host, port))) {
+    const pid = healthy ? await resolveListeningPid(port) : undefined;
+    if (healthy) {
+      await writeRuntimeState({
+        host,
+        pidPath,
+        port,
+        url,
+        ...(typeof pid === "number" ? { pid } : {}),
+      });
+    }
     if (!skipOpen) {
       await openBrowser(url);
     }
@@ -241,10 +318,12 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
       status: "reused",
       url,
       openedBrowser: !skipOpen,
+      ...(healthy ? { pidPath } : {}),
+      ...(typeof pid === "number" ? { pid } : {}),
     };
   }
 
-  const { pid, pidPath, logPath } = await spawnServer({
+  const { pid, pidPath: spawnedPidPath, logPath: spawnedLogPath } = await spawnServer({
     host,
     port,
     configPath: options.configPath,
@@ -260,7 +339,7 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
       // no-op
     }
     throw new Error(
-      `timeout waiting for AgentLens server at ${url}. log: ${logPath}. hint: increase AGENTLENS_STARTUP_TIMEOUT_MS for large trace indexes`,
+      `timeout waiting for AgentLens server at ${url}. log: ${spawnedLogPath}. hint: increase AGENTLENS_STARTUP_TIMEOUT_MS for large trace indexes`,
     );
   }
 
@@ -273,7 +352,7 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
     url,
     openedBrowser: !skipOpen,
     pid,
-    pidPath,
-    logPath,
+    pidPath: spawnedPidPath,
+    logPath: spawnedLogPath,
   };
 }
