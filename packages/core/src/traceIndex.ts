@@ -677,7 +677,15 @@ export class TraceIndex extends EventEmitter {
   async start(): Promise<void> {
     this.started = true;
     await this.refresh();
+    if (!this.started) return;
     await this.restartWatcher();
+    if (!this.started) {
+      if (this.watcher) {
+        await this.watcher.close();
+        this.watcher = null;
+      }
+      return;
+    }
     this.scheduleNextRefresh(this.computeBaseIntervalMs());
   }
 
@@ -1204,6 +1212,7 @@ export class TraceIndex extends EventEmitter {
         refreshNowMs,
       );
       const redactedEvents = redactEvents(parsed.events, this.config.redaction);
+      const activityArtifacts = buildSessionActivityArtifacts(redactedEvents);
       const previousCount = current?.summary.eventCount ?? 0;
 
       this.entries.set(file.id, {
@@ -1212,7 +1221,7 @@ export class TraceIndex extends EventEmitter {
         residentEvents: redactedEvents,
         cachedFullEvents: redactedEvents,
         cachedRawEvents: parsed.events,
-        activityArtifacts: null,
+        activityArtifacts,
         pinnedMaterializedAtMs: current?.pinnedMaterializedAtMs ?? 0,
       });
       this.cursorById.set(file.id, {
@@ -1241,7 +1250,7 @@ export class TraceIndex extends EventEmitter {
         residentEvents: [],
         cachedFullEvents: [],
         cachedRawEvents: [],
-        activityArtifacts: null,
+        activityArtifacts: buildSessionActivityArtifacts([]),
         pinnedMaterializedAtMs: 0,
       });
       this.cursorById.set(file.id, {
@@ -1329,6 +1338,7 @@ export class TraceIndex extends EventEmitter {
       residentTier: current.summary.residentTier,
       isMaterialized: true,
     };
+    const activityArtifacts = buildSessionActivityArtifacts(mergedEvents);
 
     this.entries.set(file.id, {
       ...current,
@@ -1337,7 +1347,7 @@ export class TraceIndex extends EventEmitter {
       residentEvents: mergedEvents,
       cachedFullEvents: mergedEvents,
       cachedRawEvents: mergedRawEvents,
-      activityArtifacts: null,
+      activityArtifacts,
       pinnedMaterializedAtMs: current.pinnedMaterializedAtMs,
     });
     this.cursorById.set(file.id, {
@@ -1504,7 +1514,7 @@ export class TraceIndex extends EventEmitter {
     );
     entry.cachedFullEvents = redactedEvents;
     entry.cachedRawEvents = parsed.events;
-    entry.activityArtifacts = null;
+    entry.activityArtifacts = buildSessionActivityArtifacts(redactedEvents);
     entry.pinnedMaterializedAtMs = nowMs();
     entry.summary = {
       ...refreshedSummary,
@@ -1534,8 +1544,11 @@ export class TraceIndex extends EventEmitter {
     if (found.activityArtifacts && found.activityArtifacts.eventCount === found.summary.eventCount) {
       return found.activityArtifacts;
     }
-    const events = this.hydrateEventsForEntry(found);
-    const artifacts = buildSessionActivityArtifacts(events);
+    this.hydrateEventsForEntry(found);
+    if (found.activityArtifacts && found.activityArtifacts.eventCount === found.summary.eventCount) {
+      return found.activityArtifacts;
+    }
+    const artifacts = buildSessionActivityArtifacts(found.cachedFullEvents ?? found.residentEvents);
     found.activityArtifacts = artifacts;
     return artifacts;
   }

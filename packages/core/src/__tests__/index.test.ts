@@ -1,7 +1,7 @@
 import { appendFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mergeConfig } from "../config.js";
 import { TraceIndex } from "../traceIndex.js";
 
@@ -2601,6 +2601,109 @@ describe("trace index", () => {
       const perf = index.getPerformanceStats();
       expect(perf.incrementalAppendCount).toBeGreaterThan(0);
       expect(perf.fullReparseCount).toBeGreaterThan(0);
+    } finally {
+      index.stop();
+    }
+  });
+
+  it("keeps compact activity artifacts for cold traces without hydrating full events", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+
+    for (const [index, filename] of ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl"].entries()) {
+      await writeFile(
+        path.join(codexDir, filename),
+        [
+          JSON.stringify({
+            timestamp: `2026-02-13T10:00:0${index}.000Z`,
+            type: "session_meta",
+            payload: { id: `sess-${index}`, cwd: "/tmp/project", cli_version: "0.1.0" },
+          }),
+          JSON.stringify({
+            timestamp: `2026-02-13T10:00:1${index}.000Z`,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: `trace-${index}` }],
+            },
+          }),
+        ].join("\n") + "\n",
+        "utf8",
+      );
+    }
+
+    const config = mergeConfig({
+      retention: {
+        strategy: "aggressive_recency",
+        hotTraceCount: 1,
+        warmTraceCount: 0,
+        maxResidentEventsPerHotTrace: 1000,
+        maxResidentEventsPerWarmTrace: 50,
+        detailLoadMode: "lazy_from_disk",
+      },
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.start();
+    try {
+      const summaries = index.getSummaries();
+      const coldTraceId = summaries[2]?.id;
+      expect(coldTraceId).toBeTruthy();
+      if (!coldTraceId) {
+        throw new Error("missing cold trace");
+      }
+
+      const internal = index as unknown as {
+        entries: Map<string, {
+          cachedFullEvents: unknown[] | null;
+          cachedRawEvents: unknown[] | null;
+          activityArtifacts: { eventCount: number; eventTimestamps: number[] } | null;
+        }>;
+        parserRegistry: { parseFileSync: (file: unknown, parserNameHint?: string) => unknown };
+      };
+      const entry = internal.entries.get(coldTraceId);
+      expect(entry?.cachedFullEvents).toBeNull();
+      expect(entry?.cachedRawEvents).toBeNull();
+      expect(entry?.activityArtifacts?.eventCount).toBe(2);
+      expect(entry?.activityArtifacts?.eventTimestamps.length).toBeGreaterThan(0);
+
+      const parseFileSyncSpy = vi.spyOn(internal.parserRegistry, "parseFileSync");
+      const artifacts = index.getSessionActivityArtifacts(coldTraceId);
+      expect(artifacts.eventCount).toBe(2);
+      expect(parseFileSyncSpy).not.toHaveBeenCalled();
+      parseFileSyncSpy.mockRestore();
     } finally {
       index.stop();
     }
