@@ -164,6 +164,15 @@ function buildSessionActivityArtifacts(events: NormalizedEvent[]): SessionActivi
   };
 }
 
+function compactActivityArtifacts(artifacts: SessionActivityArtifacts): SessionActivityArtifacts {
+  if (artifacts.eventTimestamps.length === 0) return artifacts;
+  return {
+    eventCount: artifacts.eventCount,
+    eventTimestamps: [],
+    activeSegments: artifacts.activeSegments,
+  };
+}
+
 function normalizeActivityCounts(counts: number[]): number[] {
   let maxCount = 0;
   for (const count of counts) {
@@ -1028,6 +1037,7 @@ export class TraceIndex extends EventEmitter {
         stats.parsedFileCount += 1;
         stats.hadFileMutations = true;
       }
+      this.applyRetention(refreshNowMs);
     }
   }
 
@@ -1250,7 +1260,7 @@ export class TraceIndex extends EventEmitter {
         residentEvents: [],
         cachedFullEvents: [],
         cachedRawEvents: [],
-        activityArtifacts: buildSessionActivityArtifacts([]),
+        activityArtifacts: null,
         pinnedMaterializedAtMs: 0,
       });
       this.cursorById.set(file.id, {
@@ -1323,6 +1333,7 @@ export class TraceIndex extends EventEmitter {
     const rebasedRawEvents = rebaseEvents(parsed.events);
     const mergedEvents = current.cachedFullEvents.concat(rebasedEvents);
     const mergedRawEvents = current.cachedRawEvents.concat(rebasedRawEvents);
+    const activityArtifacts = buildSessionActivityArtifacts(mergedEvents);
     const mergedSummary = summarize(
       file,
       current.summary.agent,
@@ -1338,8 +1349,6 @@ export class TraceIndex extends EventEmitter {
       residentTier: current.summary.residentTier,
       isMaterialized: true,
     };
-    const activityArtifacts = buildSessionActivityArtifacts(mergedEvents);
-
     this.entries.set(file.id, {
       ...current,
       file,
@@ -1410,6 +1419,9 @@ export class TraceIndex extends EventEmitter {
       if (this.config.retention.strategy !== "full_memory" && tier !== "hot" && !keepPinned) {
         entry.cachedFullEvents = null;
         entry.cachedRawEvents = null;
+      }
+      if (this.config.retention.strategy !== "full_memory" && tier !== "hot" && entry.activityArtifacts) {
+        entry.activityArtifacts = compactActivityArtifacts(entry.activityArtifacts);
       }
       if (this.config.retention.strategy === "full_memory" && !entry.cachedFullEvents) {
         entry.cachedFullEvents = sourceEvents;
@@ -1544,12 +1556,20 @@ export class TraceIndex extends EventEmitter {
     if (found.activityArtifacts && found.activityArtifacts.eventCount === found.summary.eventCount) {
       return found.activityArtifacts;
     }
-    this.hydrateEventsForEntry(found);
-    if (found.activityArtifacts && found.activityArtifacts.eventCount === found.summary.eventCount) {
-      return found.activityArtifacts;
+    const artifacts = (() => {
+      if (found.cachedFullEvents && found.cachedFullEvents.length >= found.summary.eventCount) {
+        return buildSessionActivityArtifacts(found.cachedFullEvents);
+      }
+      if (found.residentEvents.length >= found.summary.eventCount) {
+        return buildSessionActivityArtifacts(found.residentEvents);
+      }
+      const parsed = this.parserRegistry.parseFileSync(found.file, found.summary.parser);
+      const redactedEvents = redactEvents(parsed.events, this.config.redaction);
+      return buildSessionActivityArtifacts(redactedEvents);
+    })();
+    if (this.config.retention.strategy === "full_memory" || found.summary.residentTier === "hot") {
+      found.activityArtifacts = artifacts;
     }
-    const artifacts = buildSessionActivityArtifacts(found.cachedFullEvents ?? found.residentEvents);
-    found.activityArtifacts = artifacts;
     return artifacts;
   }
 

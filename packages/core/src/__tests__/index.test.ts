@@ -2606,7 +2606,7 @@ describe("trace index", () => {
     }
   });
 
-  it("keeps compact activity artifacts for cold traces without hydrating full events", async () => {
+  it("serves activity artifacts for cold traces without materializing full events", async () => {
     const root = await createTempRoot();
     const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
     await mkdir(codexDir, { recursive: true });
@@ -2696,14 +2696,23 @@ describe("trace index", () => {
       const entry = internal.entries.get(coldTraceId);
       expect(entry?.cachedFullEvents).toBeNull();
       expect(entry?.cachedRawEvents).toBeNull();
-      expect(entry?.activityArtifacts?.eventCount).toBe(2);
-      expect(entry?.activityArtifacts?.eventTimestamps.length).toBeGreaterThan(0);
+      expect(entry?.activityArtifacts).toMatchObject({
+        eventCount: 2,
+        eventTimestamps: [],
+      });
 
       const parseFileSyncSpy = vi.spyOn(internal.parserRegistry, "parseFileSync");
+
       const artifacts = index.getSessionActivityArtifacts(coldTraceId);
       expect(artifacts.eventCount).toBe(2);
+      expect(artifacts.eventTimestamps).toEqual([]);
+      expect(entry?.cachedFullEvents).toBeNull();
+      expect(entry?.cachedRawEvents).toBeNull();
+      expect(entry?.activityArtifacts).toMatchObject({
+        eventCount: 2,
+        eventTimestamps: [],
+      });
       expect(parseFileSyncSpy).not.toHaveBeenCalled();
-      parseFileSyncSpy.mockRestore();
     } finally {
       index.stop();
     }
