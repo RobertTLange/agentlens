@@ -1192,6 +1192,103 @@ describe("server api", () => {
     await server.close();
   }, 20_000);
 
+  it("builds yearly activity without reparsing cold traces", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-server-year-cold-"));
+    const codexRoot = path.join(root, ".codex", "sessions", "2026", "02", "11");
+    await mkdir(codexRoot, { recursive: true });
+
+    for (const [index, filename] of ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl"].entries()) {
+      await writeFile(
+        path.join(codexRoot, filename),
+        [
+          JSON.stringify({
+            timestamp: `2026-02-11T10:00:0${index}.000Z`,
+            type: "session_meta",
+            payload: { id: `server-cold-${index}`, cwd: "/tmp/project", cli_version: "0.1.0" },
+          }),
+          JSON.stringify({
+            timestamp: `2026-02-11T10:05:0${index}.000Z`,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: `trace-${index}` }],
+            },
+          }),
+        ].join("\n") + "\n",
+        "utf8",
+      );
+    }
+
+    const config = mergeConfig({
+      retention: {
+        strategy: "aggressive_recency",
+        hotTraceCount: 1,
+        warmTraceCount: 0,
+        maxResidentEventsPerHotTrace: 1000,
+        maxResidentEventsPerWarmTrace: 50,
+        detailLoadMode: "lazy_from_disk",
+      },
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const configPath = path.join(root, "config.toml");
+    await saveConfig(config, configPath);
+
+    const index = new TraceIndex(config);
+    await index.start();
+    expect(index.getSummaries()[2]?.residentTier).not.toBe("hot");
+    const internal = index as unknown as {
+      parserRegistry: { parseFileSync: (file: unknown, parserNameHint?: string) => unknown };
+    };
+    const parseFileSyncSpy = vi.spyOn(internal.parserRegistry, "parseFileSync");
+    const server = await createServer({
+      traceIndex: index,
+      configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/year?end_date=2026-02-11&tz_offset_min=0&day_count=365",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(parseFileSyncSpy).not.toHaveBeenCalled();
+
+    await server.close();
+    index.stop();
+  }, 20_000);
+
   it("returns validation errors for invalid activity day query params", async () => {
     const fixture = await buildFixtureWithTraceCount(1);
     const server = await createServer({
