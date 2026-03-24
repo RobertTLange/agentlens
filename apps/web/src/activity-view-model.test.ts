@@ -39,6 +39,7 @@ describe("activity view model", () => {
       totalSessionsInWindow: 3,
       peakConcurrentSessions: 2,
       peakConcurrentAtMs: Date.UTC(2026, 1, 22, 0, 0, 0),
+      totalEventCount: 5,
       bins: [
         {
           startMs: Date.UTC(2026, 1, 22, 0, 0, 0),

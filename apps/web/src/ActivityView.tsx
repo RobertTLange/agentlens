@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import type { AgentActivityDay, AgentActivityWeek, AgentKind } from "@agentlens/contracts";
+import type { AgentActivityDay, AgentActivityWeek, AgentActivityYear, AgentKind } from "@agentlens/contracts";
 import { buildActivityViewModel, type ActivityTimelineRowModel } from "./activity-view-model.js";
 import {
   buildActivityWeekHeatmapModel,
@@ -22,9 +22,6 @@ const WEEK_SLOT_MINUTES = 30;
 const WEEK_HOUR_START_LOCAL = 7;
 const WEEK_HOUR_END_LOCAL = 7;
 const DAY_MS = 86_400_000;
-const YEAR_SLOT_MINUTES = 30;
-const YEAR_HOUR_START_LOCAL = 7;
-const YEAR_HOUR_END_LOCAL = 7;
 const IDLE_COMPRESSION_THRESHOLD_MINUTES = 4 * 60;
 const IDLE_COMPRESSED_BIN_FR = 0.08;
 const IDLE_COMPRESSED_EDGE_BIN_FR = 0.28;
@@ -56,6 +53,10 @@ interface ActivityDayResponse {
 
 interface ActivityWeekResponse {
   activity: AgentActivityWeek;
+}
+
+interface ActivityYearResponse {
+  activity: AgentActivityYear;
 }
 
 interface ActivityViewProps {
@@ -459,6 +460,7 @@ function weekSnapshotFromDayActivity(day: AgentActivityDay): AgentActivityWeek {
         totalSessionsInWindow: day.totalSessionsInWindow,
         peakConcurrentSessions: day.peakConcurrentSessions,
         peakConcurrentAtMs: day.peakConcurrentAtMs,
+        totalEventCount: day.totalEventCount,
         bins: day.bins,
       },
     ],
@@ -475,7 +477,7 @@ export function ActivityView({
   const [todayDateLocal, setTodayDateLocal] = useState(() => todayLocalDateString());
   const [activity, setActivity] = useState<AgentActivityDay | null>(null);
   const [activityWeek, setActivityWeek] = useState<AgentActivityWeek | null>(null);
-  const [activityYear, setActivityYear] = useState<AgentActivityWeek | null>(null);
+  const [activityYear, setActivityYear] = useState<AgentActivityYear | null>(null);
   const [isDayLoading, setIsDayLoading] = useState(true);
   const [isWeekLoading, setIsWeekLoading] = useState(true);
   const [isYearLoading, setIsYearLoading] = useState(true);
@@ -547,15 +549,11 @@ export function ActivityView({
 
   const fetchYearActivity = useCallback(async (endDateLocal: string): Promise<void> => {
     const tzOffsetMinutes = new Date().getTimezoneOffset();
-    const dayCount = yearDayCountForDateLocal(endDateLocal);
     const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const yearUrl =
-      `${API}/api/activity/week?end_date=${encodeURIComponent(endDateLocal)}` +
+      `${API}/api/activity/year?end_date=${encodeURIComponent(endDateLocal)}` +
       `&tz_offset_min=${tzOffsetMinutes}` +
-      `&day_count=${dayCount}` +
-      `&slot_min=${YEAR_SLOT_MINUTES}` +
-      `&hour_start=${YEAR_HOUR_START_LOCAL}` +
-      `&hour_end=${YEAR_HOUR_END_LOCAL}`;
+      `&day_count=${yearDayCountForDateLocal(endDateLocal)}`;
 
     setIsYearLoading(true);
     try {
@@ -564,7 +562,7 @@ export function ActivityView({
         const payload = (await yearResponse.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error || `HTTP ${yearResponse.status}`);
       }
-      const yearPayload = (await yearResponse.json()) as ActivityWeekResponse;
+      const yearPayload = (await yearResponse.json()) as ActivityYearResponse;
       setActivityYear(yearPayload.activity);
       setStatus(`Year updated ${refreshedAt}`);
     } catch (error) {
@@ -651,10 +649,7 @@ export function ActivityView({
     () => (activityWeek ? buildWeeklyUsageSummary(activityWeek, traceAgentById, traceTokenTotalsById) : null),
     [activityWeek, traceAgentById, traceTokenTotalsById],
   );
-  const yearlyUsageSummary = useMemo(
-    () => (activityYear ? buildWeeklyUsageSummary(activityYear, traceAgentById, traceTokenTotalsById) : null),
-    [activityYear, traceAgentById, traceTokenTotalsById],
-  );
+  const yearlyUsageSummary = activityYear?.usageSummary ?? null;
   const binCount = model?.rows.length ?? 0;
   const { segments, laneCount } = useMemo(
     () => (model ? buildSessionSegments(model.rows, traceAgentById) : { segments: [], laneCount: 1 }),

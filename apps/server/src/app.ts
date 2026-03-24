@@ -9,7 +9,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import type { AppConfig, SessionDetail, TraceSummary } from "@agentlens/contracts";
 import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
-import { buildAgentActivityDay, buildAgentActivityWeek } from "./activity.js";
+import { buildAgentActivityDay, buildAgentActivityWeek, buildAgentActivityYear } from "./activity.js";
 import { ActivityResponseCache, DEFAULT_ACTIVITY_CACHE_TTL_MS } from "./activity-cache.js";
 
 const execFileAsync = promisify(execFile);
@@ -2092,6 +2092,29 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     }
   });
 
+  server.get("/api/activity/year", async (request, reply) => {
+    const query = request.query as {
+      end_date?: string;
+      tz_offset_min?: string;
+      day_count?: string;
+    };
+
+    try {
+      const activityOptions = {
+        ...(query.end_date !== undefined ? { endDateLocal: query.end_date } : {}),
+        ...(query.tz_offset_min !== undefined ? { tzOffsetMinutes: Number.parseInt(query.tz_offset_min, 10) } : {}),
+        ...(query.day_count !== undefined ? { dayCount: Number.parseInt(query.day_count, 10) } : {}),
+        cache: activityCache,
+        cacheVersion: traceIndex.getStreamVersion(),
+      };
+      const activity = buildAgentActivityYear(traceIndex, activityOptions);
+      return { activity };
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
+
   server.get("/api/traces", async (request) => {
     const query = request.query as { agent?: string; limit?: string };
     const traces = listRecentTraceSummaries(traceIndex, query);
@@ -2402,15 +2425,15 @@ export interface RunServerOptions {
   port?: number;
   configPath?: string;
   enableStatic?: boolean;
+  traceIndex?: TraceIndex;
 }
 
-export async function runServer(options: RunServerOptions = {}): Promise<void> {
+export async function runServer(options: RunServerOptions = {}): Promise<FastifyInstance> {
   const host = options.host ?? process.env.AGENTLENS_HOST ?? "127.0.0.1";
   const port = options.port ?? Number(process.env.AGENTLENS_PORT ?? "8787");
   const configPath = options.configPath ?? process.env.AGENTLENS_CONFIG ?? DEFAULT_CONFIG_PATH;
 
-  const traceIndex = await TraceIndex.fromConfigPath(configPath);
-  await traceIndex.start();
+  const traceIndex = options.traceIndex ?? (await TraceIndex.fromConfigPath(configPath));
 
   const createOptions: CreateServerOptions = {
     traceIndex,
@@ -2422,6 +2445,10 @@ export async function runServer(options: RunServerOptions = {}): Promise<void> {
   const server = await createServer(createOptions);
 
   await server.listen({ host, port });
+  void traceIndex.start().catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error(`AgentLens trace index startup failed: ${asErrorMessage(error)}`);
+  });
 
   process.on("SIGINT", async () => {
     traceIndex.stop();
@@ -2431,4 +2458,5 @@ export async function runServer(options: RunServerOptions = {}): Promise<void> {
 
   // eslint-disable-next-line no-console
   console.log(`AgentLens server: http://${host}:${port}`);
+  return server;
 }

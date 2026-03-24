@@ -25,6 +25,7 @@ import {
   selectCursorProjectProcessPids,
   selectGeminiProjectProcessPids,
   selectPidGroupByNearestTimestamp,
+  runServer,
 } from "./app.js";
 
 function buildTraceLog(sessionId: string, sequence: number, withToolEvents: boolean): string {
@@ -1152,8 +1153,9 @@ describe("server api", () => {
     await server.close();
   }, 20_000);
 
-  it("supports year-to-date style activity windows with daily aggregation", async () => {
+  it("serves compact yearly activity from the earliest active day in the selected year", async () => {
     const fixture = await buildFixtureWithTraceCount(3);
+    const detailSpy = vi.spyOn(fixture.index, "getSessionDetail");
     const server = await createServer({
       traceIndex: fixture.index,
       configPath: fixture.configPath,
@@ -1162,22 +1164,31 @@ describe("server api", () => {
 
     const response = await server.inject({
       method: "GET",
-      url: "/api/activity/week?end_date=2026-02-22&tz_offset_min=0&day_count=53&slot_min=30&hour_start=7&hour_end=7",
+      url: "/api/activity/year?end_date=2026-02-22&tz_offset_min=0&day_count=53",
     });
     expect(response.statusCode).toBe(200);
     const payload = response.json() as {
       activity: {
         dayCount: number;
-        days: Array<{ dateLocal: string; bins: Array<unknown> }>;
+        startDateLocal: string;
+        endDateLocal: string;
+        usageSummary: { totals: { totalUniqueSessions: number } };
+        days: Array<{ dateLocal: string; bins?: unknown; totalEventCount: number }>;
       };
     };
 
-    expect(payload.activity.dayCount).toBe(53);
-    expect(payload.activity.days).toHaveLength(53);
-    expect(payload.activity.days[0]?.dateLocal).toBe("2026-01-01");
-    expect(payload.activity.days[52]?.dateLocal).toBe("2026-02-22");
-    expect(payload.activity.days.every((day) => day.bins.length === 48)).toBe(true);
+    expect(payload.activity.startDateLocal).toBe("2026-02-11");
+    expect(payload.activity.endDateLocal).toBe("2026-02-22");
+    expect(payload.activity.dayCount).toBe(12);
+    expect(payload.activity.days).toHaveLength(12);
+    expect(payload.activity.days[0]?.dateLocal).toBe("2026-02-11");
+    expect(payload.activity.days[11]?.dateLocal).toBe("2026-02-22");
+    expect(payload.activity.days.every((day) => day.bins === undefined)).toBe(true);
+    expect(payload.activity.days.some((day) => day.totalEventCount > 0)).toBe(true);
+    expect(payload.activity.usageSummary.totals.totalUniqueSessions).toBe(3);
+    expect(detailSpy).not.toHaveBeenCalled();
 
+    detailSpy.mockRestore();
     await server.close();
   }, 20_000);
 
@@ -1318,6 +1329,38 @@ describe("server api", () => {
 
     await server.close();
   }, 20_000);
+
+  it("listens before trace index startup resolves", async () => {
+    const fixture = await buildFixture();
+    let releaseStart: () => void = () => {};
+    const startDeferred = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const startSpy = vi.spyOn(fixture.index, "start").mockImplementation(async () => {
+      await startDeferred;
+    });
+
+    const server = await runServer({
+      host: "127.0.0.1",
+      port: 0,
+      configPath: fixture.configPath,
+      enableStatic: false,
+      traceIndex: fixture.index,
+    });
+
+    try {
+      expect(startSpy).toHaveBeenCalledOnce();
+      const health = await server.inject({ method: "GET", url: "/api/healthz" });
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toEqual({ ok: true });
+    } finally {
+      releaseStart();
+      await startDeferred;
+      fixture.index.stop();
+      await server.close();
+      startSpy.mockRestore();
+    }
+  });
 
   it("serves overview, trace listing, trace details, stop/open controls, and config updates", async () => {
     const fixture = await buildFixture();

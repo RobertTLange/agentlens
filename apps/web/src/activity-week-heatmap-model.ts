@@ -1,4 +1,4 @@
-import type { AgentActivityWeek, AgentKind } from "@agentlens/contracts";
+import type { ActivityUsageSummary, ActivityUsageSummaryRow, AgentActivityWeek, AgentKind } from "@agentlens/contracts";
 
 const MINUTES_PER_DAY = 24 * 60;
 const HEATMAP_LEVEL_COUNT = 4;
@@ -42,30 +42,8 @@ export interface ActivityWeekHeatmapModel {
   scaleLabels: ActivityWeekHeatmapScaleLabel[];
 }
 
-export interface WeeklyAgentUsageRow {
-  agent: AgentKind;
-  sessionHours: number;
-  sessionSharePct: number;
-  uniqueSessions: number;
-  activeSlots: number;
-  activeDays: number;
-  peakConcurrentSessions: number;
-  inputTokens: number;
-  cacheTokens: number;
-  outputTokens: number;
-}
-
-export interface WeeklyUsageSummaryTotals {
-  totalUniqueSessions: number;
-  totalSessionHours: number;
-  peakAllAgentConcurrency: number;
-  mostUsedAgent: AgentKind | null;
-}
-
-export interface WeeklyUsageSummaryModel {
-  rows: WeeklyAgentUsageRow[];
-  totals: WeeklyUsageSummaryTotals;
-}
+export type WeeklyAgentUsageRow = ActivityUsageSummaryRow;
+export type WeeklyUsageSummaryModel = ActivityUsageSummary;
 
 export interface TraceTokenTotalsSnapshot {
   inputTokens?: number | null;

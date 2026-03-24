@@ -1,5 +1,5 @@
-import type { AgentActivityDay, AgentActivityWeek } from "@agentlens/contracts";
-import type { BuildAgentActivityDayOptions, BuildAgentActivityWeekOptions } from "./activity.js";
+import type { AgentActivityDay, AgentActivityWeek, AgentActivityYear } from "@agentlens/contracts";
+import type { BuildAgentActivityDayOptions, BuildAgentActivityWeekOptions, BuildAgentActivityYearOptions } from "./activity.js";
 
 interface CacheEntry<T> {
   expiresAtMs: number;
@@ -23,7 +23,7 @@ function stableParamsKey(params: Readonly<Record<string, number | string>>): str
 }
 
 export class ActivityResponseCache {
-  private readonly responseCache = new Map<string, CacheEntry<AgentActivityDay | AgentActivityWeek>>();
+  private readonly responseCache = new Map<string, CacheEntry<AgentActivityDay | AgentActivityWeek | AgentActivityYear>>();
   private readonly windowCache = new Map<string, CacheEntry<WindowActivityValue>>();
 
   constructor(private readonly ttlMs = DEFAULT_ACTIVITY_CACHE_TTL_MS) {}
@@ -51,6 +51,22 @@ export class ActivityResponseCache {
     build: () => AgentActivityWeek,
   ): AgentActivityWeek {
     return this.getOrBuild(this.responseCache, this.buildWeekKey(version, options), nowMs, build) as AgentActivityWeek;
+  }
+
+  getOrBuildYear(
+    version: number,
+    nowMs: number,
+    options: Readonly<
+      Required<
+        Pick<
+          BuildAgentActivityYearOptions,
+          "endDateLocal" | "tzOffsetMinutes" | "dayCount"
+        >
+      >
+    >,
+    build: () => AgentActivityYear,
+  ): AgentActivityYear {
+    return this.getOrBuild(this.responseCache, this.buildYearKey(version, options), nowMs, build) as AgentActivityYear;
   }
 
   getOrBuildWindow(
@@ -120,6 +136,13 @@ export class ActivityResponseCache {
     }>,
   ): string {
     return `window|v=${version}|${stableParamsKey(options)}`;
+  }
+
+  private buildYearKey(
+    version: number,
+    options: Readonly<Required<Pick<BuildAgentActivityYearOptions, "endDateLocal" | "tzOffsetMinutes" | "dayCount">>>,
+  ): string {
+    return `year|v=${version}|${stableParamsKey(options)}`;
   }
 }
 

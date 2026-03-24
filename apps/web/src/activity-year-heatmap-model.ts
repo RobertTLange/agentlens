@@ -1,4 +1,4 @@
-import type { AgentActivityWeek } from "@agentlens/contracts";
+import type { AgentActivityYear } from "@agentlens/contracts";
 
 const HEATMAP_LEVEL_COUNT = 4;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -94,7 +94,7 @@ function formatDayLabel(dateLocal: string): string {
   });
 }
 
-export function buildActivityYearHeatmapModel(year: AgentActivityWeek): ActivityYearHeatmapModel {
+export function buildActivityYearHeatmapModel(year: AgentActivityYear): ActivityYearHeatmapModel {
   const startDate = parseDateLocal(year.startDateLocal);
   const endDate = parseDateLocal(year.endDateLocal);
   if (!startDate || !endDate) {
@@ -126,7 +126,6 @@ export function buildActivityYearHeatmapModel(year: AgentActivityWeek): Activity
     const weekdayIndex = dayDate.getUTCDay();
     if (weekdayIndex < 0 || weekdayIndex >= WEEKDAY_LABELS.length) continue;
 
-    const totalEventCount = day.bins.reduce((sum, bin) => sum + bin.eventCount, 0);
     cells.push({
       key: day.dateLocal,
       dateLocal: day.dateLocal,
@@ -135,7 +134,7 @@ export function buildActivityYearHeatmapModel(year: AgentActivityWeek): Activity
       weekIndex,
       weekdayIndex,
       totalSessionsInWindow: day.totalSessionsInWindow,
-      totalEventCount,
+      totalEventCount: day.totalEventCount,
       peakConcurrentSessions: day.peakConcurrentSessions,
       level: levelForCount(day.totalSessionsInWindow, maxDailySessions),
     });

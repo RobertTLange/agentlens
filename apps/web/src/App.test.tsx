@@ -4,6 +4,8 @@ import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react
 import type {
   AgentActivityDay,
   AgentActivityWeek,
+  AgentActivityYear,
+  ActivityUsageSummary,
   EventKind,
   NormalizedEvent,
   OverviewStats,
@@ -160,6 +162,7 @@ function makeActivityDay(): AgentActivityDay {
     totalSessionsInWindow: 3,
     peakConcurrentSessions: 2,
     peakConcurrentAtMs: startMs,
+    totalEventCount: 3,
     bins: [
       {
         startMs,
@@ -231,6 +234,7 @@ function makeActivityDayForDate(dateLocal: string): AgentActivityDay {
     windowStartMs: startMs,
     windowEndMs: startMs + 20 * 60_000,
     peakConcurrentAtMs: startMs,
+    totalEventCount: base.totalEventCount,
     bins: base.bins.map((bin, index) => ({
       ...bin,
       startMs: startMs + index * base.binMinutes * 60_000,
@@ -298,6 +302,7 @@ function makeActivityWeek(): AgentActivityWeek {
       totalSessionsInWindow: bins.some((bin) => bin.activeSessionCount > 0) ? 1 : 0,
       peakConcurrentSessions: bins.some((bin) => bin.activeSessionCount > 0) ? 1 : 0,
       peakConcurrentAtMs: bins.find((bin) => bin.activeSessionCount > 0)?.startMs ?? null,
+      totalEventCount: bins.reduce((sum, bin) => sum + bin.eventCount, 0),
       bins,
     };
   });
@@ -314,12 +319,10 @@ function makeActivityWeek(): AgentActivityWeek {
   };
 }
 
-function makeActivityYear(): AgentActivityWeek {
+function makeActivityYear(): AgentActivityYear {
   const slotMinutes = 30;
   const slotMs = slotMinutes * 60_000;
   const dayCount = 22;
-  const hourStartLocal = 7;
-  const hourEndLocal = 7;
   const startDateLocal = "2026-02-01";
   const endDateLocal = "2026-02-22";
   const emptyAgentCounts = (): Record<TraceSummary["agent"], number> => ({
@@ -379,19 +382,40 @@ function makeActivityYear(): AgentActivityWeek {
       totalSessionsInWindow: bins.some((bin) => bin.activeSessionCount > 0) ? 1 : 0,
       peakConcurrentSessions,
       peakConcurrentAtMs,
-      bins,
+      totalEventCount: bins.reduce((sum, bin) => sum + bin.eventCount, 0),
     };
   });
+
+  const usageSummary: ActivityUsageSummary = {
+    rows: [
+      {
+        agent: "codex",
+        sessionHours: 18,
+        sessionSharePct: 100,
+        uniqueSessions: 1,
+        activeSlots: 12,
+        activeDays: 8,
+        peakConcurrentSessions: 2,
+        inputTokens: 1000,
+        cacheTokens: 500,
+        outputTokens: 400,
+      },
+    ],
+    totals: {
+      totalUniqueSessions: 1,
+      totalSessionHours: 18,
+      peakAllAgentConcurrency: 2,
+      mostUsedAgent: "codex",
+    },
+  };
 
   return {
     tzOffsetMinutes: 0,
     dayCount,
-    slotMinutes,
-    hourStartLocal,
-    hourEndLocal,
     startDateLocal,
     endDateLocal,
     days,
+    usageSummary,
   };
 }
 
@@ -680,7 +704,7 @@ let missingAdHocEncodedPaths: Set<string>;
 let activityDay: AgentActivityDay;
 let activityDayByDate: Record<string, AgentActivityDay>;
 let activityWeek: AgentActivityWeek;
-let activityYear: AgentActivityWeek;
+let activityYear: AgentActivityYear;
 
 beforeEach(() => {
   tracesById = {
@@ -732,11 +756,11 @@ beforeEach(() => {
         const resolvedDay = activityDayByDate[requestedDate] ?? activityDay;
         return new Response(JSON.stringify({ activity: resolvedDay }), { status: 200 });
       }
+      if (url.includes("/api/activity/year")) {
+        return new Response(JSON.stringify({ activity: activityYear }), { status: 200 });
+      }
       if (url.includes("/api/activity/week")) {
-        const parsed = new URL(url, "http://localhost");
-        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
-        const activity = Number.isFinite(dayCount) && dayCount > 7 ? activityYear : activityWeek;
-        return new Response(JSON.stringify({ activity }), { status: 200 });
+        return new Response(JSON.stringify({ activity: activityWeek }), { status: 200 });
       }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
@@ -840,6 +864,7 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true));
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/week"))).toBe(true));
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/year"))).toBe(true));
     expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true);
     expect(
       requestedUrls.some((url) => {
@@ -848,17 +873,7 @@ describe("App sessions list live motion", () => {
         return parsed.searchParams.get("day_count") === "7";
       }),
     ).toBe(true);
-    expect(
-      requestedUrls.some((url) => {
-        if (!url.includes("/api/activity/week")) return false;
-        const parsed = new URL(url, "http://localhost");
-        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
-        return Number.isFinite(dayCount) && dayCount > 7;
-      }),
-    ).toBe(true);
-    expect(
-      requestedUrls.some((url) => url.includes("/api/activity/week") && url.includes("hour_start=7") && url.includes("hour_end=7")),
-    ).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("/api/activity/year"))).toBe(true);
     await waitFor(() => expect(document.querySelectorAll(".activity-bin-heat").length).toBe(activityDay.bins.length));
     await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
     await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
@@ -982,7 +997,7 @@ describe("App sessions list live motion", () => {
         if (url.includes("/api/traces")) {
           return Promise.resolve(new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 }));
         }
-        if (method === "GET" && (url.includes("/api/activity/day") || url.includes("/api/activity/week"))) {
+        if (method === "GET" && (url.includes("/api/activity/day") || url.includes("/api/activity/week") || url.includes("/api/activity/year"))) {
           activityRequests.push(url);
           return new Promise<Response>((resolve) => {
             deferredResponses.set(url, { resolve });
@@ -1008,6 +1023,7 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(activityRequests.length).toBe(3));
     expect(activityRequests.some((url) => url.includes("/api/activity/day"))).toBe(true);
+    expect(activityRequests.some((url) => url.includes("/api/activity/year"))).toBe(true);
     expect(
       activityRequests.some((url) => {
         if (!url.includes("/api/activity/week")) return false;
@@ -1015,15 +1031,6 @@ describe("App sessions list live motion", () => {
         return parsed.searchParams.get("day_count") === "7";
       }),
     ).toBe(true);
-    expect(
-      activityRequests.some((url) => {
-        if (!url.includes("/api/activity/week")) return false;
-        const parsed = new URL(url, "http://localhost");
-        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
-        return Number.isFinite(dayCount) && dayCount > 7;
-      }),
-    ).toBe(true);
-
     for (const url of activityRequests) {
       const deferred = deferredResponses.get(url);
       if (!deferred) continue;
@@ -1031,13 +1038,7 @@ describe("App sessions list live motion", () => {
         deferred.resolve(new Response(JSON.stringify({ activity: activityDay }), { status: 200 }));
         continue;
       }
-      const parsed = new URL(url, "http://localhost");
-      const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
-      deferred.resolve(
-        new Response(JSON.stringify({ activity: Number.isFinite(dayCount) && dayCount > 7 ? activityYear : activityWeek }), {
-          status: 200,
-        }),
-      );
+      deferred.resolve(new Response(JSON.stringify({ activity: url.includes("/api/activity/year") ? activityYear : activityWeek }), { status: 200 }));
     }
 
     await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
@@ -1064,12 +1065,7 @@ describe("App sessions list live motion", () => {
 
       await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
 
-      const yearRequestCountBefore = requestedUrls.filter((url) => {
-        if (!url.includes("/api/activity/week")) return false;
-        const parsed = new URL(url, "http://localhost");
-        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
-        return Number.isFinite(dayCount) && dayCount > 7;
-      }).length;
+      const yearRequestCountBefore = requestedUrls.filter((url) => url.includes("/api/activity/year")).length;
       const weekRequestCountBefore = requestedUrls.filter((url) => {
         if (!url.includes("/api/activity/week")) return false;
         const parsed = new URL(url, "http://localhost");
@@ -1081,12 +1077,7 @@ describe("App sessions list live motion", () => {
         await vi.advanceTimersByTimeAsync(31_000);
       });
 
-      const yearRequestCountAfter = requestedUrls.filter((url) => {
-        if (!url.includes("/api/activity/week")) return false;
-        const parsed = new URL(url, "http://localhost");
-        const dayCount = Number.parseInt(parsed.searchParams.get("day_count") ?? "", 10);
-        return Number.isFinite(dayCount) && dayCount > 7;
-      }).length;
+      const yearRequestCountAfter = requestedUrls.filter((url) => url.includes("/api/activity/year")).length;
       const weekRequestCountAfter = requestedUrls.filter((url) => {
         if (!url.includes("/api/activity/week")) return false;
         const parsed = new URL(url, "http://localhost");
