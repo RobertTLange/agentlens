@@ -250,6 +250,7 @@ export interface AgentActivityDay {
   totalSessionsInWindow: number;
   peakConcurrentSessions: number;
   peakConcurrentAtMs: number | null;
+  totalEventCount: number;
   bins: AgentActivityBin[];
 }
 
@@ -260,6 +261,7 @@ export interface AgentActivityWeekDay {
   totalSessionsInWindow: number;
   peakConcurrentSessions: number;
   peakConcurrentAtMs: number | null;
+  totalEventCount: number;
   bins: AgentActivityBin[];
 }
 
@@ -272,6 +274,50 @@ export interface AgentActivityWeek {
   startDateLocal: string;
   endDateLocal: string;
   days: AgentActivityWeekDay[];
+}
+
+export interface ActivityUsageSummaryRow {
+  agent: AgentKind;
+  sessionHours: number;
+  sessionSharePct: number;
+  uniqueSessions: number;
+  activeSlots: number;
+  activeDays: number;
+  peakConcurrentSessions: number;
+  inputTokens: number;
+  cacheTokens: number;
+  outputTokens: number;
+}
+
+export interface ActivityUsageSummaryTotals {
+  totalUniqueSessions: number;
+  totalSessionHours: number;
+  peakAllAgentConcurrency: number;
+  mostUsedAgent: AgentKind | null;
+}
+
+export interface ActivityUsageSummary {
+  rows: ActivityUsageSummaryRow[];
+  totals: ActivityUsageSummaryTotals;
+}
+
+export interface AgentActivityYearDay {
+  dateLocal: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  totalSessionsInWindow: number;
+  peakConcurrentSessions: number;
+  peakConcurrentAtMs: number | null;
+  totalEventCount: number;
+}
+
+export interface AgentActivityYear {
+  tzOffsetMinutes: number;
+  dayCount: number;
+  startDateLocal: string;
+  endDateLocal: string;
+  days: AgentActivityYearDay[];
+  usageSummary: ActivityUsageSummary;
 }
 
 export interface OverviewStats {

@@ -1,4 +1,4 @@
-import type { AgentActivityWeek, AgentKind, EventKind } from "@agentlens/contracts";
+import type { ActivityUsageSummary, AgentActivityYear, AgentKind, EventKind } from "@agentlens/contracts";
 import { describe, expect, it } from "vitest";
 import { buildActivityYearHeatmapModel } from "./activity-year-heatmap-model.js";
 
@@ -29,7 +29,7 @@ function makeEventCounts(overrides: Partial<Record<EventKind, number>> = {}): Re
   };
 }
 
-function makeYearFixture(): AgentActivityWeek {
+function makeYearFixture(): AgentActivityYear {
   const dayDates = [
     "2026-02-24",
     "2026-02-25",
@@ -68,19 +68,27 @@ function makeYearFixture(): AgentActivityWeek {
       totalSessionsInWindow: sessions,
       peakConcurrentSessions: sessions,
       peakConcurrentAtMs: sessions > 0 ? bins[0]?.startMs ?? dateMs : null,
-      bins,
+      totalEventCount: bins.reduce((sum, bin) => sum + bin.eventCount, 0),
     };
   });
+
+  const usageSummary: ActivityUsageSummary = {
+    rows: [],
+    totals: {
+      totalUniqueSessions: 0,
+      totalSessionHours: 0,
+      peakAllAgentConcurrency: 0,
+      mostUsedAgent: null,
+    },
+  };
 
   return {
     tzOffsetMinutes: 0,
     dayCount: dayDates.length,
-    slotMinutes: SLOT_MINUTES,
-    hourStartLocal: 0,
-    hourEndLocal: 24,
     startDateLocal: dayDates[0] ?? "2026-02-24",
     endDateLocal: dayDates[dayDates.length - 1] ?? "2026-03-02",
     days,
+    usageSummary,
   };
 }
 

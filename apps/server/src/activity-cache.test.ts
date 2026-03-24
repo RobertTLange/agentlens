@@ -14,6 +14,7 @@ describe("ActivityResponseCache", () => {
       totalSessionsInWindow: 1,
       peakConcurrentSessions: 1,
       peakConcurrentAtMs: 1,
+      totalEventCount: 0,
       bins: [],
     }));
 
@@ -84,6 +85,64 @@ describe("ActivityResponseCache", () => {
     }, build);
 
     expect(first).not.toBe(second);
+    expect(build).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses cached year responses until the trace version changes", () => {
+    const cache = new ActivityResponseCache(30_000);
+    const build = vi
+      .fn()
+      .mockReturnValueOnce({
+        tzOffsetMinutes: 0,
+        dayCount: 80,
+        startDateLocal: "2026-01-05",
+        endDateLocal: "2026-03-24",
+        days: [],
+        usageSummary: {
+          rows: [],
+          totals: {
+            totalUniqueSessions: 0,
+            totalSessionHours: 0,
+            peakAllAgentConcurrency: 0,
+            mostUsedAgent: null,
+          },
+        },
+      })
+      .mockReturnValueOnce({
+        tzOffsetMinutes: 0,
+        dayCount: 80,
+        startDateLocal: "2026-01-05",
+        endDateLocal: "2026-03-24",
+        days: [],
+        usageSummary: {
+          rows: [],
+          totals: {
+            totalUniqueSessions: 0,
+            totalSessionHours: 0,
+            peakAllAgentConcurrency: 0,
+            mostUsedAgent: null,
+          },
+        },
+      });
+
+    const first = cache.getOrBuildYear(5, 1_000, {
+      endDateLocal: "2026-03-24",
+      tzOffsetMinutes: 0,
+      dayCount: 80,
+    }, build);
+    const second = cache.getOrBuildYear(5, 2_000, {
+      endDateLocal: "2026-03-24",
+      tzOffsetMinutes: 0,
+      dayCount: 80,
+    }, build);
+    const third = cache.getOrBuildYear(6, 3_000, {
+      endDateLocal: "2026-03-24",
+      tzOffsetMinutes: 0,
+      dayCount: 80,
+    }, build);
+
+    expect(first).toBe(second);
+    expect(third).not.toBe(second);
     expect(build).toHaveBeenCalledTimes(2);
   });
 });

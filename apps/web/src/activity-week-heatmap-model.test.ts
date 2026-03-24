@@ -114,6 +114,7 @@ function makeWeek(): AgentActivityWeek {
         totalSessionsInWindow: 2,
         peakConcurrentSessions: 2,
         peakConcurrentAtMs: dayOneStartMs,
+        totalEventCount: dayOneBins.reduce((sum, bin) => sum + bin.eventCount, 0),
         bins: dayOneBins,
       },
       {
@@ -123,6 +124,7 @@ function makeWeek(): AgentActivityWeek {
         totalSessionsInWindow: 2,
         peakConcurrentSessions: 1,
         peakConcurrentAtMs: dayTwoStartMs,
+        totalEventCount: dayTwoBins.reduce((sum, bin) => sum + bin.eventCount, 0),
         bins: dayTwoBins,
       },
     ],

@@ -1,8 +1,12 @@
 import type {
+  ActivityUsageSummary,
+  ActivityUsageSummaryRow,
   AgentActivityBin,
   AgentActivityDay,
   AgentActivityWeek,
   AgentActivityWeekDay,
+  AgentActivityYear,
+  AgentActivityYearDay,
   AgentKind,
   EventKind,
   TraceSummary,
@@ -25,6 +29,8 @@ const MAX_WEEK_DAY_COUNT = 366;
 const DEFAULT_WEEK_SLOT_MINUTES = 30;
 const DEFAULT_WEEK_HOUR_START_LOCAL = 0;
 const DEFAULT_WEEK_HOUR_END_LOCAL = 24;
+const DEFAULT_YEAR_SLOT_MINUTES = 30;
+const DEFAULT_YEAR_HOUR_START_LOCAL = 7;
 const MIN_TZ_OFFSET_MINUTES = -14 * 60;
 const MAX_TZ_OFFSET_MINUTES = 14 * 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -52,6 +58,15 @@ export interface BuildAgentActivityWeekOptions {
   cacheVersion?: number;
 }
 
+export interface BuildAgentActivityYearOptions {
+  endDateLocal?: string;
+  tzOffsetMinutes?: number;
+  dayCount?: number;
+  nowMs?: number;
+  cache?: ActivityResponseCache;
+  cacheVersion?: number;
+}
+
 interface SessionSpan {
   startMs: number;
   endMs: number;
@@ -62,6 +77,23 @@ export interface WindowActivityResult {
   totalSessionsInWindow: number;
   peakConcurrentSessions: number;
   peakConcurrentAtMs: number | null;
+}
+
+interface ActivityUsageAccumulator {
+  usageByAgent: Map<AgentKind, ActivityUsageSummaryRow>;
+  uniqueSessionIdsByAgent: Map<AgentKind, Set<string>>;
+  totalUniqueSessionIds: Set<string>;
+  peakAllAgentConcurrency: number;
+}
+
+interface YearDayAccumulator {
+  dateLocal: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  totalSessionIds: Set<string>;
+  totalEventCount: number;
+  boundaryEvents: Array<{ atMs: number; delta: number }>;
+  agentSlotCounts: Array<Record<AgentKind, number>>;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -160,6 +192,84 @@ function createEmptyEventKindCounts(): Record<EventKind, number> {
     reasoning: 0,
     compaction: 0,
     meta: 0,
+  };
+}
+
+function createUsageSummaryRow(agent: AgentKind): ActivityUsageSummaryRow {
+  return {
+    agent,
+    sessionHours: 0,
+    sessionSharePct: 0,
+    uniqueSessions: 0,
+    activeSlots: 0,
+    activeDays: 0,
+    peakConcurrentSessions: 0,
+    inputTokens: 0,
+    cacheTokens: 0,
+    outputTokens: 0,
+  };
+}
+
+function createUsageAccumulator(): ActivityUsageAccumulator {
+  const usageByAgent = new Map<AgentKind, ActivityUsageSummaryRow>();
+  const uniqueSessionIdsByAgent = new Map<AgentKind, Set<string>>();
+  for (const agent of AGENT_KIND_KEYS) {
+    usageByAgent.set(agent, createUsageSummaryRow(agent));
+    uniqueSessionIdsByAgent.set(agent, new Set<string>());
+  }
+  return {
+    usageByAgent,
+    uniqueSessionIdsByAgent,
+    totalUniqueSessionIds: new Set<string>(),
+    peakAllAgentConcurrency: 0,
+  };
+}
+
+function sanitizeTokenValue(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function totalEventCountForBins(bins: AgentActivityBin[]): number {
+  return bins.reduce((sum, bin) => sum + bin.eventCount, 0);
+}
+
+function finalizeUsageSummary(
+  accumulator: ActivityUsageAccumulator,
+  summaryById: ReadonlyMap<string, TraceSummary>,
+): ActivityUsageSummary {
+  for (const agent of AGENT_KIND_KEYS) {
+    const row = accumulator.usageByAgent.get(agent);
+    const sessions = accumulator.uniqueSessionIdsByAgent.get(agent);
+    if (!row || !sessions) continue;
+    row.uniqueSessions = sessions.size;
+    for (const traceId of sessions) {
+      const tokenTotals = summaryById.get(traceId)?.tokenTotals;
+      row.inputTokens += sanitizeTokenValue(tokenTotals?.inputTokens);
+      row.cacheTokens += sanitizeTokenValue(tokenTotals?.cachedReadTokens) + sanitizeTokenValue(tokenTotals?.cachedCreateTokens);
+      row.outputTokens += sanitizeTokenValue(tokenTotals?.outputTokens);
+    }
+  }
+
+  const totalSessionHours = AGENT_KIND_KEYS.reduce((sum, agent) => sum + (accumulator.usageByAgent.get(agent)?.sessionHours ?? 0), 0);
+  const rows = AGENT_KIND_KEYS.map((agent) => accumulator.usageByAgent.get(agent) as ActivityUsageSummaryRow)
+    .filter((row) => row.sessionHours > 0 || row.uniqueSessions > 0 || row.activeSlots > 0)
+    .map((row) => ({
+      ...row,
+      sessionSharePct: totalSessionHours > 0 ? (row.sessionHours / totalSessionHours) * 100 : 0,
+    }))
+    .sort(
+      (left, right) =>
+        right.sessionHours - left.sessionHours || right.uniqueSessions - left.uniqueSessions || left.agent.localeCompare(right.agent),
+    );
+
+  return {
+    rows,
+    totals: {
+      totalUniqueSessions: accumulator.totalUniqueSessionIds.size,
+      totalSessionHours,
+      peakAllAgentConcurrency: accumulator.peakAllAgentConcurrency,
+      mostUsedAgent: rows[0]?.agent ?? null,
+    },
   };
 }
 
@@ -445,6 +555,7 @@ export function buildAgentActivityDay(
     totalSessionsInWindow: windowActivity.totalSessionsInWindow,
     peakConcurrentSessions: windowActivity.peakConcurrentSessions,
     peakConcurrentAtMs: windowActivity.peakConcurrentAtMs,
+    totalEventCount: totalEventCountForBins(windowActivity.bins),
     bins: windowActivity.bins,
   };
 }
@@ -541,6 +652,7 @@ export function buildAgentActivityWeek(
       totalSessionsInWindow: windowActivity.totalSessionsInWindow,
       peakConcurrentSessions: windowActivity.peakConcurrentSessions,
       peakConcurrentAtMs: windowActivity.peakConcurrentAtMs,
+      totalEventCount: totalEventCountForBins(windowActivity.bins),
       bins: windowActivity.bins,
     });
   }
@@ -554,5 +666,201 @@ export function buildAgentActivityWeek(
     startDateLocal,
     endDateLocal,
     days,
+  };
+}
+
+export function buildAgentActivityYear(
+  traceIndex: TraceIndex,
+  options: BuildAgentActivityYearOptions = {},
+): AgentActivityYear {
+  const nowMs = typeof options.nowMs === "number" && Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const requestedTzOffset = validateInt(options.tzOffsetMinutes, "tz_offset_min");
+  const tzOffsetMinutes = clamp(
+    requestedTzOffset ?? new Date(nowMs).getTimezoneOffset(),
+    MIN_TZ_OFFSET_MINUTES,
+    MAX_TZ_OFFSET_MINUTES,
+  );
+
+  const requestedEndDateLocal = options.endDateLocal?.trim() ?? "";
+  const endDateLocal = requestedEndDateLocal || toLocalDateString(nowMs, tzOffsetMinutes);
+  parseDateLocal(endDateLocal);
+
+  const requestedDayCount = validateInt(options.dayCount, "day_count");
+  const maxDayCount = clamp(requestedDayCount ?? MAX_WEEK_DAY_COUNT, MIN_WEEK_DAY_COUNT, MAX_WEEK_DAY_COUNT);
+  const yearStartDateLocal = `${endDateLocal.slice(0, 4)}-01-01`;
+  const todayLocal = toLocalDateString(nowMs, tzOffsetMinutes);
+  const nominalRangeDayCount = Math.floor((windowStartMsForDateLocal(endDateLocal, 0) - windowStartMsForDateLocal(yearStartDateLocal, 0)) / DAY_MS) + 1;
+  const dayCount = clamp(nominalRangeDayCount, MIN_WEEK_DAY_COUNT, Math.min(MAX_WEEK_DAY_COUNT, maxDayCount));
+  const provisionalStartDateLocal = shiftDateLocal(endDateLocal, -(dayCount - 1));
+  const summaryById = new Map(traceIndex.getSummaries().map((summary) => [summary.id, summary]));
+
+  let earliestActiveDateLocal: string | null = null;
+  for (const summary of summaryById.values()) {
+    const activeAtMs = Math.max(summary.firstEventTs ?? 0, 1);
+    if (activeAtMs <= 0) continue;
+    const activeDateLocal = toLocalDateString(activeAtMs, tzOffsetMinutes);
+    if (activeDateLocal < provisionalStartDateLocal || activeDateLocal > endDateLocal) continue;
+    if (earliestActiveDateLocal === null || activeDateLocal < earliestActiveDateLocal) {
+      earliestActiveDateLocal = activeDateLocal;
+    }
+  }
+
+  const startDateLocal = earliestActiveDateLocal ?? provisionalStartDateLocal;
+  const effectiveDayCount =
+    Math.floor((windowStartMsForDateLocal(endDateLocal, 0) - windowStartMsForDateLocal(startDateLocal, 0)) / DAY_MS) + 1;
+
+  if (options.cache && options.cacheVersion !== undefined) {
+    const { cache: _cache, cacheVersion: _cacheVersion, ...uncachedOptions } = options;
+    return options.cache.getOrBuildYear(
+      options.cacheVersion,
+      nowMs,
+      {
+        endDateLocal,
+        tzOffsetMinutes,
+        dayCount: effectiveDayCount,
+      },
+      () =>
+        buildAgentActivityYear(traceIndex, {
+          ...uncachedOptions,
+          nowMs,
+          endDateLocal,
+          tzOffsetMinutes,
+          dayCount: effectiveDayCount,
+        }),
+    );
+  }
+
+  const windowDurationMs = computeWeekWindowMinutes(DEFAULT_YEAR_HOUR_START_LOCAL, DEFAULT_YEAR_HOUR_START_LOCAL) * 60_000;
+  const slotMs = DEFAULT_YEAR_SLOT_MINUTES * 60_000;
+  const slotCount = Math.max(1, Math.ceil(windowDurationMs / slotMs));
+  const dayStates: YearDayAccumulator[] = [];
+
+  for (let offset = 0; offset < effectiveDayCount; offset += 1) {
+    const dateLocal = shiftDateLocal(startDateLocal, offset);
+    const dayStartMs = windowStartMsForDateLocal(dateLocal, tzOffsetMinutes);
+    const windowStartMs = dayStartMs + DEFAULT_YEAR_HOUR_START_LOCAL * 60 * 60_000;
+    const nominalWindowEndMs = windowStartMs + windowDurationMs;
+    const windowEndMs =
+      dateLocal === todayLocal ? Math.max(windowStartMs, Math.min(nominalWindowEndMs, nowMs)) : nominalWindowEndMs;
+    dayStates.push({
+      dateLocal,
+      windowStartMs,
+      windowEndMs,
+      totalSessionIds: new Set<string>(),
+      totalEventCount: 0,
+      boundaryEvents: [],
+      agentSlotCounts: Array.from({ length: slotCount }, () => createEmptyAgentCounts()),
+    });
+  }
+
+  const overallStartMs = dayStates[0]?.windowStartMs ?? 0;
+  const overallEndMs = dayStates[dayStates.length - 1]?.windowEndMs ?? overallStartMs;
+  const usageAccumulator = createUsageAccumulator();
+
+  for (const summary of summaryById.values()) {
+    const span = resolveSessionSpan(summary);
+    if (span.endMs < overallStartMs || span.startMs >= overallEndMs) continue;
+
+    const activityArtifacts = traceIndex.getSessionActivityArtifacts(summary.id);
+    let summaryContributed = false;
+
+    for (const timestampMs of activityArtifacts.eventTimestamps) {
+      if (timestampMs < overallStartMs || timestampMs >= overallEndMs) continue;
+      const dayIndex = Math.floor((timestampMs - overallStartMs) / DAY_MS);
+      const dayState = dayStates[dayIndex];
+      if (!dayState) continue;
+      if (timestampMs >= dayState.windowEndMs) continue;
+      dayState.totalEventCount += 1;
+    }
+
+    for (const segment of activityArtifacts.activeSegments) {
+      if (segment.endMs < overallStartMs || segment.startMs >= overallEndMs) continue;
+      const clampedStartMs = Math.max(segment.startMs, overallStartMs);
+      const clampedEndExclusiveMs = Math.min(segment.endMs + 1, overallEndMs);
+      if (clampedEndExclusiveMs <= clampedStartMs) continue;
+      summaryContributed = true;
+
+      const startDayIndex = Math.max(0, Math.floor((clampedStartMs - overallStartMs) / DAY_MS));
+      const endDayIndex = Math.max(0, Math.floor((clampedEndExclusiveMs - 1 - overallStartMs) / DAY_MS));
+      for (let dayIndex = startDayIndex; dayIndex <= endDayIndex; dayIndex += 1) {
+        const dayState = dayStates[dayIndex];
+        if (!dayState) continue;
+        const overlapStartMs = Math.max(clampedStartMs, dayState.windowStartMs);
+        const overlapEndExclusiveMs = Math.min(clampedEndExclusiveMs, dayState.windowEndMs);
+        if (overlapEndExclusiveMs <= overlapStartMs) continue;
+
+        dayState.totalSessionIds.add(summary.id);
+        dayState.boundaryEvents.push({ atMs: overlapStartMs, delta: 1 });
+        dayState.boundaryEvents.push({ atMs: overlapEndExclusiveMs, delta: -1 });
+
+        const startSlotIndex = computeBinIndex(dayState.windowStartMs, slotMs, slotCount, overlapStartMs);
+        const endSlotIndex = computeBinIndex(
+          dayState.windowStartMs,
+          slotMs,
+          slotCount,
+          Math.max(overlapStartMs, overlapEndExclusiveMs - 1),
+        );
+        for (let slotIndex = startSlotIndex; slotIndex <= endSlotIndex; slotIndex += 1) {
+          dayState.agentSlotCounts[slotIndex]![summary.agent] += 1;
+        }
+      }
+    }
+
+    if (!summaryContributed) continue;
+    usageAccumulator.totalUniqueSessionIds.add(summary.id);
+    usageAccumulator.uniqueSessionIdsByAgent.get(summary.agent)?.add(summary.id);
+  }
+
+  const days: AgentActivityYearDay[] = dayStates.map((dayState) => {
+    let peakConcurrentSessions = 0;
+    let peakConcurrentAtMs: number | null = null;
+    let concurrentSessions = 0;
+    const sortedBoundaryEvents = [...dayState.boundaryEvents].sort(
+      (left, right) => left.atMs - right.atMs || left.delta - right.delta,
+    );
+    for (const boundaryEvent of sortedBoundaryEvents) {
+      concurrentSessions += boundaryEvent.delta;
+      if (concurrentSessions > peakConcurrentSessions) {
+        peakConcurrentSessions = concurrentSessions;
+        peakConcurrentAtMs = boundaryEvent.atMs;
+      }
+    }
+    usageAccumulator.peakAllAgentConcurrency = Math.max(usageAccumulator.peakAllAgentConcurrency, peakConcurrentSessions);
+
+    for (const agent of AGENT_KIND_KEYS) {
+      const row = usageAccumulator.usageByAgent.get(agent);
+      if (!row) continue;
+      let activeToday = false;
+      for (const slotCounts of dayState.agentSlotCounts) {
+        const concurrentAgentSessions = slotCounts[agent] ?? 0;
+        if (concurrentAgentSessions <= 0) continue;
+        activeToday = true;
+        row.sessionHours += concurrentAgentSessions * (slotMs / 3_600_000);
+        row.activeSlots += 1;
+        row.peakConcurrentSessions = Math.max(row.peakConcurrentSessions, concurrentAgentSessions);
+      }
+      if (activeToday) {
+        row.activeDays += 1;
+      }
+    }
+
+    return {
+      dateLocal: dayState.dateLocal,
+      windowStartMs: dayState.windowStartMs,
+      windowEndMs: dayState.windowEndMs,
+      totalSessionsInWindow: dayState.totalSessionIds.size,
+      peakConcurrentSessions,
+      peakConcurrentAtMs,
+      totalEventCount: dayState.totalEventCount,
+    };
+  });
+
+  return {
+    tzOffsetMinutes,
+    dayCount: effectiveDayCount,
+    startDateLocal,
+    endDateLocal,
+    days,
+    usageSummary: finalizeUsageSummary(usageAccumulator, summaryById),
   };
 }
