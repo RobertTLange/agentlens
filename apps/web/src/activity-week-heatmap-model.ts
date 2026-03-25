@@ -1,4 +1,10 @@
-import type { ActivityUsageSummary, ActivityUsageSummaryRow, AgentActivityWeek, AgentKind } from "@agentlens/contracts";
+import type {
+  ActivityHeatmapPresentation,
+  ActivityUsageSummary,
+  ActivityUsageSummaryRow,
+  AgentActivityWeek,
+  AgentKind,
+} from "@agentlens/contracts";
 
 const MINUTES_PER_DAY = 24 * 60;
 const HEATMAP_LEVEL_COUNT = 4;
@@ -12,6 +18,7 @@ export interface ActivityWeekHeatmapCellModel {
   endMs: number;
   timeLabel: string;
   activeSessionCount: number;
+  heatmapValue: number;
   activeByAgent: Record<AgentKind, number>;
   eventCount: number;
   primaryTraceId: string;
@@ -32,12 +39,14 @@ export interface ActivityWeekHeatmapScaleLabel {
 }
 
 export interface ActivityWeekHeatmapModel {
+  presentation: ActivityHeatmapPresentation;
   slotCount: number;
   slotMinutes: number;
   windowLabel: string;
   startDateLabel: string;
   endDateLabel: string;
   maxSessionsPerSlot: number;
+  maxHeatmapValue: number;
   days: ActivityWeekHeatmapDayModel[];
   scaleLabels: ActivityWeekHeatmapScaleLabel[];
 }
@@ -283,6 +292,10 @@ export function buildActivityWeekHeatmapModel(week: AgentActivityWeek): Activity
     const rowMax = day.bins.reduce((max, bin) => Math.max(max, bin.activeSessionCount), 0);
     return Math.max(dayMax, rowMax);
   }, 0);
+  const maxHeatmapValue = week.days.reduce((dayMax, day) => {
+    const rowMax = day.bins.reduce((max, bin) => Math.max(max, bin.heatmapValue), 0);
+    return Math.max(dayMax, rowMax);
+  }, 0);
 
   const days: ActivityWeekHeatmapDayModel[] = week.days.map((day) => {
     const dayLabel = formatDayLabel(day.dateLocal);
@@ -293,6 +306,7 @@ export function buildActivityWeekHeatmapModel(week: AgentActivityWeek): Activity
       const startMs = bin?.startMs ?? fallbackStartMs;
       const endMs = bin?.endMs ?? Math.min(day.windowEndMs, fallbackStartMs + slotMs);
       const activeSessionCount = bin?.activeSessionCount ?? 0;
+      const heatmapValue = bin?.heatmapValue ?? 0;
       const eventCount = bin?.eventCount ?? 0;
       const timeStartMinute = minuteOfDayForSlot(week.hourStartLocal, week.slotMinutes, slotIndex);
       const timeEndMinute = minuteOfDayForSlot(week.hourStartLocal, week.slotMinutes, slotIndex + 1);
@@ -304,10 +318,11 @@ export function buildActivityWeekHeatmapModel(week: AgentActivityWeek): Activity
         endMs,
         timeLabel,
         activeSessionCount,
+        heatmapValue,
         activeByAgent: snapshotActiveByAgent(bin?.activeByAgent),
         eventCount,
         primaryTraceId: bin?.primaryTraceId ?? "",
-        level: levelForCount(activeSessionCount, maxSessionsPerSlot),
+        level: levelForCount(heatmapValue, maxHeatmapValue),
       });
     }
 
@@ -320,6 +335,7 @@ export function buildActivityWeekHeatmapModel(week: AgentActivityWeek): Activity
   });
 
   return {
+    presentation: week.presentation,
     slotCount,
     slotMinutes: week.slotMinutes,
     windowLabel:
@@ -331,6 +347,7 @@ export function buildActivityWeekHeatmapModel(week: AgentActivityWeek): Activity
     startDateLabel: formatRangeDateLabel(week.startDateLocal),
     endDateLabel: formatRangeDateLabel(week.endDateLocal),
     maxSessionsPerSlot,
+    maxHeatmapValue,
     days,
     scaleLabels: buildScaleLabels(week, slotCount),
   };

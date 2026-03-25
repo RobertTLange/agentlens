@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
+import type { AgentActivityWeek, AgentActivityYear } from "@agentlens/contracts";
 import {
   createServer,
   extractCursorSessionIdsFromOpenPaths,
@@ -1153,6 +1154,122 @@ describe("server api", () => {
     await server.close();
   }, 20_000);
 
+  it("accepts metric and color overrides from activity query params", async () => {
+    const fixture = await buildFixtureWithTraceCount(1);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const weekResponse = await server.inject({
+      method: "GET",
+      url: "/api/activity/week?end_date=2026-02-11&tz_offset_min=0&day_count=7&slot_min=30&hour_start=6&hour_end=2&metric=output_tokens&color=%2316a34a",
+    });
+    expect(weekResponse.statusCode).toBe(200);
+    const weekPayload = weekResponse.json() as { activity: AgentActivityWeek };
+    expect(weekPayload.activity.presentation).toMatchObject({
+      metric: "output_tokens",
+      color: "#16a34a",
+    });
+
+    const yearResponse = await server.inject({
+      method: "GET",
+      url: "/api/activity/year?end_date=2026-02-11&tz_offset_min=0&day_count=365&metric=bogus&color=red",
+    });
+    expect(yearResponse.statusCode).toBe(200);
+    const yearPayload = yearResponse.json() as { activity: AgentActivityYear };
+    expect(yearPayload.activity.presentation).toMatchObject({
+      metric: "sessions",
+      color: "#dc2626",
+    });
+
+    await server.close();
+  }, 20_000);
+
+  it("serves output-token heatmap presentation and summed weekly values from config", async () => {
+    const traceLog = [
+      JSON.stringify({
+        timestamp: "2026-02-11T06:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "metric-trace", cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T06:00:00.000Z",
+        type: "turn_context",
+        payload: { model: "gpt-5.3-codex" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T06:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 100,
+              cached_input_tokens: 0,
+              output_tokens: 60,
+              reasoning_output_tokens: 0,
+              total_tokens: 160,
+            },
+            last_token_usage: {
+              input_tokens: 100,
+              cached_input_tokens: 0,
+              output_tokens: 60,
+              reasoning_output_tokens: 0,
+              total_tokens: 160,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T06:30:00.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "halfway" }] },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T07:00:00.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+      }),
+    ].join("\n");
+    const fixture = await buildFixtureWithCustomTrace(traceLog, "metric-trace");
+    const nextConfig = mergeConfig({
+      ...(fixture.index.getConfig() as ReturnType<typeof mergeConfig>),
+      activityHeatmap: {
+        metric: "output_tokens",
+        color: "#16a34a",
+      },
+    });
+    fixture.index.setConfig(nextConfig);
+    await saveConfig(nextConfig, fixture.configPath);
+
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/week?end_date=2026-02-11&tz_offset_min=0&day_count=1&slot_min=30&hour_start=6&hour_end=8",
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as { activity: AgentActivityWeek };
+    const targetDay = payload.activity.days[0];
+
+    expect(payload.activity.presentation).toMatchObject({
+      metric: "output_tokens",
+      color: "#16a34a",
+    });
+    expect(payload.activity.presentation.palette).toHaveLength(5);
+    expect(targetDay?.bins[0]?.heatmapValue).toBeCloseTo(60, 6);
+    expect(targetDay?.bins[1]?.heatmapValue).toBeCloseTo(60, 6);
+    expect(targetDay?.bins[2]?.heatmapValue).toBeCloseTo(60, 6);
+
+    await server.close();
+  }, 20_000);
+
   it("serves compact yearly activity from the earliest active day in the selected year", async () => {
     const fixture = await buildFixtureWithTraceCount(3);
     const detailSpy = vi.spyOn(fixture.index, "getSessionDetail");
@@ -1189,6 +1306,88 @@ describe("server api", () => {
     expect(detailSpy).not.toHaveBeenCalled();
 
     detailSpy.mockRestore();
+    await server.close();
+  }, 20_000);
+
+  it("serves cost heatmap presentation and summed yearly values from config", async () => {
+    const traceLog = [
+      JSON.stringify({
+        timestamp: "2026-02-11T07:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "cost-trace", cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T07:00:00.000Z",
+        type: "turn_context",
+        payload: { model: "gpt-5.3-codex" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T07:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 40,
+              cached_input_tokens: 0,
+              output_tokens: 60,
+              reasoning_output_tokens: 0,
+              total_tokens: 100,
+            },
+            last_token_usage: {
+              input_tokens: 40,
+              cached_input_tokens: 0,
+              output_tokens: 60,
+              reasoning_output_tokens: 0,
+              total_tokens: 100,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T19:00:00.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "day one" }] },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-12T19:00:00.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "day two" }] },
+      }),
+    ].join("\n");
+    const fixture = await buildFixtureWithCustomTrace(traceLog, "cost-trace");
+    const nextConfig = mergeConfig({
+      ...(fixture.index.getConfig() as ReturnType<typeof mergeConfig>),
+      activityHeatmap: {
+        metric: "total_cost_usd",
+        color: "#2563eb",
+      },
+    });
+    fixture.index.setConfig(nextConfig);
+    await saveConfig(nextConfig, fixture.configPath);
+
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/year?end_date=2026-02-12&tz_offset_min=0&day_count=365",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as { activity: AgentActivityYear };
+    expect(payload.activity.presentation).toMatchObject({
+      metric: "total_cost_usd",
+      color: "#2563eb",
+    });
+    const firstDayCost = payload.activity.days[0]?.heatmapValue ?? 0;
+    const secondDayCost = payload.activity.days[1]?.heatmapValue ?? 0;
+    expect(firstDayCost).toBeCloseTo(0.0001, 6);
+    expect(secondDayCost).toBeCloseTo(0.0001, 6);
+
     await server.close();
   }, 20_000);
 

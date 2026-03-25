@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
-import type { AppConfig, SessionDetail, TraceSummary } from "@agentlens/contracts";
+import type { ActivityHeatmapMetric, AppConfig, SessionDetail, TraceSummary } from "@agentlens/contracts";
 import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 import { buildAgentActivityDay, buildAgentActivityWeek, buildAgentActivityYear } from "./activity.js";
 import { ActivityResponseCache, DEFAULT_ACTIVITY_CACHE_TTL_MS } from "./activity-cache.js";
@@ -19,6 +19,7 @@ const STOP_WAIT_POLL_MS = 120;
 const DEFAULT_RECENT_TRACE_LIMIT = 50;
 const MAX_RECENT_TRACE_LIMIT = 5000;
 const MAX_TRACE_INPUT_TEXT_LENGTH = 2000;
+const ACTIVITY_HEATMAP_METRICS: ActivityHeatmapMetric[] = ["sessions", "output_tokens", "total_cost_usd"];
 
 type StopSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
 
@@ -175,6 +176,21 @@ function parsePositiveInt(rawValue: string | undefined, fallback: number): numbe
   const parsed = Number.parseInt(rawValue, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.max(1, Math.min(MAX_RECENT_TRACE_LIMIT, parsed));
+}
+
+function parseActivityHeatmapMetric(rawValue: string | undefined): ActivityHeatmapMetric | undefined {
+  if (!rawValue) return undefined;
+  const normalized = rawValue.trim().toLowerCase();
+  return ACTIVITY_HEATMAP_METRICS.find((value) => value === normalized);
+}
+
+function parseActivityHeatmapColor(rawValue: string | undefined): string | undefined {
+  if (!rawValue) return undefined;
+  const trimmed = rawValue.trim();
+  if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return undefined;
 }
 
 function decodeBase64UrlUtf8(value: string): string {
@@ -2071,9 +2087,13 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       slot_min?: string;
       hour_start?: string;
       hour_end?: string;
+      metric?: string;
+      color?: string;
     };
 
     try {
+      const heatmapMetric = parseActivityHeatmapMetric(query.metric);
+      const heatmapColor = parseActivityHeatmapColor(query.color);
       const activityOptions = {
         ...(query.end_date !== undefined ? { endDateLocal: query.end_date } : {}),
         ...(query.tz_offset_min !== undefined ? { tzOffsetMinutes: Number.parseInt(query.tz_offset_min, 10) } : {}),
@@ -2081,6 +2101,8 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         ...(query.slot_min !== undefined ? { slotMinutes: Number.parseInt(query.slot_min, 10) } : {}),
         ...(query.hour_start !== undefined ? { hourStartLocal: Number.parseInt(query.hour_start, 10) } : {}),
         ...(query.hour_end !== undefined ? { hourEndLocal: Number.parseInt(query.hour_end, 10) } : {}),
+        ...(heatmapMetric !== undefined ? { heatmapMetric } : {}),
+        ...(heatmapColor !== undefined ? { heatmapColor } : {}),
         cache: activityCache,
         cacheVersion: traceIndex.getStreamVersion(),
       };
@@ -2097,13 +2119,19 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       end_date?: string;
       tz_offset_min?: string;
       day_count?: string;
+      metric?: string;
+      color?: string;
     };
 
     try {
+      const heatmapMetric = parseActivityHeatmapMetric(query.metric);
+      const heatmapColor = parseActivityHeatmapColor(query.color);
       const activityOptions = {
         ...(query.end_date !== undefined ? { endDateLocal: query.end_date } : {}),
         ...(query.tz_offset_min !== undefined ? { tzOffsetMinutes: Number.parseInt(query.tz_offset_min, 10) } : {}),
         ...(query.day_count !== undefined ? { dayCount: Number.parseInt(query.day_count, 10) } : {}),
+        ...(heatmapMetric !== undefined ? { heatmapMetric } : {}),
+        ...(heatmapColor !== undefined ? { heatmapColor } : {}),
         cache: activityCache,
         cacheVersion: traceIndex.getStreamVersion(),
       };

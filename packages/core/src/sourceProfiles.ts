@@ -105,6 +105,10 @@ export const DEFAULT_CONFIG: AppConfig = {
     showAgentBadges: true,
     showHealthDiagnostics: false,
   },
+  activityHeatmap: {
+    metric: "sessions",
+    color: "#dc2626",
+  },
   redaction: {
     mode: "strict",
     alwaysOn: true,

@@ -24,6 +24,8 @@ describe("config", () => {
     expect(config.cost.modelRates.some((rate) => rate.model === "claude-opus-4-5-20251101")).toBe(true);
     expect(config.models.defaultContextWindowTokens).toBeGreaterThan(0);
     expect(config.models.contextWindows.some((entry) => entry.model === "gpt-5.2-codex")).toBe(true);
+    expect(config.activityHeatmap.metric).toBe("sessions");
+    expect(config.activityHeatmap.color).toBe("#dc2626");
     expect(
       config.models.contextWindows.some(
         (entry) => entry.model === "gpt-5.2-codex" && entry.contextWindowTokens === 400_000,
@@ -169,6 +171,10 @@ contextWindowTokens = 400000
 [models]
 defaultContextWindowTokens = 123456
 
+[activityHeatmap]
+metric = "output_tokens"
+color = "#16a34a"
+
 [[models.contextWindows]]
 model = "gpt-5.3-codex"
 contextWindowTokens = 272000
@@ -204,6 +210,8 @@ maxResidentEventsPerWarmTrace = 20
     expect(gpt53CodexRate?.contextWindowTokens).toBe(400000);
     expect(config.models.defaultContextWindowTokens).toBe(123456);
     expect(config.models.contextWindows.find((entry) => entry.model === "gpt-5.3-codex")?.contextWindowTokens).toBe(272000);
+    expect(config.activityHeatmap.metric).toBe("output_tokens");
+    expect(config.activityHeatmap.color).toBe("#16a34a");
     expect(config.scan.mode).toBe("fixed");
     expect(config.scan.intervalSeconds).toBe(7);
     expect(config.scan.batchDebounceMs).toBe(88);
@@ -245,5 +253,17 @@ maxResidentEventsPerWarmTrace = 20
     expect(gpt54Rate?.longContextThresholdTokens).toBe(272_000);
     expect(codexWindow?.contextWindowTokens).toBe(123_000);
     expect(gpt54Window?.contextWindowTokens).toBe(1_050_000);
+  });
+
+  it("falls back to default activity heatmap values for invalid input", () => {
+    const config = mergeConfig({
+      activityHeatmap: {
+        metric: "bogus" as never,
+        color: "red",
+      },
+    });
+
+    expect(config.activityHeatmap.metric).toBe("sessions");
+    expect(config.activityHeatmap.color).toBe("#dc2626");
   });
 });

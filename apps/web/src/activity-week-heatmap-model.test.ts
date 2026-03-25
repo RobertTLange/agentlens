@@ -50,6 +50,7 @@ function makeDayBins(
       startMs,
       endMs: startMs + SLOT_MINUTES * 60_000,
       activeSessionCount: hotSlot?.traceIds.length ?? 0,
+      heatmapValue: hotSlot?.traceIds.length ?? 0,
       activeTraceIds: hotSlot?.traceIds ?? [],
       primaryTraceId: hotSlot?.traceIds[0] ?? "",
       activeByAgent: makeAgentCounts(hotSlot?.activeByAgent),
@@ -99,6 +100,11 @@ function makeWeek(): AgentActivityWeek {
   });
 
   return {
+    presentation: {
+      metric: "sessions",
+      color: "#dc2626",
+      palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
+    },
     tzOffsetMinutes: 0,
     dayCount: 2,
     slotMinutes: SLOT_MINUTES,
@@ -112,6 +118,7 @@ function makeWeek(): AgentActivityWeek {
         windowStartMs: dayOneStartMs,
         windowEndMs: dayOneStartMs + 24 * 60 * 60 * 1000,
         totalSessionsInWindow: 2,
+        heatmapValue: dayOneBins.reduce((sum, bin) => sum + bin.heatmapValue, 0),
         peakConcurrentSessions: 2,
         peakConcurrentAtMs: dayOneStartMs,
         totalEventCount: dayOneBins.reduce((sum, bin) => sum + bin.eventCount, 0),
@@ -122,6 +129,7 @@ function makeWeek(): AgentActivityWeek {
         windowStartMs: dayTwoStartMs,
         windowEndMs: dayTwoStartMs + 24 * 60 * 60 * 1000,
         totalSessionsInWindow: 2,
+        heatmapValue: dayTwoBins.reduce((sum, bin) => sum + bin.heatmapValue, 0),
         peakConcurrentSessions: 1,
         peakConcurrentAtMs: dayTwoStartMs,
         totalEventCount: dayTwoBins.reduce((sum, bin) => sum + bin.eventCount, 0),
@@ -139,10 +147,32 @@ describe("activity week heatmap model", () => {
     expect(model.windowLabel).toBe("Full day");
     expect(model.slotCount).toBe(48);
     expect(model.days).toHaveLength(2);
+    expect(model.presentation.metric).toBe("sessions");
     expect(model.days[0]?.cells[0]?.timeLabel).toBe("12:00 AM-12:30 AM");
     expect(model.days[0]?.cells[1]?.level).toBe(2);
     expect(model.days[0]?.cells[0]?.activeByAgent.codex).toBe(1);
     expect(model.days[0]?.cells[0]?.activeByAgent.claude).toBe(1);
+  });
+
+  it("uses heatmap values instead of session counts for intensity", () => {
+    const week = makeWeek();
+    week.presentation = {
+      metric: "output_tokens",
+      color: "#16a34a",
+      palette: ["#ffffff", "#dcfce7", "#86efac", "#22c55e", "#15803d"],
+    };
+    week.days[0]!.bins[0]!.heatmapValue = 10;
+    week.days[0]!.bins[1]!.heatmapValue = 50;
+    week.days[1]!.bins[0]!.heatmapValue = 100;
+    week.days[1]!.bins[1]!.heatmapValue = 0;
+
+    const model = buildActivityWeekHeatmapModel(week);
+
+    expect(model.presentation.metric).toBe("output_tokens");
+    expect(model.maxHeatmapValue).toBe(100);
+    expect(model.days[0]?.cells[0]).toMatchObject({ heatmapValue: 10, level: 1 });
+    expect(model.days[0]?.cells[1]).toMatchObject({ heatmapValue: 50, level: 2 });
+    expect(model.days[1]?.cells[0]).toMatchObject({ heatmapValue: 100, level: 4 });
   });
 
   it("aggregates weekly per-agent usage metrics", () => {
