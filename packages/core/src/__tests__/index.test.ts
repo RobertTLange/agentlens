@@ -2093,6 +2093,144 @@ describe("trace index", () => {
     expect((summary?.costEstimateUsd ?? 0) > 0).toBe(true);
   });
 
+  it("derives timestamped codex usage points from token_count rows", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+
+    const codexPath = path.join(codexDir, "rollout-usage-points.jsonl");
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T23:59:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-usage-points", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T23:59:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.3-codex" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T23:59:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 100,
+                cached_input_tokens: 20,
+                output_tokens: 10,
+                reasoning_output_tokens: 0,
+                total_tokens: 130,
+              },
+              last_token_usage: {
+                input_tokens: 100,
+                cached_input_tokens: 20,
+                output_tokens: 10,
+                reasoning_output_tokens: 0,
+                total_tokens: 130,
+              },
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-14T00:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 140,
+                cached_input_tokens: 30,
+                output_tokens: 40,
+                reasoning_output_tokens: 5,
+                total_tokens: 215,
+              },
+              last_token_usage: {
+                input_tokens: 40,
+                cached_input_tokens: 10,
+                output_tokens: 30,
+                reasoning_output_tokens: 5,
+                total_tokens: 85,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.3-codex",
+            inputPer1MUsd: 1,
+            outputPer1MUsd: 1,
+            cachedReadPer1MUsd: 1,
+            cachedCreatePer1MUsd: 1,
+            reasoningOutputPer1MUsd: 1,
+          },
+        ],
+      },
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summary = index.getSummaries()[0];
+    const usageArtifacts = index.getSessionUsageArtifacts(summary!.id);
+    expect(usageArtifacts.usagePoints).toHaveLength(2);
+    expect(usageArtifacts.usagePoints[0]).toMatchObject({
+      timestampMs: Date.UTC(2026, 1, 13, 23, 59, 2),
+      inputTokens: 100,
+      cachedReadTokens: 20,
+      outputTokens: 10,
+    });
+    expect(usageArtifacts.usagePoints[1]).toMatchObject({
+      timestampMs: Date.UTC(2026, 1, 14, 0, 0, 1),
+      inputTokens: 40,
+      cachedReadTokens: 10,
+      outputTokens: 30,
+      reasoningOutputTokens: 5,
+    });
+  });
+
   it("does not double bill codex cached input tokens in cost estimate", async () => {
     const root = await createTempRoot();
     const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
