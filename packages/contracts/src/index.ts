@@ -358,6 +358,7 @@ export interface AgentActivityWeek {
   startDateLocal: string;
   endDateLocal: string;
   days: AgentActivityWeekDay[];
+  usageSummary?: ActivityUsageSummary;
 }
 
 export interface ActivityUsageSummaryRow {
