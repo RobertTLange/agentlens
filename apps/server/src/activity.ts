@@ -74,6 +74,10 @@ export interface BuildAgentActivityYearOptions {
   cacheVersion?: number;
 }
 
+export interface ResolvedActivityWindow {
+  windowStartMs: number;
+}
+
 interface SessionSpan {
   startMs: number;
   endMs: number;
@@ -604,6 +608,69 @@ function buildWindowActivity(
     },
     () => computeWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes, heatmapMetric),
   );
+}
+
+export function resolveAgentActivityDayWindow(options: BuildAgentActivityDayOptions = {}): ResolvedActivityWindow {
+  const nowMs = typeof options.nowMs === "number" && Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const requestedTzOffset = validateInt(options.tzOffsetMinutes, "tz_offset_min");
+  const tzOffsetMinutes = clamp(
+    requestedTzOffset ?? new Date(nowMs).getTimezoneOffset(),
+    MIN_TZ_OFFSET_MINUTES,
+    MAX_TZ_OFFSET_MINUTES,
+  );
+  const requestedDateLocal = options.dateLocal?.trim() ?? "";
+  const dateLocal = requestedDateLocal || toLocalDateString(nowMs, tzOffsetMinutes);
+  parseDateLocal(dateLocal);
+  const dayStartMs = windowStartMsForDateLocal(dateLocal, tzOffsetMinutes);
+  return {
+    windowStartMs: dayStartMs + DEFAULT_DAY_HOUR_START_LOCAL * 60 * 60_000,
+  };
+}
+
+export function resolveAgentActivityWeekWindow(options: BuildAgentActivityWeekOptions = {}): ResolvedActivityWindow {
+  const nowMs = typeof options.nowMs === "number" && Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const requestedTzOffset = validateInt(options.tzOffsetMinutes, "tz_offset_min");
+  const tzOffsetMinutes = clamp(
+    requestedTzOffset ?? new Date(nowMs).getTimezoneOffset(),
+    MIN_TZ_OFFSET_MINUTES,
+    MAX_TZ_OFFSET_MINUTES,
+  );
+  const requestedEndDateLocal = options.endDateLocal?.trim() ?? "";
+  const endDateLocal = requestedEndDateLocal || toLocalDateString(nowMs, tzOffsetMinutes);
+  parseDateLocal(endDateLocal);
+  const requestedDayCount = validateInt(options.dayCount, "day_count");
+  const dayCount = clamp(requestedDayCount ?? DEFAULT_WEEK_DAY_COUNT, MIN_WEEK_DAY_COUNT, MAX_WEEK_DAY_COUNT);
+  const startDateLocal = shiftDateLocal(endDateLocal, -(dayCount - 1));
+  const requestedHourStart = validateInt(options.hourStartLocal, "hour_start");
+  const hourStartLocal = clamp(requestedHourStart ?? DEFAULT_WEEK_HOUR_START_LOCAL, 0, 23);
+  const dayStartMs = windowStartMsForDateLocal(startDateLocal, tzOffsetMinutes);
+  return {
+    windowStartMs: dayStartMs + hourStartLocal * 60 * 60_000,
+  };
+}
+
+export function resolveAgentActivityYearWindow(options: BuildAgentActivityYearOptions = {}): ResolvedActivityWindow {
+  const nowMs = typeof options.nowMs === "number" && Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const requestedTzOffset = validateInt(options.tzOffsetMinutes, "tz_offset_min");
+  const tzOffsetMinutes = clamp(
+    requestedTzOffset ?? new Date(nowMs).getTimezoneOffset(),
+    MIN_TZ_OFFSET_MINUTES,
+    MAX_TZ_OFFSET_MINUTES,
+  );
+  const requestedEndDateLocal = options.endDateLocal?.trim() ?? "";
+  const endDateLocal = requestedEndDateLocal || toLocalDateString(nowMs, tzOffsetMinutes);
+  parseDateLocal(endDateLocal);
+  const requestedDayCount = validateInt(options.dayCount, "day_count");
+  const maxDayCount = clamp(requestedDayCount ?? MAX_WEEK_DAY_COUNT, MIN_WEEK_DAY_COUNT, MAX_WEEK_DAY_COUNT);
+  const yearStartDateLocal = `${endDateLocal.slice(0, 4)}-01-01`;
+  const nominalRangeDayCount =
+    Math.floor((windowStartMsForDateLocal(endDateLocal, 0) - windowStartMsForDateLocal(yearStartDateLocal, 0)) / DAY_MS) + 1;
+  const dayCount = clamp(nominalRangeDayCount, MIN_WEEK_DAY_COUNT, Math.min(MAX_WEEK_DAY_COUNT, maxDayCount));
+  const startDateLocal = shiftDateLocal(endDateLocal, -(dayCount - 1));
+  const dayStartMs = windowStartMsForDateLocal(startDateLocal, tzOffsetMinutes);
+  return {
+    windowStartMs: dayStartMs + DEFAULT_YEAR_HOUR_START_LOCAL * 60 * 60_000,
+  };
 }
 
 export function buildAgentActivityDay(

@@ -5,6 +5,7 @@ import type {
   AgentActivityDay,
   AgentActivityWeek,
   AgentActivityYear,
+  ActivityHydrationProgress,
   ActivityUsageSummary,
   EventKind,
   NormalizedEvent,
@@ -797,6 +798,18 @@ let activityDayByDate: Record<string, AgentActivityDay>;
 let activityWeek: AgentActivityWeek;
 let activityYear: AgentActivityYear;
 let startupState: TraceIndexStartupState;
+let dayProgress: ActivityHydrationProgress | null;
+let weekProgress: ActivityHydrationProgress | null;
+let yearProgress: ActivityHydrationProgress | null;
+
+function makeHydrationProgress(hydrated: number, discovered: number): ActivityHydrationProgress {
+  return {
+    ready: hydrated >= discovered,
+    relevantDiscoveredCount: discovered,
+    relevantHydratedCount: hydrated,
+    percent: discovered === 0 ? 100 : Math.round((hydrated / discovered) * 100),
+  };
+}
 
 beforeEach(() => {
   tracesById = {
@@ -828,6 +841,9 @@ beforeEach(() => {
     hydratedTraceCount: Object.keys(tracesById).length,
     startupError: "",
   };
+  dayProgress = null;
+  weekProgress = null;
+  yearProgress = null;
   window.history.replaceState(null, "", "/");
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
@@ -852,8 +868,8 @@ beforeEach(() => {
         return new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 });
       }
       if (url.includes("/api/activity/day")) {
-        if (!startupState.fullReady) {
-          return new Response(JSON.stringify({ warming: true, startup: startupState }), { status: 503 });
+        if (dayProgress) {
+          return new Response(JSON.stringify({ warming: true, progress: dayProgress }), { status: 503 });
         }
         const parsed = new URL(url, "http://localhost");
         const requestedDate = parsed.searchParams.get("date") ?? "";
@@ -861,8 +877,8 @@ beforeEach(() => {
         return new Response(JSON.stringify({ activity: resolvedDay }), { status: 200 });
       }
       if (url.includes("/api/activity/year")) {
-        if (!startupState.fullReady) {
-          return new Response(JSON.stringify({ warming: true, startup: startupState }), { status: 503 });
+        if (yearProgress) {
+          return new Response(JSON.stringify({ warming: true, progress: yearProgress }), { status: 503 });
         }
         const parsed = new URL(url, "http://localhost");
         const metric = parsed.searchParams.get("metric");
@@ -874,8 +890,8 @@ beforeEach(() => {
         return new Response(JSON.stringify({ activity: yearForMetricAndColor(activityYear, resolvedMetric, resolvedColor) }), { status: 200 });
       }
       if (url.includes("/api/activity/week")) {
-        if (!startupState.fullReady) {
-          return new Response(JSON.stringify({ warming: true, startup: startupState }), { status: 503 });
+        if (weekProgress) {
+          return new Response(JSON.stringify({ warming: true, progress: weekProgress }), { status: 503 });
         }
         const parsed = new URL(url, "http://localhost");
         const metric = parsed.searchParams.get("metric");
@@ -981,6 +997,9 @@ describe("App sessions list live motion", () => {
       hydratedTraceCount: 120,
       startupError: "",
     };
+    dayProgress = makeHydrationProgress(120, 240);
+    weekProgress = makeHydrationProgress(120, 240);
+    yearProgress = makeHydrationProgress(120, 240);
 
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -1138,6 +1157,9 @@ describe("App sessions list live motion", () => {
       hydratedTraceCount: 120,
       startupError: "",
     };
+    dayProgress = makeHydrationProgress(120, 240);
+    weekProgress = makeHydrationProgress(120, 240);
+    yearProgress = makeHydrationProgress(120, 240);
 
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -1169,6 +1191,42 @@ describe("App sessions list live motion", () => {
     expect(progressLabels).toEqual(["50%", "50%", "50%"]);
   });
 
+  it("loads daily activity while weekly and yearly are still hydrating", async () => {
+    startupState = {
+      phase: "hydrating",
+      inspectorReady: true,
+      fullReady: false,
+      isPartial: true,
+      discoveredTraceCount: 240,
+      hydratedTraceCount: 120,
+      startupError: "",
+    };
+    dayProgress = null;
+    weekProgress = makeHydrationProgress(120, 240);
+    yearProgress = makeHydrationProgress(120, 240);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-bin-heat").length).toBeGreaterThan(0));
+    const progressBars = Array.from(document.querySelectorAll('.activity-progress-bar[role="progressbar"]'));
+    expect(progressBars).toHaveLength(2);
+    expect(document.body.textContent?.toLowerCase()).toContain("daily activity");
+    expect(document.body.textContent?.toLowerCase()).toContain("weekly activity");
+    expect(document.body.textContent?.toLowerCase()).toContain("yearly activity");
+  });
+
   it("refetches activity immediately when background hydration finishes", async () => {
     startupState = {
       phase: "hydrating",
@@ -1179,6 +1237,9 @@ describe("App sessions list live motion", () => {
       hydratedTraceCount: 120,
       startupError: "",
     };
+    dayProgress = makeHydrationProgress(120, 240);
+    weekProgress = makeHydrationProgress(120, 240);
+    yearProgress = makeHydrationProgress(120, 240);
 
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -1205,6 +1266,9 @@ describe("App sessions list live motion", () => {
       hydratedTraceCount: 240,
       startupError: "",
     };
+    dayProgress = null;
+    weekProgress = null;
+    yearProgress = null;
 
     const source = MockEventSource.instances[0];
     expect(source).toBeTruthy();

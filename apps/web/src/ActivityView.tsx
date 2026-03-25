@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject } from "react";
 import type {
+  ActivityHydrationProgress,
   ActivityHeatmapMetric,
   ActivityHeatmapMetricValues,
   ActivityHeatmapPresentation,
@@ -26,6 +27,7 @@ const MIN_BIN_MINUTES = 5;
 const MAX_BIN_MINUTES = 60;
 const BREAK_MINUTES = 10;
 const REFRESH_INTERVAL_MS = 30_000;
+const WARMING_REFRESH_INTERVAL_MS = 1_000;
 const WEEK_DAY_COUNT = 7;
 const WEEK_SLOT_MINUTES = 30;
 const WEEK_HOUR_START_LOCAL = 7;
@@ -84,7 +86,7 @@ interface ActivityYearResponse {
 
 interface ActivityWarmingResponse {
   warming: true;
-  startup: IndexStartupStatus;
+  progress: ActivityHydrationProgress;
 }
 
 interface ActivityViewProps {
@@ -656,11 +658,13 @@ export function ActivityView({
   const [defaultHeatmapMetric, setDefaultHeatmapMetric] = useState<ActivityHeatmapMetric>("sessions");
   const [defaultHeatmapColor, setDefaultHeatmapColor] = useState(DEFAULT_HEATMAP_COLOR);
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
+  const [dayProgress, setDayProgress] = useState<ActivityHydrationProgress | null>(null);
+  const [weekProgress, setWeekProgress] = useState<ActivityHydrationProgress | null>(null);
+  const [yearProgress, setYearProgress] = useState<ActivityHydrationProgress | null>(null);
   const [dayError, setDayError] = useState("");
   const [weekError, setWeekError] = useState("");
   const [yearError, setYearError] = useState("");
   const [status, setStatus] = useState("Loading daily activity...");
-  const isHistoryReady = startup?.fullReady ?? true;
 
   const selectActivityDate = useCallback(
     (dateLocal: string, source: "week" | "year"): void => {
@@ -717,8 +721,9 @@ export function ActivityView({
       const dayResponse = await fetch(dayUrl, { cache: "no-store", signal: abortController.signal });
       if (!dayResponse.ok) {
         const payload = (await dayResponse.json().catch(() => ({}))) as ActivityWarmingResponse & { error?: string };
-        if (dayResponse.status === 503 && payload.warming && payload.startup) {
-          const message = `Indexing history ${payload.startup.hydratedTraceCount}/${payload.startup.discoveredTraceCount}`;
+        if (dayResponse.status === 503 && payload.warming && payload.progress) {
+          const message = `Indexing history ${payload.progress.relevantHydratedCount}/${payload.progress.relevantDiscoveredCount}`;
+          setDayProgress(payload.progress);
           setDayError(message);
           setStatus(message);
           return;
@@ -728,6 +733,7 @@ export function ActivityView({
       const dayPayload = (await dayResponse.json()) as ActivityDayResponse;
       if (requestSeq !== dayRequestSeqRef.current) return;
       setActivity(dayPayload.activity);
+      setDayProgress(null);
       setDayError("");
       setStatus(`Daily updated ${refreshedAt}`);
     } catch (error) {
@@ -773,8 +779,9 @@ export function ActivityView({
       const weekResponse = await fetch(weekUrl, { cache: "no-store", signal: abortController.signal });
       if (!weekResponse.ok) {
         const payload = (await weekResponse.json().catch(() => ({}))) as ActivityWarmingResponse & { error?: string };
-        if (weekResponse.status === 503 && payload.warming && payload.startup) {
-          const message = `Indexing history ${payload.startup.hydratedTraceCount}/${payload.startup.discoveredTraceCount}`;
+        if (weekResponse.status === 503 && payload.warming && payload.progress) {
+          const message = `Indexing history ${payload.progress.relevantHydratedCount}/${payload.progress.relevantDiscoveredCount}`;
+          setWeekProgress(payload.progress);
           setWeekError(message);
           setStatus(message);
           return;
@@ -791,6 +798,7 @@ export function ActivityView({
         return current === next ? current : next;
       });
       setActivityWeek(weekPayload.activity);
+      setWeekProgress(null);
       setWeekError("");
       setStatus(`Week updated ${refreshedAt}`);
     } catch (error) {
@@ -833,8 +841,9 @@ export function ActivityView({
       const yearResponse = await fetch(yearUrl, { cache: "no-store", signal: abortController.signal });
       if (!yearResponse.ok) {
         const payload = (await yearResponse.json().catch(() => ({}))) as ActivityWarmingResponse & { error?: string };
-        if (yearResponse.status === 503 && payload.warming && payload.startup) {
-          const message = `Indexing history ${payload.startup.hydratedTraceCount}/${payload.startup.discoveredTraceCount}`;
+        if (yearResponse.status === 503 && payload.warming && payload.progress) {
+          const message = `Indexing history ${payload.progress.relevantHydratedCount}/${payload.progress.relevantDiscoveredCount}`;
+          setYearProgress(payload.progress);
           setYearError(message);
           setStatus(message);
           return;
@@ -851,6 +860,7 @@ export function ActivityView({
         return current === next ? current : next;
       });
       setActivityYear(yearPayload.activity);
+      setYearProgress(null);
       setYearError("");
       setStatus(`Year updated ${refreshedAt}`);
     } catch (error) {
@@ -904,12 +914,12 @@ export function ActivityView({
     void refreshDay();
     const intervalId = window.setInterval(() => {
       void refreshDay();
-    }, REFRESH_INTERVAL_MS);
+    }, dayProgress ? WARMING_REFRESH_INTERVAL_MS : REFRESH_INTERVAL_MS);
     return () => {
       isDisposed = true;
       window.clearInterval(intervalId);
     };
-  }, [fetchDayActivity, isHistoryReady, selectedDateLocal]);
+  }, [dayProgress, fetchDayActivity, selectedDateLocal]);
 
   useEffect(() => {
     let isDisposed = false;
@@ -925,23 +935,30 @@ export function ActivityView({
     };
 
     void refreshWeek();
-    if (selectedWeekEndDateLocal !== todayDateLocal) {
+    if (selectedWeekEndDateLocal !== todayDateLocal && !weekProgress) {
       return () => {
         isDisposed = true;
       };
     }
     const intervalId = window.setInterval(() => {
       void refreshWeek();
-    }, REFRESH_INTERVAL_MS);
+    }, weekProgress ? WARMING_REFRESH_INTERVAL_MS : REFRESH_INTERVAL_MS);
     return () => {
       isDisposed = true;
       window.clearInterval(intervalId);
     };
-  }, [fetchWeekActivity, isHistoryReady, selectedWeekEndDateLocal, todayDateLocal]);
+  }, [fetchWeekActivity, selectedWeekEndDateLocal, todayDateLocal, weekProgress]);
 
   useEffect(() => {
     void fetchYearActivity(todayDateLocal);
-  }, [fetchYearActivity, isHistoryReady, todayDateLocal]);
+    if (!yearProgress) return;
+    const intervalId = window.setInterval(() => {
+      void fetchYearActivity(todayDateLocal);
+    }, WARMING_REFRESH_INTERVAL_MS);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [fetchYearActivity, todayDateLocal, yearProgress]);
 
   const effectiveActivityWeek = useMemo(
     () => (activityWeek ? applyWeekHeatmapOverrides(activityWeek, displayedHeatmapMetric, displayedHeatmapColor) : null),
@@ -991,18 +1008,19 @@ export function ActivityView({
     [activity?.binMinutes, model],
   );
   const showSegmentLabels = binCount > 0 && binCount <= 120;
-  const warmingProgressPct = startup && startup.discoveredTraceCount > 0
-    ? Math.max(0, Math.min(100, Math.round((startup.hydratedTraceCount / startup.discoveredTraceCount) * 100)))
-    : 0;
   const headerStatus =
     isDayLoading && isWeekLoading && isYearLoading
       ? "Loading daily, week, year..."
       : status;
-  const renderHydrationProgress = (title: string, ariaLabel: string): JSX.Element => (
+  const renderHydrationProgress = (
+    title: string,
+    ariaLabel: string,
+    progress: ActivityHydrationProgress | null,
+  ): JSX.Element => (
     <div className="activity-loading-state">
       <div className="mono activity-loading-title">{title}</div>
       <div className="mono activity-loading-copy">
-        {startup ? `Indexing history ${startup.hydratedTraceCount}/${startup.discoveredTraceCount}` : "Loading history"}
+        {progress ? `Indexing history ${progress.relevantHydratedCount}/${progress.relevantDiscoveredCount}` : "Loading history"}
       </div>
       <div className="activity-progress activity-progress-inline" aria-label={`${title} loading progress`}>
         <div
@@ -1010,13 +1028,13 @@ export function ActivityView({
           role="progressbar"
           aria-label={ariaLabel}
           aria-valuemin={0}
-          aria-valuemax={startup?.discoveredTraceCount ?? 0}
-          aria-valuenow={startup?.hydratedTraceCount ?? 0}
-          aria-valuetext={`${warmingProgressPct}% complete`}
+          aria-valuemax={progress?.relevantDiscoveredCount ?? 0}
+          aria-valuenow={progress?.relevantHydratedCount ?? 0}
+          aria-valuetext={`${progress?.percent ?? 0}% complete`}
         >
-          <span className="activity-progress-fill" style={{ width: `${warmingProgressPct}%` }} />
+          <span className="activity-progress-fill" style={{ width: `${progress?.percent ?? 0}%` }} />
         </div>
-        <span className="mono activity-progress-label">{`${warmingProgressPct}%`}</span>
+        <span className="mono activity-progress-label">{`${progress?.percent ?? 0}%`}</span>
       </div>
     </div>
   );
@@ -1222,9 +1240,9 @@ export function ActivityView({
               />
             ) : null}
           </section>
-        ) : !isHistoryReady ? (
+        ) : dayProgress ? (
           <section className="activity-day-timeline activity-day-loading" aria-label="daily activity timeline loading">
-            {renderHydrationProgress("Daily Activity", "Daily activity hydration progress")}
+            {renderHydrationProgress("Daily Activity", "Daily activity hydration progress", dayProgress)}
           </section>
         ) : isDayLoading ? (
           <section className="activity-day-timeline activity-day-loading" aria-label="daily activity timeline loading">
@@ -1343,9 +1361,9 @@ export function ActivityView({
               />
             ) : null}
           </section>
-        ) : !isHistoryReady ? (
+        ) : weekProgress ? (
           <section className="activity-week-heatmap activity-week-loading" aria-label="weekly activity heatmap loading">
-            {renderHydrationProgress("Weekly Activity", "Weekly activity hydration progress")}
+            {renderHydrationProgress("Weekly Activity", "Weekly activity hydration progress", weekProgress)}
           </section>
         ) : isWeekLoading ? (
           <section className="activity-week-heatmap activity-week-loading" aria-label="weekly activity heatmap loading">
@@ -1447,9 +1465,9 @@ export function ActivityView({
               />
             ) : null}
           </section>
-        ) : !isHistoryReady ? (
+        ) : yearProgress ? (
           <section className="activity-year-heatmap activity-year-loading" aria-label="yearly activity heatmap loading">
-            {renderHydrationProgress("Yearly Activity", "Yearly activity hydration progress")}
+            {renderHydrationProgress("Yearly Activity", "Yearly activity hydration progress", yearProgress)}
           </section>
         ) : isYearLoading ? (
           <section className="activity-year-heatmap activity-year-loading" aria-label="yearly activity heatmap loading">
