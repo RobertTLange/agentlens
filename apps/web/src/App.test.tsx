@@ -1156,6 +1156,17 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true));
     expect(document.body.textContent?.toLowerCase()).toContain("indexing history");
     expect(document.body.textContent).toContain("120/240");
+    const progressBars = Array.from(document.querySelectorAll('.activity-progress-bar[role="progressbar"]'));
+    expect(progressBars).toHaveLength(3);
+    progressBars.forEach((progress) => {
+      if (!(progress instanceof HTMLElement)) {
+        throw new Error("missing activity progress bar");
+      }
+      expect(progress.getAttribute("aria-valuemax")).toBe("240");
+      expect(progress.getAttribute("aria-valuenow")).toBe("120");
+    });
+    const progressLabels = Array.from(document.querySelectorAll(".activity-progress-label")).map((node) => node.textContent?.trim());
+    expect(progressLabels).toEqual(["50%", "50%", "50%"]);
   });
 
   it("refetches activity immediately when background hydration finishes", async () => {

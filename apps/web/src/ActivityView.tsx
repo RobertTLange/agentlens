@@ -991,13 +991,35 @@ export function ActivityView({
     [activity?.binMinutes, model],
   );
   const showSegmentLabels = binCount > 0 && binCount <= 120;
-  const warmingStatus = startup && !startup.fullReady
-    ? `Indexing history ${startup.hydratedTraceCount}/${startup.discoveredTraceCount}`
-    : "";
+  const warmingProgressPct = startup && startup.discoveredTraceCount > 0
+    ? Math.max(0, Math.min(100, Math.round((startup.hydratedTraceCount / startup.discoveredTraceCount) * 100)))
+    : 0;
   const headerStatus =
     isDayLoading && isWeekLoading && isYearLoading
-      ? warmingStatus || "Loading daily, week, year..."
+      ? "Loading daily, week, year..."
       : status;
+  const renderHydrationProgress = (title: string, ariaLabel: string): JSX.Element => (
+    <div className="activity-loading-state">
+      <div className="mono activity-loading-title">{title}</div>
+      <div className="mono activity-loading-copy">
+        {startup ? `Indexing history ${startup.hydratedTraceCount}/${startup.discoveredTraceCount}` : "Loading history"}
+      </div>
+      <div className="activity-progress activity-progress-inline" aria-label={`${title} loading progress`}>
+        <div
+          className="activity-progress-bar"
+          role="progressbar"
+          aria-label={ariaLabel}
+          aria-valuemin={0}
+          aria-valuemax={startup?.discoveredTraceCount ?? 0}
+          aria-valuenow={startup?.hydratedTraceCount ?? 0}
+          aria-valuetext={`${warmingProgressPct}% complete`}
+        >
+          <span className="activity-progress-fill" style={{ width: `${warmingProgressPct}%` }} />
+        </div>
+        <span className="mono activity-progress-label">{`${warmingProgressPct}%`}</span>
+      </div>
+    </div>
+  );
   const timelineStyle = useMemo(
     () =>
       ({
@@ -1200,6 +1222,10 @@ export function ActivityView({
               />
             ) : null}
           </section>
+        ) : !isHistoryReady ? (
+          <section className="activity-day-timeline activity-day-loading" aria-label="daily activity timeline loading">
+            {renderHydrationProgress("Daily Activity", "Daily activity hydration progress")}
+          </section>
         ) : isDayLoading ? (
           <section className="activity-day-timeline activity-day-loading" aria-label="daily activity timeline loading">
             <div className="activity-day-head">
@@ -1317,6 +1343,10 @@ export function ActivityView({
               />
             ) : null}
           </section>
+        ) : !isHistoryReady ? (
+          <section className="activity-week-heatmap activity-week-loading" aria-label="weekly activity heatmap loading">
+            {renderHydrationProgress("Weekly Activity", "Weekly activity hydration progress")}
+          </section>
         ) : isWeekLoading ? (
           <section className="activity-week-heatmap activity-week-loading" aria-label="weekly activity heatmap loading">
             <div className="activity-week-head">
@@ -1416,6 +1446,10 @@ export function ActivityView({
                 className="activity-summary-inline"
               />
             ) : null}
+          </section>
+        ) : !isHistoryReady ? (
+          <section className="activity-year-heatmap activity-year-loading" aria-label="yearly activity heatmap loading">
+            {renderHydrationProgress("Yearly Activity", "Yearly activity hydration progress")}
           </section>
         ) : isYearLoading ? (
           <section className="activity-year-heatmap activity-year-loading" aria-label="yearly activity heatmap loading">
