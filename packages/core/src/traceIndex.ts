@@ -45,6 +45,10 @@ const ACTIVITY_BIN_COUNT = 12;
 const ACTIVE_IDLE_GAP_MS = 20 * 60_000;
 const MATERIALIZED_TTL_MS = 5 * 60_000;
 const DIRTY_BATCH_LIMIT = 64;
+const DIRTY_REFRESH_DELAY_MS = 25;
+const WATCH_WRITE_STABILITY_MIN_MS = 35;
+const WATCH_WRITE_STABILITY_MAX_MS = 75;
+const WATCH_WRITE_POLL_INTERVAL_MS = 20;
 
 interface TraceEntry {
   file: DiscoveredTraceFile;
@@ -794,13 +798,17 @@ export class TraceIndex extends EventEmitter {
     if (roots.length === 0) return;
 
     const debounceMs = Math.max(50, this.config.scan.batchDebounceMs);
+    const writeStabilityMs = Math.max(
+      WATCH_WRITE_STABILITY_MIN_MS,
+      Math.min(WATCH_WRITE_STABILITY_MAX_MS, debounceMs),
+    );
     this.watcher = chokidar.watch(roots, {
       ignoreInitial: true,
       persistent: true,
       followSymlinks: false,
       awaitWriteFinish: {
-        stabilityThreshold: debounceMs,
-        pollInterval: 40,
+        stabilityThreshold: writeStabilityMs,
+        pollInterval: WATCH_WRITE_POLL_INTERVAL_MS,
       },
     });
 
@@ -821,7 +829,7 @@ export class TraceIndex extends EventEmitter {
         }
       }
       this.perf.dirtyPathQueue = this.dirtyPaths.size;
-      this.scheduleNextRefresh(debounceMs);
+      this.scheduleNextRefresh(DIRTY_REFRESH_DELAY_MS);
     };
     this.watcher.on("add", onDirty);
     this.watcher.on("change", onDirty);
