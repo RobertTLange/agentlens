@@ -29,6 +29,7 @@ export interface ActivityWeekHeatmapDayModel {
   dateLocal: string;
   dayLabel: string;
   totalSessionsInWindow: number;
+  heatmapValue: number;
   cells: ActivityWeekHeatmapCellModel[];
 }
 
@@ -330,6 +331,7 @@ export function buildActivityWeekHeatmapModel(week: AgentActivityWeek): Activity
       dateLocal: day.dateLocal,
       dayLabel,
       totalSessionsInWindow: day.totalSessionsInWindow,
+      heatmapValue: day.heatmapValue,
       cells,
     };
   });

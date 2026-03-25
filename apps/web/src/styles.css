@@ -1658,7 +1658,7 @@ body {
 }
 
 .activity-week-heatmap {
-  --activity-week-label-col: 104px;
+  --activity-week-label-col: 136px;
   --activity-week-row-gap: 8px;
   --activity-week-grid-pad: 6px;
   border: 1px solid #dbe5ef;
@@ -1749,15 +1749,39 @@ body {
   border: 1px solid transparent;
   background: #f8fafc;
   border-radius: 6px;
-  font-size: 0.62rem;
   color: #334155;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   width: 100%;
   text-align: left;
   padding: 4px 6px;
   cursor: pointer;
+  display: grid;
+  gap: 2px;
+  align-content: center;
+}
+
+.activity-week-day-date,
+.activity-week-day-metric {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-week-day-date {
+  font-size: 0.62rem;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.activity-week-day-metric {
+  font-size: 0.54rem;
+  line-height: 1.15;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: #64748b;
+}
+
+.activity-week-day-button.active .activity-week-day-metric {
+  color: #115e59;
 }
 
 .activity-week-day-button:hover {
@@ -2850,7 +2874,7 @@ body {
   }
 
   .activity-week-heatmap {
-    --activity-week-label-col: 86px;
+    --activity-week-label-col: 108px;
     --activity-week-row-gap: 6px;
     --activity-week-grid-pad: 5px;
   }
@@ -2869,8 +2893,15 @@ body {
   }
 
   .activity-week-day-button {
-    font-size: 0.56rem;
     padding: 3px 5px;
+  }
+
+  .activity-week-day-date {
+    font-size: 0.56rem;
+  }
+
+  .activity-week-day-metric {
+    font-size: 0.48rem;
   }
 
   .activity-week-summary-cards {
