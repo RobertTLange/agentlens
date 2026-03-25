@@ -75,6 +75,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Extract release notes from CHANGELOG
+        run: node scripts/release-notes.mjs "${{ steps.release_info.outputs.pkg_version }}" > release-notes.md
+
       - name: Create GitHub release
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -82,4 +85,4 @@ jobs:
           gh release create "${{ steps.release_info.outputs.tag }}" \
             --target "${GITHUB_SHA}" \
             --title "${{ steps.release_info.outputs.tag }}" \
-            --generate-notes
+            --notes-file release-notes.md
