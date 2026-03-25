@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 import type { AgentActivityWeek, AgentActivityYear } from "@agentlens/contracts";
 import {
+  buildLiveBatchEnvelope,
   createServer,
   extractCursorSessionIdsFromOpenPaths,
   extractOpenCodeSessionIdsFromLogContent,
@@ -246,6 +247,100 @@ async function buildFixtureWithCustomTrace(
 }
 
 describe("server api", () => {
+  it("coalesces bursty live deltas into one ordered batch envelope", async () => {
+    const original = buildTraceLog("server-session-burst", 1, true);
+    const updated = buildTraceLog("server-session-burst", 4, true);
+    const fixture = await buildFixtureWithCustomTrace(original, "server-session-burst");
+    const [initialSummary] = fixture.index.getSummaries();
+    if (!initialSummary) throw new Error("missing initial summary");
+
+    await writeFile(path.join(path.dirname(initialSummary.path), path.basename(initialSummary.path)), `${original}\n${updated}`, "utf8");
+    await fixture.index.refresh();
+    const [updatedSummary] = fixture.index.getSummaries();
+    if (!updatedSummary) throw new Error("missing updated summary");
+
+    const batch = buildLiveBatchEnvelope([
+      {
+        id: "1",
+        type: "trace_updated",
+        version: 1,
+        payload: { summary: { ...initialSummary, eventCount: 3, mtimeMs: initialSummary.mtimeMs + 1 } },
+      },
+      {
+        id: "2",
+        type: "trace_updated",
+        version: 2,
+        payload: { summary: updatedSummary },
+      },
+      {
+        id: "3",
+        type: "events_appended",
+        version: 3,
+        payload: {
+          id: updatedSummary.id,
+          appended: 1,
+          latestEvents: fixture.index.getTracePage(updatedSummary.id, { limit: 1 }).events,
+        },
+      },
+      {
+        id: "4",
+        type: "events_appended",
+        version: 4,
+        payload: {
+          id: updatedSummary.id,
+          appended: 2,
+          latestEvents: fixture.index.getTracePage(updatedSummary.id, { limit: 2 }).events,
+        },
+      },
+      {
+        id: "5",
+        type: "overview_updated",
+        version: 5,
+        payload: { overview: fixture.index.getOverview() },
+      },
+      {
+        id: "6",
+        type: "trace_removed",
+        version: 6,
+        payload: { id: updatedSummary.id },
+      },
+      {
+        id: "7",
+        type: "trace_updated",
+        version: 7,
+        payload: { summary: { ...updatedSummary, mtimeMs: updatedSummary.mtimeMs + 5 } },
+      },
+    ]);
+
+    expect(batch.type).toBe("batch");
+    expect(batch.payload.events.map((event) => event.type)).toEqual(["trace_updated", "events_appended", "overview_updated"]);
+
+    const finalTraceUpdate = batch.payload.events[0];
+    expect(finalTraceUpdate?.type).toBe("trace_updated");
+    if (finalTraceUpdate?.type !== "trace_updated") {
+      throw new Error("expected trace_updated envelope");
+    }
+    expect(finalTraceUpdate.payload.summary).toMatchObject({
+      id: updatedSummary.id,
+      eventCount: updatedSummary.eventCount,
+      mtimeMs: updatedSummary.mtimeMs + 5,
+    });
+
+    const appended = batch.payload.events[1];
+    expect(appended?.type).toBe("events_appended");
+    if (appended?.type !== "events_appended") {
+      throw new Error("expected events_appended envelope");
+    }
+    expect(appended.payload).toMatchObject({
+      id: updatedSummary.id,
+      appended: 3,
+    });
+    expect(appended.payload.latestEvents).toHaveLength(2);
+
+    expect(batch.payload.events[2]?.type).toBe("overview_updated");
+
+  });
+
   it("infers session cwd from both session_meta and session events", async () => {
     const codexDetail = {
       events: [{ rawType: "session_meta", raw: { payload: { cwd: " /tmp/codex " } } }],
