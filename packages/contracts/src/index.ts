@@ -233,6 +233,42 @@ export interface TracePage {
   liveCursor: string;
 }
 
+export type LiveDeltaType =
+  | "trace_added"
+  | "trace_updated"
+  | "trace_removed"
+  | "events_appended"
+  | "overview_updated";
+
+export interface LiveEnvelopeBase<TType extends string, TPayload> {
+  id: string;
+  type: TType;
+  version: number;
+  payload: TPayload;
+}
+
+export type TraceUpsertLiveEnvelope = LiveEnvelopeBase<
+  "trace_added" | "trace_updated",
+  { summary: TraceSummary }
+>;
+
+export type TraceRemovedLiveEnvelope = LiveEnvelopeBase<"trace_removed", { id: string }>;
+
+export type EventsAppendedLiveEnvelope = LiveEnvelopeBase<
+  "events_appended",
+  { id: string; appended: number; latestEvents?: NormalizedEvent[] }
+>;
+
+export type OverviewUpdatedLiveEnvelope = LiveEnvelopeBase<"overview_updated", { overview: OverviewStats }>;
+
+export type LiveDeltaEnvelope =
+  | TraceUpsertLiveEnvelope
+  | TraceRemovedLiveEnvelope
+  | EventsAppendedLiveEnvelope
+  | OverviewUpdatedLiveEnvelope;
+
+export type LiveBatchEnvelope = LiveEnvelopeBase<"batch", { events: LiveDeltaEnvelope[] }>;
+
 export interface AgentActivityBin {
   startMs: number;
   endMs: number;

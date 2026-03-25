@@ -7,7 +7,20 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
-import type { ActivityHeatmapMetric, AppConfig, SessionDetail, TraceSummary } from "@agentlens/contracts";
+import type {
+  ActivityHeatmapMetric,
+  AppConfig,
+  EventsAppendedLiveEnvelope,
+  LiveBatchEnvelope,
+  LiveDeltaEnvelope,
+  LiveDeltaType,
+  NormalizedEvent,
+  OverviewUpdatedLiveEnvelope,
+  SessionDetail,
+  TraceSummary,
+  TraceRemovedLiveEnvelope,
+  TraceUpsertLiveEnvelope,
+} from "@agentlens/contracts";
 import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
 import { buildAgentActivityDay, buildAgentActivityWeek, buildAgentActivityYear } from "./activity.js";
 import { ActivityResponseCache, DEFAULT_ACTIVITY_CACHE_TTL_MS } from "./activity-cache.js";
@@ -20,6 +33,7 @@ const DEFAULT_RECENT_TRACE_LIMIT = 50;
 const MAX_RECENT_TRACE_LIMIT = 5000;
 const MAX_TRACE_INPUT_TEXT_LENGTH = 2000;
 const ACTIVITY_HEATMAP_METRICS: ActivityHeatmapMetric[] = ["sessions", "output_tokens", "total_cost_usd"];
+const LIVE_STREAM_BATCH_FLUSH_MS = 64;
 
 type StopSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
 
@@ -128,6 +142,111 @@ interface TmuxClientInfo {
 interface SessionProcessResolution {
   matchedPids: number[];
   alivePids: number[];
+}
+
+function isLiveDeltaType(value: unknown): value is LiveDeltaType {
+  return value === "trace_added" ||
+    value === "trace_updated" ||
+    value === "trace_removed" ||
+    value === "events_appended" ||
+    value === "overview_updated";
+}
+
+function dedupeLatestEvents(events: NormalizedEvent[]): NormalizedEvent[] {
+  const seen = new Set<string>();
+  const deduped: NormalizedEvent[] = [];
+  for (const event of events) {
+    if (!event?.eventId || seen.has(event.eventId)) continue;
+    seen.add(event.eventId);
+    deduped.push(event);
+  }
+  return deduped;
+}
+
+export function buildLiveBatchEnvelope(envelopes: LiveDeltaEnvelope[]): LiveBatchEnvelope {
+  const traceEventById = new Map<
+    string,
+    { order: number; envelope: TraceUpsertLiveEnvelope | TraceRemovedLiveEnvelope }
+  >();
+  const appendEventById = new Map<string, { order: number; envelope: EventsAppendedLiveEnvelope }>();
+  let overviewEvent: { order: number; envelope: OverviewUpdatedLiveEnvelope } | undefined;
+  let nextOrder = 0;
+
+  for (const envelope of envelopes) {
+    if (!isLiveDeltaType(envelope.type)) continue;
+    if (envelope.type === "trace_added" || envelope.type === "trace_updated") {
+      const summary = envelope.payload.summary;
+      const existing = traceEventById.get(summary.id);
+      const order = existing?.order ?? nextOrder++;
+      const type = existing?.envelope.type === "trace_added" ? "trace_added" : envelope.type;
+      traceEventById.set(summary.id, {
+        order,
+        envelope: {
+          ...envelope,
+          type,
+          payload: { summary },
+        },
+      });
+      continue;
+    }
+    if (envelope.type === "trace_removed") {
+      const id = envelope.payload.id;
+      const existing = traceEventById.get(id);
+      traceEventById.set(id, {
+        order: existing?.order ?? nextOrder++,
+        envelope,
+      });
+      continue;
+    }
+    if (envelope.type === "events_appended") {
+      const id = envelope.payload.id;
+      const existing = appendEventById.get(id);
+      const latestEvents = dedupeLatestEvents([
+        ...(existing?.envelope.payload.latestEvents ?? []),
+        ...(envelope.payload.latestEvents ?? []),
+      ]);
+      const payload: EventsAppendedLiveEnvelope["payload"] = latestEvents.length > 0
+        ? {
+            id,
+            appended: (existing?.envelope.payload.appended ?? 0) + envelope.payload.appended,
+            latestEvents,
+          }
+        : {
+            id,
+            appended: (existing?.envelope.payload.appended ?? 0) + envelope.payload.appended,
+          };
+      appendEventById.set(id, {
+        order: existing?.order ?? nextOrder++,
+        envelope: {
+          ...envelope,
+          payload,
+        },
+      });
+      continue;
+    }
+    if (envelope.type === "overview_updated") {
+      overviewEvent = {
+        order: overviewEvent?.order ?? nextOrder++,
+        envelope,
+      };
+    }
+  }
+
+  const events = [
+    ...Array.from(traceEventById.values()),
+    ...Array.from(appendEventById.values()),
+    ...(overviewEvent ? [overviewEvent] : []),
+  ]
+    .sort((a, b) => a.order - b.order)
+    .map((entry) => entry.envelope);
+
+  const version = events.length > 0 ? Math.max(...events.map((event) => event.version)) : 0;
+  return {
+    id: String(version),
+    type: "batch",
+    version,
+    payload: { events },
+  };
 }
 
 export interface CreateServerOptions {
@@ -2398,17 +2517,43 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       })}\n\n`,
     );
 
+    let pendingDeltas: LiveDeltaEnvelope[] = [];
+    let flushTimer: NodeJS.Timeout | null = null;
+
+    const flushPending = (): void => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (pendingDeltas.length === 0) return;
+      const batch = buildLiveBatchEnvelope(pendingDeltas);
+      pendingDeltas = [];
+      if (batch.payload.events.length === 0) return;
+      reply.raw.write(`event: batch\ndata: ${JSON.stringify(batch)}\n\n`);
+    };
+
+    const scheduleFlush = (): void => {
+      if (flushTimer) return;
+      flushTimer = setTimeout(() => {
+        flushPending();
+      }, LIVE_STREAM_BATCH_FLUSH_MS);
+    };
+
     const onStream = ({ envelope }: { envelope: Record<string, unknown> }) => {
-      reply.raw.write(`event: ${String(envelope.type ?? "message")}\ndata: ${JSON.stringify(envelope)}\n\n`);
+      if (!isLiveDeltaType(envelope.type)) return;
+      pendingDeltas.push(envelope as unknown as LiveDeltaEnvelope);
+      scheduleFlush();
     };
 
     const heartbeat = setInterval(() => {
+      flushPending();
       reply.raw.write(`event: heartbeat\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
     }, 15000);
 
     traceIndex.on("stream", onStream);
 
     request.raw.on("close", () => {
+      flushPending();
       clearInterval(heartbeat);
       traceIndex.off("stream", onStream);
       reply.raw.end();
