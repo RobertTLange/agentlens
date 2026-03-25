@@ -307,24 +307,6 @@ function buildHeatmapPresentation(metric: ActivityHeatmapMetric, color: string):
   };
 }
 
-function resolveHeatmapMetricValue(summary: TraceSummary, metric: ActivityHeatmapMetric): number {
-  if (metric === "output_tokens") {
-    return sanitizeTokenValue(summary.tokenTotals?.outputTokens);
-  }
-  if (metric === "total_cost_usd") {
-    return sanitizeCostValue(summary.costEstimateUsd);
-  }
-  return 0;
-}
-
-function resolveAllHeatmapMetricValues(summary: TraceSummary): ActivityHeatmapMetricValues {
-  return {
-    sessions: 0,
-    output_tokens: resolveHeatmapMetricValue(summary, "output_tokens"),
-    total_cost_usd: resolveHeatmapMetricValue(summary, "total_cost_usd"),
-  };
-}
-
 function sumHeatmapMetricForBins(bins: AgentActivityBin[], metric: ActivityHeatmapMetric): number {
   return bins.reduce((sum, bin) => {
     if (metric === "sessions") return sum + (bin.heatmapValues?.sessions ?? bin.activeSessionCount);
@@ -339,19 +321,12 @@ function totalEventCountForBins(bins: AgentActivityBin[]): number {
 
 function finalizeUsageSummary(
   accumulator: ActivityUsageAccumulator,
-  summaryById: ReadonlyMap<string, TraceSummary>,
 ): ActivityUsageSummary {
   for (const agent of AGENT_KIND_KEYS) {
     const row = accumulator.usageByAgent.get(agent);
     const sessions = accumulator.uniqueSessionIdsByAgent.get(agent);
     if (!row || !sessions) continue;
     row.uniqueSessions = sessions.size;
-    for (const traceId of sessions) {
-      const tokenTotals = summaryById.get(traceId)?.tokenTotals;
-      row.inputTokens += sanitizeTokenValue(tokenTotals?.inputTokens);
-      row.cacheTokens += sanitizeTokenValue(tokenTotals?.cachedReadTokens) + sanitizeTokenValue(tokenTotals?.cachedCreateTokens);
-      row.outputTokens += sanitizeTokenValue(tokenTotals?.outputTokens);
-    }
   }
 
   const totalSessionHours = AGENT_KIND_KEYS.reduce((sum, agent) => sum + (accumulator.usageByAgent.get(agent)?.sessionHours ?? 0), 0);
@@ -375,6 +350,70 @@ function finalizeUsageSummary(
       mostUsedAgent: rows[0]?.agent ?? null,
     },
   };
+}
+
+function applyUsagePointToRow(
+  row: ActivityUsageSummaryRow,
+  point: {
+    inputTokens: number;
+    cachedReadTokens: number;
+    cachedCreateTokens: number;
+    outputTokens: number;
+  },
+): void {
+  row.inputTokens += sanitizeTokenValue(point.inputTokens);
+  row.cacheTokens += sanitizeTokenValue(point.cachedReadTokens) + sanitizeTokenValue(point.cachedCreateTokens);
+  row.outputTokens += sanitizeTokenValue(point.outputTokens);
+}
+
+function buildWeeklyUsageSummaryFromDays(
+  traceIndex: TraceIndex,
+  days: AgentActivityWeekDay[],
+): ActivityUsageSummary {
+  const accumulator = createUsageAccumulator();
+  const summaryById = new Map(traceIndex.getSummaries().map((summary) => [summary.id, summary]));
+
+  for (const day of days) {
+    const activeAgentsToday = new Set<AgentKind>();
+    for (const bin of day.bins) {
+      accumulator.peakAllAgentConcurrency = Math.max(accumulator.peakAllAgentConcurrency, bin.activeSessionCount);
+      const binHours = Math.max(0, bin.endMs - bin.startMs) / 3_600_000;
+      for (const agent of AGENT_KIND_KEYS) {
+        const agentSessionsInBin = bin.activeByAgent[agent] ?? 0;
+        if (agentSessionsInBin <= 0) continue;
+        const row = accumulator.usageByAgent.get(agent);
+        if (!row) continue;
+        row.sessionHours += agentSessionsInBin * binHours;
+        row.activeSlots += 1;
+        row.peakConcurrentSessions = Math.max(row.peakConcurrentSessions, agentSessionsInBin);
+        activeAgentsToday.add(agent);
+      }
+
+      for (const traceId of bin.activeTraceIds) {
+        accumulator.totalUniqueSessionIds.add(traceId);
+        const normalizedAgent = summaryById.get(traceId)?.agent ?? "unknown";
+        accumulator.uniqueSessionIdsByAgent.get(normalizedAgent)?.add(traceId);
+      }
+    }
+
+    for (const agent of activeAgentsToday) {
+      const row = accumulator.usageByAgent.get(agent);
+      if (!row) continue;
+      row.activeDays += 1;
+    }
+  }
+
+  for (const summary of summaryById.values()) {
+    const usageArtifacts = traceIndex.getSessionUsageArtifacts(summary.id);
+    const row = accumulator.usageByAgent.get(summary.agent);
+    if (!row) continue;
+    for (const point of usageArtifacts.usagePoints) {
+      if (!days.some((day) => point.timestampMs >= day.windowStartMs && point.timestampMs < day.windowEndMs)) continue;
+      applyUsagePointToRow(row, point);
+    }
+  }
+
+  return finalizeUsageSummary(accumulator);
 }
 
 function resolveSessionSpan(summary: TraceSummary): SessionSpan {
@@ -501,7 +540,6 @@ function computeWindowActivity(
       const detail = traceIndex.getSessionDetail(summary.id);
       const activityArtifacts = traceIndex.getSessionActivityArtifacts(summary.id);
       const activeSegments: SessionSpan[] = activityArtifacts.activeSegments;
-      const metricValues = resolveAllHeatmapMetricValues(summary);
 
       for (const segment of activeSegments) {
         if (segment.endMs < windowStartMs || segment.startMs >= windowEndMs) continue;
@@ -519,8 +557,6 @@ function computeWindowActivity(
             bin.activeSessionCount += 1;
             bin.activeByAgent[summary.agent] += 1;
             bin.heatmapValues ??= createEmptyHeatmapMetricValues();
-            bin.heatmapValues.output_tokens += metricValues.output_tokens;
-            bin.heatmapValues.total_cost_usd += metricValues.total_cost_usd;
             contributingSessionIds.add(summary.id);
           }
         }
@@ -534,6 +570,17 @@ function computeWindowActivity(
         if (!bin) continue;
         bin.eventCount += 1;
         bin.eventKindCounts[event.eventKind] += 1;
+      }
+
+      const usageArtifacts = traceIndex.getSessionUsageArtifacts(summary.id);
+      for (const point of usageArtifacts.usagePoints) {
+        if (point.timestampMs < windowStartMs || point.timestampMs >= windowEndMs) continue;
+        const binIndex = computeBinIndex(windowStartMs, binMs, binCount, point.timestampMs);
+        const bin = bins[binIndex];
+        if (!bin) continue;
+        bin.heatmapValues ??= createEmptyHeatmapMetricValues();
+        bin.heatmapValues.output_tokens += sanitizeTokenValue(point.outputTokens);
+        bin.heatmapValues.total_cost_usd += sanitizeCostValue(point.costUsd);
       }
     }
   }
@@ -871,6 +918,7 @@ export function buildAgentActivityWeek(
     startDateLocal,
     endDateLocal,
     days,
+    usageSummary: buildWeeklyUsageSummaryFromDays(traceIndex, days),
   };
 }
 
@@ -975,7 +1023,6 @@ export function buildAgentActivityYear(
     if (span.endMs < overallStartMs || span.startMs >= overallEndMs) continue;
 
     const activityArtifacts = traceIndex.getSessionActivityArtifacts(summary.id);
-    const summaryMetricValues = resolveAllHeatmapMetricValues(summary);
     let summaryContributed = false;
 
     for (const timestampMs of activityArtifacts.eventTimestamps) {
@@ -1003,7 +1050,6 @@ export function buildAgentActivityYear(
         const overlapEndExclusiveMs = Math.min(clampedEndExclusiveMs, dayState.windowEndMs);
         if (overlapEndExclusiveMs <= overlapStartMs) continue;
 
-        const wasAlreadyActiveToday = dayState.totalSessionIds.has(summary.id);
         dayState.totalSessionIds.add(summary.id);
         dayState.boundaryEvents.push({ atMs: overlapStartMs, delta: 1 });
         dayState.boundaryEvents.push({ atMs: overlapEndExclusiveMs, delta: -1 });
@@ -1018,16 +1064,28 @@ export function buildAgentActivityYear(
         for (let slotIndex = startSlotIndex; slotIndex <= endSlotIndex; slotIndex += 1) {
           dayState.agentSlotCounts[slotIndex]![summary.agent] += 1;
         }
-        if (!wasAlreadyActiveToday) {
-          dayState.heatmapValues.output_tokens += summaryMetricValues.output_tokens;
-          dayState.heatmapValues.total_cost_usd += summaryMetricValues.total_cost_usd;
-        }
       }
     }
 
     if (!summaryContributed) continue;
     usageAccumulator.totalUniqueSessionIds.add(summary.id);
     usageAccumulator.uniqueSessionIdsByAgent.get(summary.agent)?.add(summary.id);
+  }
+
+  for (const summary of summaryById.values()) {
+    const row = usageAccumulator.usageByAgent.get(summary.agent);
+    if (!row) continue;
+    const usageArtifacts = traceIndex.getSessionUsageArtifacts(summary.id);
+    for (const point of usageArtifacts.usagePoints) {
+      if (point.timestampMs < overallStartMs || point.timestampMs >= overallEndMs) continue;
+      const dayIndex = Math.floor((point.timestampMs - overallStartMs) / DAY_MS);
+      const dayState = dayStates[dayIndex];
+      if (!dayState) continue;
+      if (point.timestampMs < dayState.windowStartMs || point.timestampMs >= dayState.windowEndMs) continue;
+      dayState.heatmapValues.output_tokens += sanitizeTokenValue(point.outputTokens);
+      dayState.heatmapValues.total_cost_usd += sanitizeCostValue(point.costUsd);
+      applyUsagePointToRow(row, point);
+    }
   }
 
   const days: AgentActivityYearDay[] = dayStates.map((dayState) => {
@@ -1092,6 +1150,6 @@ export function buildAgentActivityYear(
     startDateLocal,
     endDateLocal,
     days,
-    usageSummary: finalizeUsageSummary(usageAccumulator, summaryById),
+    usageSummary: finalizeUsageSummary(usageAccumulator),
   };
 }

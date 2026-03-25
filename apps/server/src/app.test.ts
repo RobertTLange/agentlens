@@ -1359,8 +1359,85 @@ describe("server api", () => {
     });
     expect(payload.activity.presentation.palette).toHaveLength(5);
     expect(targetDay?.bins[0]?.heatmapValue).toBeCloseTo(60, 6);
-    expect(targetDay?.bins[1]?.heatmapValue).toBeCloseTo(60, 6);
-    expect(targetDay?.bins[2]?.heatmapValue).toBeCloseTo(60, 6);
+    expect(targetDay?.bins[1]?.heatmapValue).toBeCloseTo(0, 6);
+    expect(targetDay?.bins[2]?.heatmapValue).toBeCloseTo(0, 6);
+
+    await server.close();
+  }, 20_000);
+
+  it("builds weekly usage summaries from usage timestamps within the selected window", async () => {
+    const traceLog = [
+      JSON.stringify({
+        timestamp: "2026-02-11T06:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "weekly-usage-window", cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T06:00:00.000Z",
+        type: "turn_context",
+        payload: { model: "gpt-5.3-codex" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T06:05:00.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "within window" }] },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-11T09:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 120,
+              cached_input_tokens: 30,
+              output_tokens: 50,
+              reasoning_output_tokens: 0,
+              total_tokens: 200,
+            },
+            last_token_usage: {
+              input_tokens: 120,
+              cached_input_tokens: 30,
+              output_tokens: 50,
+              reasoning_output_tokens: 0,
+              total_tokens: 200,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-02-12T06:00:00.000Z",
+        type: "response_item",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "next day" }] },
+      }),
+    ].join("\n");
+    const fixture = await buildFixtureWithCustomTrace(traceLog, "weekly-usage-window");
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/activity/week?end_date=2026-02-12&tz_offset_min=0&day_count=2&slot_min=30&hour_start=6&hour_end=8",
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as { activity: AgentActivityWeek & { usageSummary: { rows: Array<{
+      agent: string;
+      inputTokens: number;
+      cacheTokens: number;
+      outputTokens: number;
+    }> } } };
+    const codexRow = payload.activity.usageSummary.rows.find((row) => row.agent === "codex");
+
+    expect(codexRow).toEqual(
+      expect.objectContaining({
+        inputTokens: 0,
+        cacheTokens: 0,
+        outputTokens: 0,
+      }),
+    );
 
     await server.close();
   }, 20_000);
@@ -1481,7 +1558,7 @@ describe("server api", () => {
     const firstDayCost = payload.activity.days[0]?.heatmapValue ?? 0;
     const secondDayCost = payload.activity.days[1]?.heatmapValue ?? 0;
     expect(firstDayCost).toBeCloseTo(0.0001, 6);
-    expect(secondDayCost).toBeCloseTo(0.0001, 6);
+    expect(secondDayCost).toBeCloseTo(0, 6);
 
     await server.close();
   }, 20_000);
