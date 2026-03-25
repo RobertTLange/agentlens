@@ -991,7 +991,10 @@ export function ActivityView({
     [activity, traceAgentById, traceTokenTotalsById],
   );
   const weeklyUsageSummary = useMemo(
-    () => (effectiveActivityWeek ? buildWeeklyUsageSummary(effectiveActivityWeek, traceAgentById, traceTokenTotalsById) : null),
+    () =>
+      effectiveActivityWeek
+        ? effectiveActivityWeek.usageSummary ?? buildWeeklyUsageSummary(effectiveActivityWeek, traceAgentById, traceTokenTotalsById)
+        : null,
     [effectiveActivityWeek, traceAgentById, traceTokenTotalsById],
   );
   const yearlyUsageSummary = effectiveActivityYear?.usageSummary ?? null;
