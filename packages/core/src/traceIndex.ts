@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import chokidar, { type FSWatcher } from "chokidar";
 import type {
+  ActivityHydrationProgress,
   ActivityBinsMode,
   AppConfig,
   EventKind,
@@ -647,6 +648,7 @@ export class TraceIndex extends EventEmitter {
   private config: AppConfig;
   private entries = new Map<string, TraceEntry>();
   private pathToId = new Map<string, string>();
+  private discoveredFilesById = new Map<string, DiscoveredTraceFile>();
   private cursorById = new Map<string, ParserCursorState>();
   private watcher: FSWatcher | null = null;
   private timer: NodeJS.Timeout | null = null;
@@ -763,6 +765,7 @@ export class TraceIndex extends EventEmitter {
     this.pendingHydrationIds.clear();
     this.pendingHydrationPaths.clear();
     this.pendingHydrationCursor = 0;
+    this.discoveredFilesById.clear();
   }
 
   async refresh(): Promise<void> {
@@ -792,6 +795,34 @@ export class TraceIndex extends EventEmitter {
     return this.getStartupStatus();
   }
 
+  getHydrationProgress(windowStartMs: number): ActivityHydrationProgress {
+    if (!this.startupStatus.inspectorReady) {
+      return {
+        ready: false,
+        relevantDiscoveredCount: 0,
+        relevantHydratedCount: 0,
+        percent: 0,
+      };
+    }
+    let relevantDiscoveredCount = 0;
+    let relevantHydratedCount = 0;
+    for (const file of this.discoveredFilesById.values()) {
+      if (file.mtimeMs < windowStartMs) continue;
+      relevantDiscoveredCount += 1;
+      if (!this.pendingHydrationIds.has(file.id)) {
+        relevantHydratedCount += 1;
+      }
+    }
+    const ready = relevantHydratedCount >= relevantDiscoveredCount;
+    const percent = relevantDiscoveredCount === 0 ? 100 : Math.round((relevantHydratedCount / relevantDiscoveredCount) * 100);
+    return {
+      ready,
+      relevantDiscoveredCount,
+      relevantHydratedCount,
+      percent,
+    };
+  }
+
   getTopTools(limit = 12): NamedCount[] {
     const counts = new Map<string, number>();
     for (const entry of this.entries.values()) {
@@ -812,10 +843,13 @@ export class TraceIndex extends EventEmitter {
     this.forceReparsePaths.clear();
 
     const nextPathToId = new Map<string, string>();
+    const discoveredFilesById = new Map<string, DiscoveredTraceFile>();
     for (const file of files) {
       nextPathToId.set(file.path, file.id);
+      discoveredFilesById.set(file.id, file);
     }
     this.pathToId = nextPathToId;
+    this.discoveredFilesById = discoveredFilesById;
 
     const bootstrapFiles = files.slice(0, STARTUP_RECENT_TRACE_LIMIT);
     const pendingFiles = files.slice(bootstrapFiles.length);
@@ -1182,13 +1216,17 @@ export class TraceIndex extends EventEmitter {
     this.pendingHydrationIds.clear();
     this.pendingHydrationPaths.clear();
     this.pendingHydrationCursor = 0;
+    this.discoveredFilesById.clear();
 
     const nextIds = new Set(files.map((file) => file.id));
     const nextPathToId = new Map<string, string>();
+    const discoveredFilesById = new Map<string, DiscoveredTraceFile>();
     for (const file of files) {
       nextPathToId.set(file.path, file.id);
+      discoveredFilesById.set(file.id, file);
     }
     this.pathToId = nextPathToId;
+    this.discoveredFilesById = discoveredFilesById;
 
     for (const existingId of this.entries.keys()) {
       if (!nextIds.has(existingId)) {
@@ -1249,15 +1287,18 @@ export class TraceIndex extends EventEmitter {
         }
         this.pendingHydrationPaths.delete(normalizedPath);
         this.pendingHydrationIds.delete(existingId ?? "");
+        if (existingId) this.discoveredFilesById.delete(existingId);
         this.pathToId.delete(normalizedPath);
         continue;
       }
 
       this.pathToId.set(file.path, file.id);
+      this.discoveredFilesById.set(file.id, file);
       if (existingId && existingId !== file.id && this.entries.delete(existingId)) {
         this.cursorById.delete(existingId);
         this.emitStream("trace_removed", { id: existingId });
         stats.hadFileMutations = true;
+        this.discoveredFilesById.delete(existingId);
       }
       if (processedIds.has(file.id)) {
         if (!dirtyEntry.forceReparse) continue;

@@ -247,6 +247,13 @@ export interface IndexStartupStatus {
 
 export type TraceIndexStartupState = IndexStartupStatus;
 
+export interface ActivityHydrationProgress {
+  ready: boolean;
+  relevantDiscoveredCount: number;
+  relevantHydratedCount: number;
+  percent: number;
+}
+
 export type LiveDeltaType =
   | "trace_added"
   | "trace_updated"

@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -142,6 +142,8 @@ describe("trace index", () => {
     for (let traceIndex = 0; traceIndex < 130; traceIndex += 1) {
       const tracePath = path.join(codexDir, `bootstrap-${String(traceIndex).padStart(3, "0")}.jsonl`);
       await writeFile(tracePath, buildCodexTraceLog(`bootstrap-${traceIndex}`, traceIndex), "utf8");
+      const mtime = new Date(Date.UTC(2026, 1, 11, 10, 0, 0) + (130 - traceIndex) * 1_000);
+      await utimes(tracePath, mtime, mtime);
     }
 
     const config = mergeConfig({
@@ -189,6 +191,16 @@ describe("trace index", () => {
       expect(startup.discoveredTraceCount).toBe(130);
       expect(startup.hydratedTraceCount).toBeLessThan(130);
       expect(index.getSummaries()).toHaveLength(startup.hydratedTraceCount);
+      const allProgress = index.getHydrationProgress(0);
+      expect(allProgress).toEqual({
+        ready: false,
+        relevantDiscoveredCount: 130,
+        relevantHydratedCount: startup.hydratedTraceCount,
+        percent: Math.round((startup.hydratedTraceCount / 130) * 100),
+      });
+      const newestHydratedMtime = Math.min(...index.getSummaries().map((summary) => summary.mtimeMs));
+      const newestWindowProgress = index.getHydrationProgress(newestHydratedMtime);
+      expect(newestWindowProgress.ready).toBe(true);
 
       await waitForCondition(() => {
         const ready = index.getStartupState();

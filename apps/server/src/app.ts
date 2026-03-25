@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import type {
+  ActivityHydrationProgress,
   ActivityHeatmapMetric,
   AppConfig,
   EventsAppendedLiveEnvelope,
@@ -23,7 +24,14 @@ import type {
   TraceUpsertLiveEnvelope,
 } from "@agentlens/contracts";
 import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
-import { buildAgentActivityDay, buildAgentActivityWeek, buildAgentActivityYear } from "./activity.js";
+import {
+  buildAgentActivityDay,
+  buildAgentActivityWeek,
+  buildAgentActivityYear,
+  resolveAgentActivityDayWindow,
+  resolveAgentActivityWeekWindow,
+  resolveAgentActivityYearWindow,
+} from "./activity.js";
 import { ActivityResponseCache, DEFAULT_ACTIVITY_CACHE_TTL_MS } from "./activity-cache.js";
 
 const execFileAsync = promisify(execFile);
@@ -311,6 +319,13 @@ function parseActivityHeatmapColor(rawValue: string | undefined): string | undef
     return trimmed.toLowerCase();
   }
   return undefined;
+}
+
+function buildActivityWarmingResponse(progress: ActivityHydrationProgress): { warming: true; progress: ActivityHydrationProgress } {
+  return {
+    warming: true,
+    progress,
+  };
 }
 
 function decodeBase64UrlUtf8(value: string): string {
@@ -2197,9 +2212,14 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
     try {
       const startup = traceIndex.getStartupStatus();
-      if (!startup.fullReady) {
+      if (!startup.inspectorReady) {
         reply.code(503);
-        return { warming: true, startup };
+        return buildActivityWarmingResponse({
+          ready: false,
+          relevantDiscoveredCount: 0,
+          relevantHydratedCount: 0,
+          percent: 0,
+        });
       }
       const activityOptions = {
         ...(query.date !== undefined ? { dateLocal: query.date } : {}),
@@ -2209,6 +2229,11 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         cache: activityCache,
         cacheVersion: traceIndex.getStreamVersion(),
       };
+      const progress = traceIndex.getHydrationProgress(resolveAgentActivityDayWindow(activityOptions).windowStartMs);
+      if (!progress.ready) {
+        reply.code(503);
+        return buildActivityWarmingResponse(progress);
+      }
       const activity = buildAgentActivityDay(traceIndex, activityOptions);
       return { activity };
     } catch (error) {
@@ -2231,9 +2256,14 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
     try {
       const startup = traceIndex.getStartupStatus();
-      if (!startup.fullReady) {
+      if (!startup.inspectorReady) {
         reply.code(503);
-        return { warming: true, startup };
+        return buildActivityWarmingResponse({
+          ready: false,
+          relevantDiscoveredCount: 0,
+          relevantHydratedCount: 0,
+          percent: 0,
+        });
       }
       const heatmapMetric = parseActivityHeatmapMetric(query.metric);
       const heatmapColor = parseActivityHeatmapColor(query.color);
@@ -2249,6 +2279,11 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         cache: activityCache,
         cacheVersion: traceIndex.getStreamVersion(),
       };
+      const progress = traceIndex.getHydrationProgress(resolveAgentActivityWeekWindow(activityOptions).windowStartMs);
+      if (!progress.ready) {
+        reply.code(503);
+        return buildActivityWarmingResponse(progress);
+      }
       const activity = buildAgentActivityWeek(traceIndex, activityOptions);
       return { activity };
     } catch (error) {
@@ -2268,9 +2303,14 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
     try {
       const startup = traceIndex.getStartupStatus();
-      if (!startup.fullReady) {
+      if (!startup.inspectorReady) {
         reply.code(503);
-        return { warming: true, startup };
+        return buildActivityWarmingResponse({
+          ready: false,
+          relevantDiscoveredCount: 0,
+          relevantHydratedCount: 0,
+          percent: 0,
+        });
       }
       const heatmapMetric = parseActivityHeatmapMetric(query.metric);
       const heatmapColor = parseActivityHeatmapColor(query.color);
@@ -2283,6 +2323,11 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         cache: activityCache,
         cacheVersion: traceIndex.getStreamVersion(),
       };
+      const progress = traceIndex.getHydrationProgress(resolveAgentActivityYearWindow(activityOptions).windowStartMs);
+      if (!progress.ready) {
+        reply.code(503);
+        return buildActivityWarmingResponse(progress);
+      }
       const activity = buildAgentActivityYear(traceIndex, activityOptions);
       return { activity };
     } catch (error) {

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
-import type { AgentActivityWeek, AgentActivityYear, IndexStartupStatus } from "@agentlens/contracts";
+import type { ActivityHydrationProgress, AgentActivityWeek, AgentActivityYear, IndexStartupStatus } from "@agentlens/contracts";
 import {
   buildLiveBatchEnvelope,
   createServer,
@@ -1836,6 +1836,13 @@ describe("server api", () => {
       startupError: "",
     };
     const startupSpy = vi.spyOn(fixture.index, "getStartupStatus").mockReturnValue(startupState);
+    const dayProgress: ActivityHydrationProgress = {
+      ready: false,
+      relevantDiscoveredCount: 240,
+      relevantHydratedCount: 120,
+      percent: 50,
+    };
+    const progressSpy = vi.spyOn(fixture.index, "getHydrationProgress").mockReturnValue(dayProgress);
 
     const server = await createServer({
       traceIndex: fixture.index,
@@ -1862,10 +1869,106 @@ describe("server api", () => {
       expect(day.statusCode).toBe(503);
       expect(day.json()).toEqual({
         warming: true,
-        startup: startupState,
+        progress: dayProgress,
+      });
+
+      const year = await server.inject({
+        method: "GET",
+        url: "/api/activity/year?end_date=2026-02-11&tz_offset_min=0&day_count=365",
+      });
+      expect(year.statusCode).toBe(503);
+      expect(year.json()).toEqual({
+        warming: true,
+        progress: dayProgress,
       });
     } finally {
+      progressSpy.mockRestore();
       startupSpy.mockRestore();
+      fixture.index.stop();
+      await server.close();
+    }
+  });
+
+  it("keeps activity warming until inspector bootstrap metadata is ready", async () => {
+    const fixture = await buildFixture();
+    const startupState: IndexStartupStatus = {
+      phase: "bootstrapping",
+      inspectorReady: false,
+      fullReady: false,
+      isPartial: false,
+      discoveredTraceCount: 0,
+      hydratedTraceCount: 0,
+      startupError: "",
+    };
+    const startupSpy = vi.spyOn(fixture.index, "getStartupStatus").mockReturnValue(startupState);
+    const progressSpy = vi.spyOn(fixture.index, "getHydrationProgress").mockReturnValue({
+      ready: true,
+      relevantDiscoveredCount: 12,
+      relevantHydratedCount: 12,
+      percent: 100,
+    });
+
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    try {
+      const day = await server.inject({
+        method: "GET",
+        url: "/api/activity/day?date=2026-02-11&tz_offset_min=0&bin_min=5&break_min=10",
+      });
+      expect(day.statusCode).toBe(503);
+      expect(day.json()).toEqual({
+        warming: true,
+        progress: {
+          ready: false,
+          relevantDiscoveredCount: 0,
+          relevantHydratedCount: 0,
+          percent: 0,
+        },
+      });
+    } finally {
+      progressSpy.mockRestore();
+      startupSpy.mockRestore();
+      fixture.index.stop();
+      await server.close();
+    }
+  });
+
+  it("allows day activity to load before slower year hydration completes", async () => {
+    const fixture = await buildFixture();
+    const progressSpy = vi.spyOn(fixture.index, "getHydrationProgress").mockImplementation((windowStartMs) =>
+      windowStartMs >= Date.UTC(2026, 1, 11, 7, 0, 0)
+        ? { ready: true, relevantDiscoveredCount: 12, relevantHydratedCount: 12, percent: 100 }
+        : { ready: false, relevantDiscoveredCount: 240, relevantHydratedCount: 120, percent: 50 }
+    );
+
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    try {
+      const day = await server.inject({
+        method: "GET",
+        url: "/api/activity/day?date=2026-02-11&tz_offset_min=0&bin_min=5&break_min=10",
+      });
+      expect(day.statusCode).toBe(200);
+
+      const year = await server.inject({
+        method: "GET",
+        url: "/api/activity/year?end_date=2026-02-11&tz_offset_min=0&day_count=365",
+      });
+      expect(year.statusCode).toBe(503);
+      expect(year.json()).toEqual({
+        warming: true,
+        progress: { ready: false, relevantDiscoveredCount: 240, relevantHydratedCount: 120, percent: 50 },
+      });
+    } finally {
+      progressSpy.mockRestore();
       fixture.index.stop();
       await server.close();
     }
