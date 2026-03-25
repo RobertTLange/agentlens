@@ -170,6 +170,7 @@ describe("activity week heatmap model", () => {
 
     expect(model.presentation.metric).toBe("output_tokens");
     expect(model.maxHeatmapValue).toBe(100);
+    expect(model.days[0]?.heatmapValue).toBe(3);
     expect(model.days[0]?.cells[0]).toMatchObject({ heatmapValue: 10, level: 1 });
     expect(model.days[0]?.cells[1]).toMatchObject({ heatmapValue: 50, level: 2 });
     expect(model.days[1]?.cells[0]).toMatchObject({ heatmapValue: 100, level: 4 });
