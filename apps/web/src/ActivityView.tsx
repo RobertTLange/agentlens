@@ -85,6 +85,10 @@ interface ActivityViewProps {
   onInspectTrace?: (traceId: string) => void;
   traceAgentById?: Readonly<Record<string, AgentKind>>;
   traceTokenTotalsById?: Readonly<Record<string, TraceTokenTotalsSnapshot | undefined>>;
+  selectedHeatmapMetric?: ActivityHeatmapMetric | null;
+  selectedHeatmapColor?: string | null;
+  onSelectHeatmapMetric?: (metric: ActivityHeatmapMetric | null) => void;
+  onSelectHeatmapColor?: (color: string | null) => void;
 }
 
 function formatLocalDateString(date: Date): string {
@@ -217,6 +221,12 @@ function weekDayHeatmapSummary(day: { totalSessionsInWindow: number; heatmapValu
     return formatCompactNumber(day.totalSessionsInWindow);
   }
   return formatHeatmapMetricValue(metric, day.heatmapValue ?? 0);
+}
+
+function weekDayHeatmapLabel(metric: ActivityHeatmapMetric): string {
+  if (metric === "output_tokens") return "out tokens";
+  if (metric === "total_cost_usd") return "cost";
+  return "sessions";
 }
 
 function heatmapPaletteStyle(palette: readonly string[]): CSSProperties {
@@ -612,6 +622,10 @@ export function ActivityView({
   onInspectTrace,
   traceAgentById,
   traceTokenTotalsById,
+  selectedHeatmapMetric: controlledSelectedHeatmapMetric,
+  selectedHeatmapColor: controlledSelectedHeatmapColor,
+  onSelectHeatmapMetric,
+  onSelectHeatmapColor,
 }: ActivityViewProps): JSX.Element {
   const dayRequestSeqRef = useRef(0);
   const weekRequestSeqRef = useRef(0);
@@ -633,8 +647,6 @@ export function ActivityView({
   const [isYearSummaryExpanded, setIsYearSummaryExpanded] = useState(false);
   const [defaultHeatmapMetric, setDefaultHeatmapMetric] = useState<ActivityHeatmapMetric>("sessions");
   const [defaultHeatmapColor, setDefaultHeatmapColor] = useState(DEFAULT_HEATMAP_COLOR);
-  const [selectedHeatmapMetric, setSelectedHeatmapMetric] = useState<ActivityHeatmapMetric | null>(null);
-  const [selectedHeatmapColor, setSelectedHeatmapColor] = useState<string | null>(null);
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
   const [dayError, setDayError] = useState("");
   const [weekError, setWeekError] = useState("");
@@ -651,23 +663,23 @@ export function ActivityView({
     [todayDateLocal],
   );
 
-  const displayedHeatmapMetric = selectedHeatmapMetric ?? defaultHeatmapMetric;
-  const displayedHeatmapColor = selectedHeatmapColor ?? defaultHeatmapColor;
+  const displayedHeatmapMetric = controlledSelectedHeatmapMetric ?? defaultHeatmapMetric;
+  const displayedHeatmapColor = controlledSelectedHeatmapColor ?? defaultHeatmapColor;
 
   const handleHeatmapMetricChange = useCallback(
     (metric: ActivityHeatmapMetric): void => {
-      setSelectedHeatmapMetric(metric === defaultHeatmapMetric ? null : metric);
+      onSelectHeatmapMetric?.(metric === defaultHeatmapMetric ? null : metric);
     },
-    [defaultHeatmapMetric],
+    [defaultHeatmapMetric, onSelectHeatmapMetric],
   );
 
   const handleHeatmapColorChange = useCallback(
     (color: string): void => {
       const normalizedColor = normalizeHeatmapColor(color);
-      setSelectedHeatmapColor(normalizedColor === defaultHeatmapColor ? null : normalizedColor);
+      onSelectHeatmapColor?.(normalizedColor === defaultHeatmapColor ? null : normalizedColor);
       setIsColorPickerOpen(false);
     },
-    [defaultHeatmapColor],
+    [defaultHeatmapColor, onSelectHeatmapColor],
   );
 
   const abortInFlightRequest = useCallback((ref: MutableRefObject<AbortController | null>): void => {
@@ -1205,7 +1217,10 @@ export function ActivityView({
                       }}
                       title={`Show Daily Activity for ${day.dateLocal}`}
                     >
-                      {`${day.dayLabel} · ${weekDayHeatmapSummary(day, weekModel.presentation.metric)}`}
+                      <span className="activity-week-day-date">{day.dayLabel}</span>
+                      <span className="activity-week-day-metric">
+                        {`${weekDayHeatmapLabel(weekModel.presentation.metric)} ${weekDayHeatmapSummary(day, weekModel.presentation.metric)}`}
+                      </span>
                     </button>
                     <div
                       className="activity-week-row-cells"

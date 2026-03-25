@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
-import type { EventKind, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
+import type { ActivityHeatmapMetric, EventKind, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
 import {
   buildTimelineStripSegments,
   classForKind,
@@ -317,6 +317,8 @@ export function App(): JSX.Element {
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
   const [activeView, setActiveView] = useState<"inspector" | "activity">("inspector");
+  const [selectedHeatmapMetric, setSelectedHeatmapMetric] = useState<ActivityHeatmapMetric | null>(null);
+  const [selectedHeatmapColor, setSelectedHeatmapColor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [showOlderTraces, setShowOlderTraces] = useState(false);
   const [olderTraceRenderLimit, setOlderTraceRenderLimit] = useState(OLDER_TRACE_PAGE_SIZE);
@@ -2128,6 +2130,10 @@ export function App(): JSX.Element {
         <ActivityView
           traceAgentById={traceAgentById}
           traceTokenTotalsById={traceTokenTotalsById}
+          selectedHeatmapMetric={selectedHeatmapMetric}
+          selectedHeatmapColor={selectedHeatmapColor}
+          onSelectHeatmapMetric={setSelectedHeatmapMetric}
+          onSelectHeatmapColor={setSelectedHeatmapColor}
           onInspectTrace={(traceId) => {
             setSelectedId(traceId);
             setActiveView("inspector");
