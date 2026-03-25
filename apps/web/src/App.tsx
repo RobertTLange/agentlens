@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
-import type { ActivityHeatmapMetric, EventKind, OverviewStats, TracePage, TraceSummary } from "@agentlens/contracts";
+import type {
+  ActivityHeatmapMetric,
+  EventKind,
+  LiveBatchEnvelope,
+  LiveDeltaEnvelope,
+  OverviewStats,
+  TracePage,
+  TraceSummary,
+} from "@agentlens/contracts";
 import {
   buildTimelineStripSegments,
   classForKind,
@@ -35,6 +43,8 @@ const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 const PRIMARY_RECENT_SESSION_COUNT = 20;
 const OLDER_TRACE_PAGE_SIZE = 40;
+const EVENT_APPEND_REVEAL_CHUNK_SIZE = 4;
+const EVENT_APPEND_REVEAL_INTERVAL_MS = 48;
 const EVENT_KIND_OPTIONS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"];
 const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
   system: "system",
@@ -240,6 +250,23 @@ function appendLatestEventsToTracePage(page: TracePage, latestEvents: TracePage[
   };
 }
 
+function isLiveDeltaEnvelope(value: unknown): value is LiveDeltaEnvelope {
+  if (!value || typeof value !== "object") return false;
+  const type = (value as { type?: unknown }).type;
+  return type === "trace_added" ||
+    type === "trace_updated" ||
+    type === "trace_removed" ||
+    type === "events_appended" ||
+    type === "overview_updated";
+}
+
+function readLiveDeltaBatch(value: unknown): LiveDeltaEnvelope[] {
+  if (!value || typeof value !== "object") return [];
+  const events = (value as LiveBatchEnvelope["payload"]).events;
+  if (!Array.isArray(events)) return [];
+  return events.filter(isLiveDeltaEnvelope);
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { cache: "no-store", ...init });
   if (!response.ok) {
@@ -350,6 +377,7 @@ export function App(): JSX.Element {
   const [eventsPinnedToLatest, setEventsPinnedToLatest] = useState(true);
   const [inspectorPendingAppendCount, setInspectorPendingAppendCount] = useState(0);
   const selectedIdRef = useRef("");
+  const tracesRef = useRef<TraceSummary[]>([]);
   const eventTypeFilterRef = useRef<HTMLDivElement | null>(null);
   const timelineStripRef = useRef<HTMLDivElement | null>(null);
   const eventsScrollRef = useRef<HTMLDivElement | null>(null);
@@ -369,6 +397,7 @@ export function App(): JSX.Element {
   const previousPageEventIdsRef = useRef<Set<string>>(new Set());
   const queuedEventIdsRef = useRef<string[]>([]);
   const queuedEventFlushRafRef = useRef<number | null>(null);
+  const queuedEventFlushTimerRef = useRef<number | null>(null);
   const enterAnimationTimerByTraceIdRef = useRef<Map<string, number>>(new Map());
   const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
   const flashStatusFadeTimerRef = useRef<number | null>(null);
@@ -655,6 +684,10 @@ export function App(): JSX.Element {
       window.cancelAnimationFrame(queuedEventFlushRafRef.current);
       queuedEventFlushRafRef.current = null;
     }
+    if (queuedEventFlushTimerRef.current !== null) {
+      window.clearTimeout(queuedEventFlushTimerRef.current);
+      queuedEventFlushTimerRef.current = null;
+    }
     queuedEventIdsRef.current = [];
     setInspectorPendingAppendCount((value) => (value === 0 ? value : 0));
   }, []);
@@ -678,12 +711,18 @@ export function App(): JSX.Element {
   }, []);
 
   const flushQueuedEvents = useCallback((): void => {
-    if (queuedEventIdsRef.current.length === 0) {
-      return;
+    if (queuedEventFlushRafRef.current !== null) {
+      window.cancelAnimationFrame(queuedEventFlushRafRef.current);
+      queuedEventFlushRafRef.current = null;
     }
-    const queued = queuedEventIdsRef.current;
-    queuedEventIdsRef.current = [];
-    setInspectorPendingAppendCount((value) => (value === 0 ? value : 0));
+    if (queuedEventFlushTimerRef.current !== null) {
+      window.clearTimeout(queuedEventFlushTimerRef.current);
+      queuedEventFlushTimerRef.current = null;
+    }
+    if (queuedEventIdsRef.current.length === 0) return;
+    const queued = queuedEventIdsRef.current.splice(0, EVENT_APPEND_REVEAL_CHUNK_SIZE);
+    const remainingCount = queuedEventIdsRef.current.length;
+    setInspectorPendingAppendCount((value) => (value === remainingCount ? value : remainingCount));
     setVisibleEventIds((prev) => {
       const next = new Set(prev);
       for (const eventId of queued) next.add(eventId);
@@ -697,6 +736,15 @@ export function App(): JSX.Element {
     for (const eventId of queued) {
       scheduleEventEnterAnimationCleanup(eventId);
     }
+    if (queuedEventIdsRef.current.length > 0) {
+      queuedEventFlushTimerRef.current = window.setTimeout(() => {
+        queuedEventFlushTimerRef.current = null;
+        queuedEventFlushRafRef.current = window.requestAnimationFrame(() => {
+          queuedEventFlushRafRef.current = null;
+          flushQueuedEvents();
+        });
+      }, EVENT_APPEND_REVEAL_INTERVAL_MS);
+    }
   }, [scheduleEventEnterAnimationCleanup]);
 
   const enqueueEventsForAppendReveal = useCallback(
@@ -708,7 +756,7 @@ export function App(): JSX.Element {
         queuedEventIdSet.add(eventId);
         queuedEventIdsRef.current.push(eventId);
       }
-      if (queuedEventFlushRafRef.current !== null) return;
+      if (queuedEventFlushRafRef.current !== null || queuedEventFlushTimerRef.current !== null) return;
       queuedEventFlushRafRef.current = window.requestAnimationFrame(() => {
         queuedEventFlushRafRef.current = null;
         flushQueuedEvents();
@@ -805,6 +853,10 @@ export function App(): JSX.Element {
     setShowOlderTraces(true);
     setOlderTraceRenderLimit((prev) => Math.min(prev + OLDER_TRACE_PAGE_SIZE, olderTraces.length));
   }, [olderTraces.length]);
+
+  useEffect(() => {
+    tracesRef.current = traces;
+  }, [traces]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -947,6 +999,7 @@ export function App(): JSX.Element {
           fetchJson<{ traces: TraceSummary[] }>(`${API}/api/traces?limit=${RECENT_TRACE_LIMIT}`),
         ]);
         const sorted = limitRecentTraces(tracesResp.traces.map(applyManualStopOverride));
+        tracesRef.current = sorted;
         setOverview(overviewResp.overview);
         setTraces(sorted);
         setSelectedId((prev) => {
@@ -960,73 +1013,10 @@ export function App(): JSX.Element {
       }
     };
 
-    void loadBoot();
-
-    const source = new EventSource(`${API}/api/stream?limit=${RECENT_TRACE_LIMIT}`);
-
-    source.addEventListener("snapshot", (event) => {
-      try {
-        const data = JSON.parse((event as MessageEvent).data) as {
-          payload?: { traces?: TraceSummary[]; overview?: OverviewStats };
-        };
-        const nextTraces = limitRecentTraces((data.payload?.traces ?? []).map(applyManualStopOverride));
-        if (nextTraces.length > 0) {
-          setTraces(nextTraces);
-          setSelectedId((prev) => prev || nextTraces[0]?.id || "");
-        }
-        if (data.payload?.overview) setOverview(data.payload.overview);
-        setStatus(`Live: ${nextTraces.length} traces`);
-        setLastLiveUpdateMs(Date.now());
-      } catch {
-        setStatus("Live update parse error");
-      }
-    });
-
-    const upsert = (summary: TraceSummary): void => {
-      const patchedSummary = applyManualStopOverride(summary);
-      setTraces((prev) => {
-        const next = [...prev];
-        const index = next.findIndex((item) => item.id === patchedSummary.id);
-        if (index >= 0) {
-          next[index] = patchedSummary;
-        } else {
-          next.push(patchedSummary);
-        }
-        return limitRecentTraces(next);
-      });
-      setSelectedId((prev) => prev || patchedSummary.id);
-    };
-
-    source.addEventListener("trace_added", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as { payload?: { summary?: TraceSummary } };
-      if (data.payload?.summary) {
-        upsert(data.payload.summary);
-        setLastLiveUpdateMs(Date.now());
-        bumpPulse(data.payload.summary.id);
-      }
-    });
-
-    source.addEventListener("trace_updated", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as { payload?: { summary?: TraceSummary } };
-      const summary = data.payload?.summary;
-      if (summary) {
-        upsert(summary);
-        if (summary.id === selectedIdRef.current) {
-          setPage((prev) => (prev && prev.summary.id === summary.id ? { ...prev, summary } : prev));
-        }
-        setLastLiveUpdateMs(Date.now());
-        bumpPulse(summary.id);
-      }
-    });
-
-    source.addEventListener("trace_removed", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as { payload?: { id?: string } };
-      const id = data.payload?.id;
+    const clearRemovedTraceState = (id: string): void => {
       if (!id) return;
       delete manualStopAtByTraceIdRef.current[id];
       removeTracePageCacheEntries(tracePageCacheRef.current, id);
-      setTraces((prev) => prev.filter((trace) => trace.id !== id));
-      setSelectedId((prev) => (prev === id ? "" : prev));
       removeTraceRow(id);
       setEnteringTraceIds((prev) => {
         if (!prev.has(id)) return prev;
@@ -1087,42 +1077,170 @@ export function App(): JSX.Element {
         delete next[id];
         return next;
       });
-      setLastLiveUpdateMs(Date.now());
-    });
+      setPage((prev) => (prev?.summary.id === id ? null : prev));
+    };
 
-    source.addEventListener("overview_updated", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as { payload?: { overview?: OverviewStats } };
-      if (data.payload?.overview) {
-        setOverview(data.payload.overview);
-        setLastLiveUpdateMs(Date.now());
-      }
-    });
+    const applyLiveDeltas = (deltas: LiveDeltaEnvelope[]): void => {
+      if (deltas.length === 0) return;
 
-    source.addEventListener("events_appended", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as {
-        payload?: { id?: string; appended?: number; latestEvents?: TracePage["events"] };
-      };
-      const payload = data.payload;
-      if (payload?.id && payload.id === selectedIdRef.current) {
-        setLastLiveUpdateMs(Date.now());
-        if ((payload.latestEvents?.length ?? 0) > 0) {
-          setPage((prev) => (prev && prev.summary.id === payload.id ? appendLatestEventsToTracePage(prev, payload.latestEvents ?? []) : prev));
-          for (const includeMeta of [false, true]) {
-            const cacheKey = buildTracePageCacheKey(payload.id, includeMeta);
-            const cached = tracePageCacheRef.current.get(cacheKey);
-            if (!cached) continue;
-            const nextPage = appendLatestEventsToTracePage(cached.page, payload.latestEvents ?? []);
-            upsertTracePageCache(tracePageCacheRef.current, cacheKey, {
-              page: nextPage,
-              summaryStamp: buildTraceSummaryStamp(nextPage.summary),
-            });
+      const nextTraceMap = new Map(tracesRef.current.map((trace) => [trace.id, trace] as const));
+      const removedIds = new Set<string>();
+      const pulseTraceIds = new Set<string>();
+      const selectedSummaryById = new Map<string, TraceSummary>();
+      const latestEventsByTraceId = new Map<string, TracePage["events"]>();
+      let latestOverview: OverviewStats | null = null;
+      let tracesChanged = false;
+      let needsSelectedRefetch = false;
+
+      for (const delta of deltas) {
+        if (delta.type === "trace_added" || delta.type === "trace_updated") {
+          const patchedSummary = applyManualStopOverride(delta.payload.summary);
+          nextTraceMap.set(patchedSummary.id, patchedSummary);
+          removedIds.delete(patchedSummary.id);
+          pulseTraceIds.add(patchedSummary.id);
+          selectedSummaryById.set(patchedSummary.id, patchedSummary);
+          tracesChanged = true;
+          continue;
+        }
+        if (delta.type === "trace_removed") {
+          removedIds.add(delta.payload.id);
+          tracesChanged = nextTraceMap.delete(delta.payload.id) || tracesChanged;
+          continue;
+        }
+        if (delta.type === "events_appended") {
+          const traceId = delta.payload.id;
+          if (traceId !== selectedIdRef.current) continue;
+          const mergedLatestEvents = [
+            ...(latestEventsByTraceId.get(traceId) ?? []),
+            ...(delta.payload.latestEvents ?? []),
+          ];
+          if (mergedLatestEvents.length > 0) {
+            latestEventsByTraceId.set(traceId, mergedLatestEvents);
+          } else if (delta.payload.appended > 0) {
+            needsSelectedRefetch = true;
           }
+          continue;
         }
-        if ((payload.appended ?? 0) > 0) {
-          setLiveTick((value) => value + 1);
+        if (delta.type === "overview_updated") {
+          latestOverview = delta.payload.overview;
         }
       }
+
+      for (const id of removedIds) {
+        clearRemovedTraceState(id);
+      }
+
+      const dedupedLatestEventsByTraceId = new Map<string, TracePage["events"]>();
+      for (const [traceId, events] of latestEventsByTraceId) {
+        const eventById = new Map(events.map((event) => [event.eventId, event] as const));
+        dedupedLatestEventsByTraceId.set(traceId, Array.from(eventById.values()));
+      }
+
+      const nextTraces = tracesChanged ? limitRecentTraces(Array.from(nextTraceMap.values())) : tracesRef.current;
+      tracesRef.current = nextTraces;
+
+      if (tracesChanged) {
+        setTraces(nextTraces);
+        setSelectedId((prev) => {
+          if (prev && removedIds.has(prev)) return "";
+          if (prev) return prev;
+          return nextTraces[0]?.id || "";
+        });
+      }
+      if (latestOverview) {
+        setOverview(latestOverview);
+      }
+      const selectedId = selectedIdRef.current;
+      const selectedSummary = selectedSummaryById.get(selectedId);
+      if (selectedSummary) {
+        setPage((prev) => (prev?.summary.id === selectedId ? { ...prev, summary: selectedSummary } : prev));
+      }
+      const latestEvents = dedupedLatestEventsByTraceId.get(selectedId);
+      if (latestEvents && latestEvents.length > 0) {
+        setPage((prev) => (prev?.summary.id === selectedId ? appendLatestEventsToTracePage(prev, latestEvents) : prev));
+        for (const includeMeta of [false, true]) {
+          const cacheKey = buildTracePageCacheKey(selectedId, includeMeta);
+          const cached = tracePageCacheRef.current.get(cacheKey);
+          if (!cached) continue;
+          const nextPage = appendLatestEventsToTracePage(
+            selectedSummary ? { ...cached.page, summary: selectedSummary } : cached.page,
+            latestEvents,
+          );
+          upsertTracePageCache(tracePageCacheRef.current, cacheKey, {
+            page: nextPage,
+            summaryStamp: buildTraceSummaryStamp(nextPage.summary),
+          });
+        }
+      } else if (needsSelectedRefetch && selectedId) {
+        setLiveTick((value) => value + 1);
+      }
+      setStatus(`Live: ${nextTraces.length} traces`);
+      setLastLiveUpdateMs(Date.now());
+
+      for (const traceId of pulseTraceIds) {
+        bumpPulse(traceId);
+      }
+    };
+
+    const enqueueLiveDeltas = (deltas: LiveDeltaEnvelope[]): void => {
+      if (deltas.length === 0) return;
+      applyLiveDeltas(deltas);
+    };
+
+    void loadBoot();
+
+    const source = new EventSource(`${API}/api/stream?limit=${RECENT_TRACE_LIMIT}`);
+
+    source.addEventListener("snapshot", (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as {
+          payload?: { traces?: TraceSummary[]; overview?: OverviewStats };
+        };
+        const nextTraces = limitRecentTraces((data.payload?.traces ?? []).map(applyManualStopOverride));
+        tracesRef.current = nextTraces;
+        if (nextTraces.length > 0) {
+          setTraces(nextTraces);
+          setSelectedId((prev) => prev || nextTraces[0]?.id || "");
+        }
+        if (data.payload?.overview) setOverview(data.payload.overview);
+        setStatus(`Live: ${nextTraces.length} traces`);
+        setLastLiveUpdateMs(Date.now());
+      } catch {
+        setStatus("Live update parse error");
+      }
     });
+
+    const handleLegacyDelta = (type: LiveDeltaEnvelope["type"]) => (event: MessageEvent): void => {
+      try {
+        const data = JSON.parse(event.data) as { payload?: unknown; id?: string; version?: number };
+        const payload = data.payload;
+        if (!payload || typeof payload !== "object") return;
+        enqueueLiveDeltas([
+          {
+            id: typeof data.id === "string" ? data.id : `${type}:${Date.now()}`,
+            type,
+            version: typeof data.version === "number" ? data.version : Date.now(),
+            payload: payload as LiveDeltaEnvelope["payload"],
+          } as LiveDeltaEnvelope,
+        ]);
+      } catch {
+        setStatus("Live update parse error");
+      }
+    };
+
+    source.addEventListener("batch", (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as { payload?: unknown };
+        enqueueLiveDeltas(readLiveDeltaBatch(data.payload));
+      } catch {
+        setStatus("Live update parse error");
+      }
+    });
+    source.addEventListener("trace_added", handleLegacyDelta("trace_added"));
+    source.addEventListener("trace_updated", handleLegacyDelta("trace_updated"));
+    source.addEventListener("trace_removed", handleLegacyDelta("trace_removed"));
+    source.addEventListener("overview_updated", handleLegacyDelta("overview_updated"));
+    source.addEventListener("events_appended", handleLegacyDelta("events_appended"));
 
     source.onerror = () => {
       setStatus("Live stream disconnected; retrying...");
