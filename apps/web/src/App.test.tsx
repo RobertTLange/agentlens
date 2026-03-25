@@ -1129,9 +1129,17 @@ describe("App sessions list live motion", () => {
     expect(requestedUrls.filter((url) => url.includes("/api/activity/week")).length).toBe(weekRequestCountBefore);
     expect(requestedUrls.filter((url) => url.includes("/api/activity/year")).length).toBe(yearRequestCountBefore);
     expect(requestedUrls.filter((url) => url.includes("/api/activity/day")).length).toBe(dayRequestCountBefore);
+    expect(document.querySelector(".activity-week-day-date")?.textContent).toContain("/");
+    expect(document.querySelector(".activity-week-day-metric")).toBeTruthy();
     await waitFor(() => expect(document.querySelector(".activity-week-meta")?.textContent?.toLowerCase()).toContain("sessions"));
-    expect(document.querySelector(".activity-week-day-button")?.textContent).toContain("1");
+    expect(document.querySelector(".activity-week-day-metric")?.textContent?.toLowerCase()).toContain("sessions");
     expect(document.querySelector(".activity-week-legend")?.textContent?.toLowerCase()).toContain("sessions");
+
+    act(() => {
+      fireEvent.change(metricSelect, { target: { value: "total_cost_usd" } });
+    });
+
+    expect(document.querySelector(".activity-week-day-metric")?.textContent?.toLowerCase()).toContain("cost");
 
     act(() => {
       colorButton.click();
@@ -1154,6 +1162,68 @@ describe("App sessions list live motion", () => {
     expect(requestedUrls.filter((url) => url.includes("/api/activity/day")).length).toBe(dayRequestCountBefore);
     expect(colorButton.getAttribute("data-current-color")).toBe("#2563eb");
     await waitFor(() => expect(document.querySelector(".activity-week-heatmap")?.getAttribute("style")).not.toBe(initialWeekStyle));
+  });
+
+  it("keeps selected heatmap metric and color when switching between views", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    const inspectorButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Inspector"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement) || !(inspectorButton instanceof HTMLButtonElement)) {
+      throw new Error("missing view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+
+    const metricSelect = document.querySelector('select[aria-label="Heatmap metric"]');
+    const colorButton = document.querySelector('button[aria-label="Heatmap color"]');
+    if (!(metricSelect instanceof HTMLSelectElement) || !(colorButton instanceof HTMLButtonElement)) {
+      throw new Error("missing heatmap controls");
+    }
+
+    act(() => {
+      fireEvent.change(metricSelect, { target: { value: "total_cost_usd" } });
+    });
+    act(() => {
+      colorButton.click();
+    });
+    const tealOption = Array.from(document.querySelectorAll(".activity-color-option")).find(
+      (node) => node.getAttribute("data-color") === "#0f766e",
+    );
+    if (!(tealOption instanceof HTMLButtonElement)) {
+      throw new Error("missing teal preset");
+    }
+    act(() => {
+      tealOption.click();
+    });
+
+    expect(metricSelect.value).toBe("total_cost_usd");
+    expect(colorButton.getAttribute("data-current-color")).toBe("#0f766e");
+
+    act(() => {
+      inspectorButton.click();
+    });
+    await waitFor(() => expect(document.querySelector(".detail-panel")).toBeTruthy());
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+    const metricSelectAgain = document.querySelector('select[aria-label="Heatmap metric"]');
+    const colorButtonAgain = document.querySelector('button[aria-label="Heatmap color"]');
+    expect(metricSelectAgain).toBeInstanceOf(HTMLSelectElement);
+    expect((metricSelectAgain as HTMLSelectElement).value).toBe("total_cost_usd");
+    expect(colorButtonAgain?.getAttribute("data-current-color")).toBe("#0f766e");
   });
 
   it("starts day, week, and year activity requests without waiting for earlier responses", async () => {
