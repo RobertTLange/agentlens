@@ -3526,6 +3526,61 @@ describe("App sessions list live motion", () => {
     });
   });
 
+  it("applies burst batches without refetching selected trace detail when latest events are included", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-batch-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-batch-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    const updatedSummary = {
+      ...selectedTrace,
+      mtimeMs: selectedTrace.mtimeMs + 2_000,
+      lastEventTs: appendedEvent.timestampMs,
+      eventCount: selectedTrace.eventCount + 1,
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(updatedSummary, [firstEvent, appendedEvent]);
+
+    act(() => {
+      source.emit("batch", {
+        events: [
+          { id: "1", type: "trace_updated", version: 1, payload: { summary: updatedSummary } },
+          {
+            id: "2",
+            type: "events_appended",
+            version: 2,
+            payload: { id: "trace-c", appended: 1, latestEvents: [appendedEvent] },
+          },
+          { id: "3", type: "overview_updated", version: 3, payload: { overview: { ...overview, updatedAtMs: 2_000 } } },
+        ],
+      });
+    });
+    flushRafQueue();
+
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(2));
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
+    expect(countTraceDetailRequests("trace-c")).toBe(1);
+  });
+
   it("drains large appended event chunks through a TOC queue", async () => {
     const selectedTrace = tracesById["trace-c"];
     if (!selectedTrace) {
