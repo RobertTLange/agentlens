@@ -209,6 +209,37 @@ function removeTracePageCacheEntries(cache: Map<string, TracePageCacheEntry>, tr
   cache.delete(buildTracePageCacheKey(traceId, true));
 }
 
+function appendLatestEventsToTracePage(page: TracePage, latestEvents: TracePage["events"]): TracePage {
+  if (latestEvents.length === 0) return page;
+  const existingById = new Map(page.events.map((event) => [event.eventId, event] as const));
+  let changed = false;
+  for (const event of latestEvents) {
+    if (existingById.has(event.eventId)) continue;
+    existingById.set(event.eventId, event);
+    changed = true;
+  }
+  if (!changed) return page;
+  const events = sortTimelineItems(Array.from(existingById.values()), "first-latest");
+  return {
+    ...page,
+    summary: {
+      ...page.summary,
+      eventCount: Math.max(page.summary.eventCount, events.length),
+      lastEventTs: events[events.length - 1]?.timestampMs ?? page.summary.lastEventTs,
+    },
+    events,
+    toc: events.map((event) => ({
+      eventId: event.eventId,
+      index: event.index,
+      timestampMs: event.timestampMs,
+      eventKind: event.eventKind,
+      label: event.tocLabel || event.preview,
+      colorKey: event.eventKind,
+      toolType: event.toolType,
+    })),
+  };
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { cache: "no-store", ...init });
   if (!response.ok) {
@@ -975,10 +1006,14 @@ export function App(): JSX.Element {
 
     source.addEventListener("trace_updated", (event) => {
       const data = JSON.parse((event as MessageEvent).data) as { payload?: { summary?: TraceSummary } };
-      if (data.payload?.summary) {
-        upsert(data.payload.summary);
+      const summary = data.payload?.summary;
+      if (summary) {
+        upsert(summary);
+        if (summary.id === selectedIdRef.current) {
+          setPage((prev) => (prev && prev.summary.id === summary.id ? { ...prev, summary } : prev));
+        }
         setLastLiveUpdateMs(Date.now());
-        bumpPulse(data.payload.summary.id);
+        bumpPulse(summary.id);
       }
     });
 
@@ -1062,10 +1097,26 @@ export function App(): JSX.Element {
     });
 
     source.addEventListener("events_appended", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as { payload?: { id?: string; appended?: number } };
-      if (data.payload?.id && data.payload.id === selectedIdRef.current) {
+      const data = JSON.parse((event as MessageEvent).data) as {
+        payload?: { id?: string; appended?: number; latestEvents?: TracePage["events"] };
+      };
+      const payload = data.payload;
+      if (payload?.id && payload.id === selectedIdRef.current) {
         setLastLiveUpdateMs(Date.now());
-        if ((data.payload.appended ?? 0) > 0) {
+        if ((payload.latestEvents?.length ?? 0) > 0) {
+          setPage((prev) => (prev && prev.summary.id === payload.id ? appendLatestEventsToTracePage(prev, payload.latestEvents ?? []) : prev));
+          for (const includeMeta of [false, true]) {
+            const cacheKey = buildTracePageCacheKey(payload.id, includeMeta);
+            const cached = tracePageCacheRef.current.get(cacheKey);
+            if (!cached) continue;
+            const nextPage = appendLatestEventsToTracePage(cached.page, payload.latestEvents ?? []);
+            upsertTracePageCache(tracePageCacheRef.current, cacheKey, {
+              page: nextPage,
+              summaryStamp: buildTraceSummaryStamp(nextPage.summary),
+            });
+          }
+        }
+        if ((payload.appended ?? 0) > 0) {
           setLiveTick((value) => value + 1);
         }
       }
