@@ -362,12 +362,36 @@ async function getFreePort(): Promise<number> {
   return address.port;
 }
 
-async function startHealthServer(): Promise<{ port: number; close: () => Promise<void> }> {
+async function startHealthServer(options?: {
+  readyz?: "unsupported" | "ready" | "delayed";
+  delayedReadyProbeCount?: number;
+}): Promise<{ port: number; close: () => Promise<void>; getReadyProbeCount: () => number }> {
+  let readyProbeCount = 0;
+  let remainingDelayedReadyProbes = Math.max(0, options?.delayedReadyProbeCount ?? 0);
   const server = createServer((request, response) => {
     if (request.url === "/api/healthz") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: true }));
       return;
+    }
+    if (request.url === "/api/readyz") {
+      readyProbeCount += 1;
+      if (options?.readyz === "ready") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, ready: true }));
+        return;
+      }
+      if (options?.readyz === "delayed") {
+        if (remainingDelayedReadyProbes > 0) {
+          remainingDelayedReadyProbes -= 1;
+          response.writeHead(503, { "content-type": "application/json" });
+          response.end(JSON.stringify({ ok: false, ready: false }));
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, ready: true }));
+        return;
+      }
     }
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ ok: false }));
@@ -381,6 +405,7 @@ async function startHealthServer(): Promise<{ port: number; close: () => Promise
   }
   return {
     port: address.port,
+    getReadyProbeCount: () => readyProbeCount,
     close: async () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -619,6 +644,34 @@ describe("cli", () => {
     }
   });
 
+  it("waits for readiness before reusing a running server in --browser mode", async () => {
+    const healthServer = await startHealthServer({ readyz: "delayed", delayedReadyProbeCount: 2 });
+    const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-warming-"));
+    try {
+      const output = await runCliWithEnvAsync(
+        ["--browser", "--host", "127.0.0.1", "--port", String(healthServer.port)],
+        {
+          AGENTLENS_SKIP_OPEN: "1",
+          AGENTLENS_RUNTIME_DIR: runtimeDir,
+          AGENTLENS_STARTUP_TIMEOUT_MS: "5000",
+        },
+      );
+      expect(output).toContain(`AgentLens already running: http://127.0.0.1:${healthServer.port}`);
+      expect(healthServer.getReadyProbeCount()).toBeGreaterThanOrEqual(3);
+
+      const pidInfo = JSON.parse(await readFile(path.join(runtimeDir, "server.pid"), "utf8")) as {
+        host?: string;
+        port?: number;
+        url?: string;
+      };
+      expect(pidInfo.host).toBe("127.0.0.1");
+      expect(pidInfo.port).toBe(healthServer.port);
+      expect(pidInfo.url).toBe(`http://127.0.0.1:${healthServer.port}`);
+    } finally {
+      await healthServer.close();
+    }
+  });
+
   it("heals stale pid metadata when reusing running server in --browser mode", async () => {
     const healthServer = await startHealthServer();
     const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-reused-"));
@@ -693,17 +746,33 @@ describe("cli", () => {
   it("starts detached server in --browser mode", async () => {
     const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-"));
     const fakeEntrypoint = path.join(runtimeDir, "fake-server.mjs");
+    const readyMarkerPath = path.join(runtimeDir, "ready.marker");
     const port = await getFreePort();
 
     await writeFile(
       fakeEntrypoint,
       `import { createServer } from "node:http";
+import { writeFileSync } from "node:fs";
 const host = process.env.AGENTLENS_HOST ?? "127.0.0.1";
 const port = Number(process.env.AGENTLENS_PORT ?? "8787");
+const readyMarkerPath = ${JSON.stringify(readyMarkerPath)};
+let remainingReadyFailures = 2;
 const server = createServer((request, response) => {
   if (request.url === "/api/healthz") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  if (request.url === "/api/readyz") {
+    if (remainingReadyFailures > 0) {
+      remainingReadyFailures -= 1;
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: false, ready: false }));
+      return;
+    }
+    writeFileSync(readyMarkerPath, "ready\\n", "utf8");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true, ready: true }));
     return;
   }
   response.writeHead(200, { "content-type": "text/plain" });
@@ -729,6 +798,7 @@ process.on("SIGTERM", () => {
       );
 
       expect(output).toContain(`AgentLens started in background: http://127.0.0.1:${port}`);
+      expect(await readFile(readyMarkerPath, "utf8")).toBe("ready\n");
 
       const pidPath = path.join(runtimeDir, "server.pid");
       const pidInfo = JSON.parse(await readFile(pidPath, "utf8")) as { pid?: number };

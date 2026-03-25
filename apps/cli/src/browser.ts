@@ -45,6 +45,16 @@ interface RuntimeState {
   url: string;
 }
 
+interface ReadinessProbeResult {
+  status: "ready" | "not_ready" | "unavailable" | "error";
+  startupError?: string;
+}
+
+interface StartupWaitResult {
+  status: "ready" | "healthy" | "not_ready";
+  startupError?: string;
+}
+
 function resolveHost(host?: string): string {
   return host?.trim() || process.env.AGENTLENS_HOST || DEFAULT_HOST;
 }
@@ -135,15 +145,75 @@ export async function isServerHealthy(healthUrl: string, timeoutMs = 1000): Prom
   }
 }
 
-async function waitForServer(healthUrl: string, timeoutMs: number): Promise<boolean> {
+async function probeServerReadiness(readyUrl: string, timeoutMs = 1000): Promise<ReadinessProbeResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(readyUrl, {
+      method: "GET",
+      signal: controller.signal,
+      headers: { accept: "application/json" },
+    });
+    if (response.status === 404) {
+      return { status: "unavailable" };
+    }
+    const data = (await response.json().catch(() => ({}))) as { ready?: boolean; startupError?: string };
+    if (response.ok && data.ready === true) {
+      return { status: "ready" };
+    }
+    if (data.ready === false || response.status === 503) {
+      return {
+        status: "not_ready",
+        ...(typeof data.startupError === "string" && data.startupError.trim()
+          ? { startupError: data.startupError.trim() }
+          : {}),
+      };
+    }
+    return { status: "error" };
+  } catch {
+    return { status: "error" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function waitForServerStartup(
+  readyUrl: string,
+  healthUrl: string,
+  timeoutMs: number,
+): Promise<StartupWaitResult> {
   const start = Date.now();
+  let latestNotReady: StartupWaitResult = { status: "not_ready" };
   while (Date.now() - start < timeoutMs) {
-    if (await isServerHealthy(healthUrl, 1000)) {
-      return true;
+    const probe = await probeServerReadiness(readyUrl, 1000);
+    if (probe.status === "ready") {
+      return { status: "ready" };
+    }
+    if (probe.status === "unavailable") {
+      if (await isServerHealthy(healthUrl, 1000)) {
+        return { status: "healthy" };
+      }
+    } else if (probe.status === "not_ready") {
+      latestNotReady = {
+        status: "not_ready",
+        ...(probe.startupError ? { startupError: probe.startupError } : {}),
+      };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  return false;
+  return latestNotReady;
+}
+
+function buildReadinessTimeoutMessage(url: string, logPath?: string, startupError?: string): string {
+  const parts = [`timeout waiting for AgentLens readiness at ${url}`];
+  if (logPath) {
+    parts.push(`log: ${logPath}`);
+  }
+  parts.push("hint: increase AGENTLENS_STARTUP_TIMEOUT_MS for large trace indexes");
+  if (startupError) {
+    parts.push(`startup error: ${startupError}`);
+  }
+  return `${parts.join(". ")}.`;
 }
 
 async function isPortBound(host: string, port: number, timeoutMs = 500): Promise<boolean> {
@@ -296,13 +366,28 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   const runtimeDir = resolveRuntimeDir(options.runtimeDir);
   const url = toBaseUrl(host, port);
   const healthUrl = `${url}/api/healthz`;
+  const readyUrl = `${url}/api/readyz`;
   const skipOpen = shouldSkipOpen(options.skipOpen);
   const { pidPath } = getRuntimePaths(runtimeDir);
-  const healthy = await isServerHealthy(healthUrl);
+  const readiness = await probeServerReadiness(readyUrl);
+  const healthy = readiness.status === "unavailable" ? await isServerHealthy(healthUrl) : readiness.status === "ready";
 
   if (healthy || (await isPortBound(host, port))) {
-    const pid = healthy ? await resolveListeningPid(port) : undefined;
-    if (healthy) {
+    let reuseStatus: StartupWaitResult["status"] | "unknown" =
+      readiness.status === "ready" ? "ready" : healthy ? "healthy" : "unknown";
+    if (readiness.status === "not_ready") {
+      const ready = await waitForServerStartup(readyUrl, healthUrl, startupTimeoutMs);
+      const readyWithGrace = ready.status === "ready" || ready.status === "healthy"
+        ? ready
+        : await waitForServerStartup(readyUrl, healthUrl, STARTUP_TIMEOUT_GRACE_MS);
+      if (readyWithGrace.status !== "ready" && readyWithGrace.status !== "healthy") {
+        throw new Error(buildReadinessTimeoutMessage(url, undefined, readyWithGrace.startupError));
+      }
+      reuseStatus = readyWithGrace.status;
+    }
+    const isReusableAgentLens = reuseStatus === "ready" || reuseStatus === "healthy";
+    const pid = isReusableAgentLens ? await resolveListeningPid(port) : undefined;
+    if (isReusableAgentLens) {
       await writeRuntimeState({
         host,
         pidPath,
@@ -318,7 +403,7 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
       status: "reused",
       url,
       openedBrowser: !skipOpen,
-      ...(healthy ? { pidPath } : {}),
+      ...(isReusableAgentLens ? { pidPath } : {}),
       ...(typeof pid === "number" ? { pid } : {}),
     };
   }
@@ -330,17 +415,17 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
     runtimeDir,
   });
 
-  const ready = await waitForServer(healthUrl, startupTimeoutMs);
-  const readyWithGrace = ready ? true : await waitForServer(healthUrl, STARTUP_TIMEOUT_GRACE_MS);
-  if (!readyWithGrace) {
+  const ready = await waitForServerStartup(readyUrl, healthUrl, startupTimeoutMs);
+  const readyWithGrace = ready.status === "ready" || ready.status === "healthy"
+    ? ready
+    : await waitForServerStartup(readyUrl, healthUrl, STARTUP_TIMEOUT_GRACE_MS);
+  if (readyWithGrace.status !== "ready" && readyWithGrace.status !== "healthy") {
     try {
       process.kill(pid, "SIGTERM");
     } catch {
       // no-op
     }
-    throw new Error(
-      `timeout waiting for AgentLens server at ${url}. log: ${spawnedLogPath}. hint: increase AGENTLENS_STARTUP_TIMEOUT_MS for large trace indexes`,
-    );
+    throw new Error(buildReadinessTimeoutMessage(url, spawnedLogPath, readyWithGrace.startupError));
   }
 
   if (!skipOpen) {
