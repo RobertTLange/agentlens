@@ -6,6 +6,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import type {
   ActivityHydrationProgress,
   ActivityBinsMode,
+  AgentKind,
   AppConfig,
   EventKind,
   IndexStartupStatus,
@@ -24,7 +25,7 @@ import type {
 import { discoverTraceFiles, type DiscoveredTraceFile } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
-import { deriveSessionMetrics } from "./metrics.js";
+import { deriveSessionMetrics, type SessionUsagePoint } from "./metrics.js";
 import { redactEvents } from "./redaction.js";
 import { asRecord, asString, expandHome, nowMs, stableId } from "./utils.js";
 
@@ -62,6 +63,7 @@ interface TraceEntry {
   cachedFullEvents: NormalizedEvent[] | null;
   cachedRawEvents: NormalizedEvent[] | null;
   activityArtifacts: SessionActivityArtifacts | null;
+  usageArtifacts: SessionUsageArtifacts | null;
   pinnedMaterializedAtMs: number;
 }
 
@@ -105,6 +107,11 @@ interface SessionActivityArtifacts {
   eventCount: number;
   eventTimestamps: number[];
   activeSegments: SessionActivitySpan[];
+}
+
+export interface SessionUsageArtifacts {
+  eventCount: number;
+  usagePoints: SessionUsagePoint[];
 }
 
 interface RefreshStats {
@@ -182,6 +189,17 @@ function buildSessionActivityArtifacts(events: NormalizedEvent[]): SessionActivi
     eventCount: events.length,
     eventTimestamps,
     activeSegments: buildActiveSegmentsFromEventTimestamps(eventTimestamps),
+  };
+}
+
+function buildSessionUsageArtifacts(
+  events: NormalizedEvent[],
+  agent: AgentKind,
+  config: AppConfig,
+): SessionUsageArtifacts {
+  return {
+    eventCount: events.length,
+    usagePoints: deriveSessionMetrics(events, agent, config).usagePoints,
   };
 }
 
@@ -1477,6 +1495,7 @@ export class TraceIndex extends EventEmitter {
         cachedFullEvents: redactedEvents,
         cachedRawEvents: parsed.events,
         activityArtifacts,
+        usageArtifacts: buildSessionUsageArtifacts(parsed.events, parsed.agent, this.config),
         pinnedMaterializedAtMs: current?.pinnedMaterializedAtMs ?? 0,
       });
       this.cursorById.set(file.id, {
@@ -1506,6 +1525,7 @@ export class TraceIndex extends EventEmitter {
         cachedFullEvents: [],
         cachedRawEvents: [],
         activityArtifacts: null,
+        usageArtifacts: null,
         pinnedMaterializedAtMs: 0,
       });
       this.cursorById.set(file.id, {
@@ -1602,6 +1622,7 @@ export class TraceIndex extends EventEmitter {
       cachedFullEvents: mergedEvents,
       cachedRawEvents: mergedRawEvents,
       activityArtifacts,
+      usageArtifacts: buildSessionUsageArtifacts(mergedRawEvents, current.summary.agent, this.config),
       pinnedMaterializedAtMs: current.pinnedMaterializedAtMs,
     });
     this.cursorById.set(file.id, {
@@ -1772,6 +1793,7 @@ export class TraceIndex extends EventEmitter {
     entry.cachedFullEvents = redactedEvents;
     entry.cachedRawEvents = parsed.events;
     entry.activityArtifacts = buildSessionActivityArtifacts(redactedEvents);
+    entry.usageArtifacts = buildSessionUsageArtifacts(parsed.events, parsed.agent, this.config);
     entry.pinnedMaterializedAtMs = nowMs();
     entry.summary = {
       ...refreshedSummary,
@@ -1814,6 +1836,27 @@ export class TraceIndex extends EventEmitter {
     })();
     if (this.config.retention.strategy === "full_memory" || found.summary.residentTier === "hot") {
       found.activityArtifacts = artifacts;
+    }
+    return artifacts;
+  }
+
+  getSessionUsageArtifacts(id: string): Readonly<SessionUsageArtifacts> {
+    const found = this.entries.get(id);
+    if (!found) {
+      throw new Error(`unknown trace id: ${id}`);
+    }
+    if (found.usageArtifacts && found.usageArtifacts.eventCount === found.summary.eventCount) {
+      return found.usageArtifacts;
+    }
+    const artifacts = (() => {
+      if (found.cachedRawEvents && found.cachedRawEvents.length >= found.summary.eventCount) {
+        return buildSessionUsageArtifacts(found.cachedRawEvents, found.summary.agent, this.config);
+      }
+      const parsed = this.parserRegistry.parseFileSync(found.file, found.summary.parser);
+      return buildSessionUsageArtifacts(parsed.events, parsed.agent, this.config);
+    })();
+    if (this.config.retention.strategy === "full_memory" || found.summary.residentTier === "hot") {
+      found.usageArtifacts = artifacts;
     }
     return artifacts;
   }

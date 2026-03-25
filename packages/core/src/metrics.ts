@@ -2,12 +2,26 @@ import type { AgentKind, AppConfig, ModelTokenShare, NormalizedEvent, TokenTotal
 import { estimateUsageCost, resolveContextWindowTokens } from "./pricing.js";
 import { asRecord, asString } from "./utils.js";
 
+export interface SessionUsagePoint {
+  timestampMs: number;
+  agent: AgentKind;
+  model: string;
+  inputTokens: number;
+  cachedReadTokens: number;
+  cachedCreateTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
 interface SessionMetrics {
   tokenTotals: TokenTotals;
   modelTokenSharesTop: ModelTokenShare[];
   modelTokenSharesEstimated: boolean;
   contextWindowPct: number | null;
   costEstimateUsd: number | null;
+  usagePoints: SessionUsagePoint[];
 }
 
 function toNumber(value: unknown): number {
@@ -222,6 +236,28 @@ function finalizeCostTotal(costKnown: boolean, total: number): number | null {
   return Number(total.toFixed(6));
 }
 
+function usagePointFromTotals(
+  event: NormalizedEvent,
+  agent: AgentKind,
+  model: string,
+  totals: TokenTotals,
+  costUsd: number | null,
+): SessionUsagePoint | null {
+  if (event.timestampMs === null || event.timestampMs <= 0) return null;
+  return {
+    timestampMs: event.timestampMs,
+    agent,
+    model,
+    inputTokens: totals.inputTokens,
+    cachedReadTokens: totals.cachedReadTokens,
+    cachedCreateTokens: totals.cachedCreateTokens,
+    outputTokens: totals.outputTokens,
+    reasoningOutputTokens: totals.reasoningOutputTokens,
+    totalTokens: totals.totalTokens,
+    costUsd: costUsd === null ? 0 : Number(costUsd.toFixed(6)),
+  };
+}
+
 function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): SessionMetrics {
   const resolveWindow = contextWindowResolver(config);
   const totals = emptyTokenTotals();
@@ -231,6 +267,7 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
   let costKnown = config.cost.enabled;
   const seenRows = new Set<Record<string, unknown>>();
   const seenUsageKeys = new Set<string>();
+  const usagePoints: SessionUsagePoint[] = [];
 
   for (const event of events) {
     const raw = event.raw;
@@ -281,6 +318,8 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
     } else {
       costTotal += cost;
     }
+    const usagePoint = usagePointFromTotals(event, "claude", model, usageTotals, cost);
+    if (usagePoint) usagePoints.push(usagePoint);
   }
 
   for (const [model, modelTotals] of modelBreakdown) {
@@ -296,17 +335,18 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
     modelTokenSharesEstimated: false,
     contextWindowPct: maxContextPct,
     costEstimateUsd: finalizeCostTotal(costKnown, costTotal),
+    usagePoints,
   };
 }
 
 function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): SessionMetrics {
   const resolveWindow = contextWindowResolver(config);
-  const rows: Record<string, unknown>[] = [];
+  const rows: Array<{ raw: Record<string, unknown>; event: NormalizedEvent }> = [];
   const seenRows = new Set<Record<string, unknown>>();
   for (const event of events) {
     if (seenRows.has(event.raw)) continue;
     seenRows.add(event.raw);
-    rows.push(event.raw);
+    rows.push({ raw: event.raw, event });
   }
 
   let currentModel = "";
@@ -316,8 +356,9 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
   let costTotal = 0;
   let costKnown = config.cost.enabled;
   const modelTotalDeltas = new Map<string, number>();
+  const usagePoints: SessionUsagePoint[] = [];
 
-  for (const row of rows) {
+  for (const { raw: row, event } of rows) {
     const rowType = asString(row.type).toLowerCase();
     if (rowType === "turn_context") {
       const payload = asRecord(row.payload);
@@ -370,6 +411,13 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
       } else {
         costTotal += cost;
       }
+      const usageTotals = tokenTotalsFromCodexUsageRecord(pricedUsage);
+      const usagePoint = usagePointFromTotals(event, "codex", currentModel, usageTotals, cost);
+      if (usagePoint) usagePoints.push(usagePoint);
+    } else {
+      const usageTotals = tokenTotalsFromCodexUsageRecord(pricedUsage);
+      const usagePoint = usagePointFromTotals(event, "codex", "<unknown>", usageTotals, null);
+      if (usagePoint) usagePoints.push(usagePoint);
     }
   }
 
@@ -382,6 +430,7 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
     modelTokenSharesEstimated: topShares.length > 0,
     contextWindowPct: maxContextPct,
     costEstimateUsd: finalizeCostTotal(costKnown, costTotal),
+    usagePoints,
   };
 }
 
@@ -393,6 +442,7 @@ function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): Se
   let costTotal = 0;
   let costKnown = config.cost.enabled;
   const seenAssistantMessageIds = new Set<string>();
+  const usagePoints: SessionUsagePoint[] = [];
 
   for (const event of events) {
     const raw = asRecord(event.raw);
@@ -441,6 +491,8 @@ function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): Se
     } else {
       costTotal += cost;
     }
+    const usagePoint = usagePointFromTotals(event, "opencode", modelId || model, usageTotals, cost);
+    if (usagePoint) usagePoints.push(usagePoint);
   }
 
   for (const [model, modelTotals] of modelBreakdown) {
@@ -456,6 +508,7 @@ function deriveOpenCodeMetrics(events: NormalizedEvent[], config: AppConfig): Se
     modelTokenSharesEstimated: false,
     contextWindowPct: maxContextPct,
     costEstimateUsd: finalizeCostTotal(costKnown, costTotal),
+    usagePoints,
   };
 }
 
@@ -464,6 +517,7 @@ function deriveCursorMetrics(events: NormalizedEvent[], config: AppConfig): Sess
   const totals = emptyTokenTotals();
   const modelBreakdown = new Map<string, TokenTotals>();
   let maxContextPct: number | null = null;
+  const usagePoints: SessionUsagePoint[] = [];
 
   const modelFallback =
     events
@@ -491,6 +545,24 @@ function deriveCursorMetrics(events: NormalizedEvent[], config: AppConfig): Sess
       modelTotals.inputTokens += estimatedTokens;
       applyPromptWindowEstimate();
       modelBreakdown.set(model, modelTotals);
+      const usageTotals = finalizeTokenTotals({
+        ...emptyTokenTotals(),
+        inputTokens: estimatedTokens,
+      });
+      const cost = estimateUsageCost(
+        {
+          model,
+          promptTokens: usageTotals.inputTokens,
+          inputTokens: usageTotals.inputTokens,
+          cachedReadTokens: 0,
+          cachedCreateTokens: 0,
+          outputTokens: 0,
+          reasoningOutputTokens: 0,
+        },
+        config.cost,
+      );
+      const usagePoint = usagePointFromTotals(event, "cursor", model, usageTotals, cost);
+      if (usagePoint) usagePoints.push(usagePoint);
       continue;
     }
 
@@ -502,6 +574,25 @@ function deriveCursorMetrics(events: NormalizedEvent[], config: AppConfig): Sess
         modelTotals.reasoningOutputTokens += estimatedTokens;
       }
       modelBreakdown.set(model, modelTotals);
+      const usageTotals = finalizeTokenTotals({
+        ...emptyTokenTotals(),
+        outputTokens: estimatedTokens,
+        reasoningOutputTokens: event.eventKind === "reasoning" ? estimatedTokens : 0,
+      });
+      const cost = estimateUsageCost(
+        {
+          model,
+          promptTokens: 0,
+          inputTokens: 0,
+          cachedReadTokens: 0,
+          cachedCreateTokens: 0,
+          outputTokens: usageTotals.outputTokens,
+          reasoningOutputTokens: usageTotals.reasoningOutputTokens,
+        },
+        config.cost,
+      );
+      const usagePoint = usagePointFromTotals(event, "cursor", model, usageTotals, cost);
+      if (usagePoint) usagePoints.push(usagePoint);
     }
   }
 
@@ -518,6 +609,7 @@ function deriveCursorMetrics(events: NormalizedEvent[], config: AppConfig): Sess
     modelTokenSharesEstimated: modelBreakdown.size > 0,
     contextWindowPct: maxContextPct,
     costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+    usagePoints,
   };
 }
 
@@ -528,6 +620,7 @@ function deriveGeminiMetrics(events: NormalizedEvent[], config: AppConfig): Sess
   let maxContextPct: number | null = null;
   const seenMessageIds = new Set<string>();
   const seenRows = new Set<Record<string, unknown>>();
+  const usagePoints: SessionUsagePoint[] = [];
 
   for (const event of events) {
     const raw = asRecord(event.raw);
@@ -557,6 +650,20 @@ function deriveGeminiMetrics(events: NormalizedEvent[], config: AppConfig): Sess
       const pct = (promptTokens / window) * 100;
       maxContextPct = maxContextPct === null ? pct : Math.max(maxContextPct, pct);
     }
+    const cost = estimateUsageCost(
+      {
+        model,
+        promptTokens,
+        inputTokens: usageTotals.inputTokens,
+        cachedReadTokens: usageTotals.cachedReadTokens,
+        cachedCreateTokens: usageTotals.cachedCreateTokens,
+        outputTokens: usageTotals.outputTokens,
+        reasoningOutputTokens: usageTotals.reasoningOutputTokens,
+      },
+      config.cost,
+    );
+    const usagePoint = usagePointFromTotals(event, "gemini", model, usageTotals, cost);
+    if (usagePoint) usagePoints.push(usagePoint);
   }
 
   for (const [model, modelTotals] of modelBreakdown) {
@@ -572,6 +679,7 @@ function deriveGeminiMetrics(events: NormalizedEvent[], config: AppConfig): Sess
     modelTokenSharesEstimated: false,
     contextWindowPct: maxContextPct,
     costEstimateUsd: estimateCost(modelBreakdown, config.cost),
+    usagePoints,
   };
 }
 
@@ -586,6 +694,7 @@ function derivePiMetrics(events: NormalizedEvent[], config: AppConfig): SessionM
   let embeddedCostKnown = false;
   let estimatedCostTotal = 0;
   let estimatedCostKnown = config.cost.enabled;
+  const usagePoints: SessionUsagePoint[] = [];
 
   for (const event of events) {
     const raw = asRecord(event.raw);
@@ -642,6 +751,17 @@ function derivePiMetrics(events: NormalizedEvent[], config: AppConfig): SessionM
     } else {
       estimatedCostTotal += estimatedCost;
     }
+    const preferredCost = Object.prototype.hasOwnProperty.call(cost, "total")
+      ? (Number(cost.total) as number)
+      : estimatedCost;
+    const usagePoint = usagePointFromTotals(
+      event,
+      "pi",
+      model,
+      usageTotals,
+      Number.isFinite(preferredCost) ? preferredCost : estimatedCost,
+    );
+    if (usagePoint) usagePoints.push(usagePoint);
   }
 
   for (const [model, modelTotals] of modelBreakdown) {
@@ -659,6 +779,7 @@ function derivePiMetrics(events: NormalizedEvent[], config: AppConfig): SessionM
     costEstimateUsd: embeddedCostKnown
       ? Number(embeddedCostTotal.toFixed(6))
       : finalizeCostTotal(estimatedCostKnown, estimatedCostTotal),
+    usagePoints,
   };
 }
 
@@ -675,5 +796,6 @@ export function deriveSessionMetrics(events: NormalizedEvent[], agent: AgentKind
     modelTokenSharesEstimated: false,
     contextWindowPct: null,
     costEstimateUsd: null,
+    usagePoints: [],
   };
 }
