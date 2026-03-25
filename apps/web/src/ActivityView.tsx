@@ -7,6 +7,7 @@ import type {
   AgentActivityWeek,
   AgentActivityYear,
   AgentKind,
+  IndexStartupStatus,
 } from "@agentlens/contracts";
 import { buildActivityViewModel, type ActivityTimelineRowModel } from "./activity-view-model.js";
 import {
@@ -81,7 +82,13 @@ interface ActivityYearResponse {
   activity: AgentActivityYear;
 }
 
+interface ActivityWarmingResponse {
+  warming: true;
+  startup: IndexStartupStatus;
+}
+
 interface ActivityViewProps {
+  startup?: IndexStartupStatus | null;
   onInspectTrace?: (traceId: string) => void;
   traceAgentById?: Readonly<Record<string, AgentKind>>;
   traceTokenTotalsById?: Readonly<Record<string, TraceTokenTotalsSnapshot | undefined>>;
@@ -619,6 +626,7 @@ function weekSnapshotFromDayActivity(day: AgentActivityDay): AgentActivityWeek {
 }
 
 export function ActivityView({
+  startup,
   onInspectTrace,
   traceAgentById,
   traceTokenTotalsById,
@@ -652,6 +660,7 @@ export function ActivityView({
   const [weekError, setWeekError] = useState("");
   const [yearError, setYearError] = useState("");
   const [status, setStatus] = useState("Loading daily activity...");
+  const isHistoryReady = startup?.fullReady ?? true;
 
   const selectActivityDate = useCallback(
     (dateLocal: string, source: "week" | "year"): void => {
@@ -707,7 +716,13 @@ export function ActivityView({
     try {
       const dayResponse = await fetch(dayUrl, { cache: "no-store", signal: abortController.signal });
       if (!dayResponse.ok) {
-        const payload = (await dayResponse.json().catch(() => ({}))) as { error?: string };
+        const payload = (await dayResponse.json().catch(() => ({}))) as ActivityWarmingResponse & { error?: string };
+        if (dayResponse.status === 503 && payload.warming && payload.startup) {
+          const message = `Indexing history ${payload.startup.hydratedTraceCount}/${payload.startup.discoveredTraceCount}`;
+          setDayError(message);
+          setStatus(message);
+          return;
+        }
         throw new Error(payload.error || `HTTP ${dayResponse.status}`);
       }
       const dayPayload = (await dayResponse.json()) as ActivityDayResponse;
@@ -757,7 +772,13 @@ export function ActivityView({
     try {
       const weekResponse = await fetch(weekUrl, { cache: "no-store", signal: abortController.signal });
       if (!weekResponse.ok) {
-        const payload = (await weekResponse.json().catch(() => ({}))) as { error?: string };
+        const payload = (await weekResponse.json().catch(() => ({}))) as ActivityWarmingResponse & { error?: string };
+        if (weekResponse.status === 503 && payload.warming && payload.startup) {
+          const message = `Indexing history ${payload.startup.hydratedTraceCount}/${payload.startup.discoveredTraceCount}`;
+          setWeekError(message);
+          setStatus(message);
+          return;
+        }
         throw new Error(payload.error || `HTTP ${weekResponse.status}`);
       }
       const weekPayload = (await weekResponse.json()) as ActivityWeekResponse;
@@ -811,7 +832,13 @@ export function ActivityView({
     try {
       const yearResponse = await fetch(yearUrl, { cache: "no-store", signal: abortController.signal });
       if (!yearResponse.ok) {
-        const payload = (await yearResponse.json().catch(() => ({}))) as { error?: string };
+        const payload = (await yearResponse.json().catch(() => ({}))) as ActivityWarmingResponse & { error?: string };
+        if (yearResponse.status === 503 && payload.warming && payload.startup) {
+          const message = `Indexing history ${payload.startup.hydratedTraceCount}/${payload.startup.discoveredTraceCount}`;
+          setYearError(message);
+          setStatus(message);
+          return;
+        }
         throw new Error(payload.error || `HTTP ${yearResponse.status}`);
       }
       const yearPayload = (await yearResponse.json()) as ActivityYearResponse;
@@ -882,7 +909,7 @@ export function ActivityView({
       isDisposed = true;
       window.clearInterval(intervalId);
     };
-  }, [fetchDayActivity, selectedDateLocal]);
+  }, [fetchDayActivity, isHistoryReady, selectedDateLocal]);
 
   useEffect(() => {
     let isDisposed = false;
@@ -910,11 +937,11 @@ export function ActivityView({
       isDisposed = true;
       window.clearInterval(intervalId);
     };
-  }, [fetchWeekActivity, selectedWeekEndDateLocal, todayDateLocal]);
+  }, [fetchWeekActivity, isHistoryReady, selectedWeekEndDateLocal, todayDateLocal]);
 
   useEffect(() => {
     void fetchYearActivity(todayDateLocal);
-  }, [fetchYearActivity, todayDateLocal]);
+  }, [fetchYearActivity, isHistoryReady, todayDateLocal]);
 
   const effectiveActivityWeek = useMemo(
     () => (activityWeek ? applyWeekHeatmapOverrides(activityWeek, displayedHeatmapMetric, displayedHeatmapColor) : null),
@@ -964,8 +991,13 @@ export function ActivityView({
     [activity?.binMinutes, model],
   );
   const showSegmentLabels = binCount > 0 && binCount <= 120;
+  const warmingStatus = startup && !startup.fullReady
+    ? `Indexing history ${startup.hydratedTraceCount}/${startup.discoveredTraceCount}`
+    : "";
   const headerStatus =
-    isDayLoading && isWeekLoading && isYearLoading ? "Loading daily, week, year..." : status;
+    isDayLoading && isWeekLoading && isYearLoading
+      ? warmingStatus || "Loading daily, week, year..."
+      : status;
   const timelineStyle = useMemo(
     () =>
       ({

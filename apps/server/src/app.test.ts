@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
-import type { AgentActivityWeek, AgentActivityYear } from "@agentlens/contracts";
+import type { AgentActivityWeek, AgentActivityYear, IndexStartupStatus } from "@agentlens/contracts";
 import {
   buildLiveBatchEnvelope,
   createServer,
@@ -296,7 +296,7 @@ describe("server api", () => {
         id: "5",
         type: "overview_updated",
         version: 5,
-        payload: { overview: fixture.index.getOverview() },
+        payload: { overview: fixture.index.getOverview(), startup: fixture.index.getStartupStatus() },
       },
       {
         id: "6",
@@ -1727,9 +1727,28 @@ describe("server api", () => {
     const startDeferred = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
+    let startupState: IndexStartupStatus = {
+      phase: "bootstrapping",
+      inspectorReady: false,
+      fullReady: false,
+      isPartial: false,
+      discoveredTraceCount: 0,
+      hydratedTraceCount: 0,
+      startupError: "",
+    };
     const startSpy = vi.spyOn(fixture.index, "start").mockImplementation(async () => {
       await startDeferred;
+      startupState = {
+        phase: "ready",
+        inspectorReady: true,
+        fullReady: true,
+        isPartial: false,
+        discoveredTraceCount: 1,
+        hydratedTraceCount: 1,
+        startupError: "",
+      };
     });
+    const startupSpy = vi.spyOn(fixture.index, "getStartupStatus").mockImplementation(() => startupState);
 
     const server = await runServer({
       host: "127.0.0.1",
@@ -1744,12 +1763,111 @@ describe("server api", () => {
       const health = await server.inject({ method: "GET", url: "/api/healthz" });
       expect(health.statusCode).toBe(200);
       expect(health.json()).toEqual({ ok: true });
-    } finally {
+
+      const notReady = await server.inject({ method: "GET", url: "/api/readyz" });
+      expect(notReady.statusCode).toBe(503);
+      expect(notReady.json()).toEqual({ ok: false, ready: false, startup: startupState });
+
       releaseStart();
       await startDeferred;
+
+      const ready = await server.inject({ method: "GET", url: "/api/readyz" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json()).toEqual({ ok: true, ready: true, startup: startupState });
+    } finally {
       fixture.index.stop();
       await server.close();
       startSpy.mockRestore();
+      startupSpy.mockRestore();
+    }
+  });
+
+  it("surfaces trace index startup failures through readiness endpoint", async () => {
+    const fixture = await buildFixture();
+    const startSpy = vi.spyOn(fixture.index, "start").mockRejectedValue(new Error("boom on startup"));
+    const startupState: IndexStartupStatus = {
+      phase: "failed",
+      inspectorReady: false,
+      fullReady: false,
+      isPartial: false,
+      discoveredTraceCount: 0,
+      hydratedTraceCount: 0,
+      startupError: "boom on startup",
+    };
+    const startupSpy = vi.spyOn(fixture.index, "getStartupStatus").mockReturnValue(startupState);
+
+    const server = await runServer({
+      host: "127.0.0.1",
+      port: 0,
+      configPath: fixture.configPath,
+      enableStatic: false,
+      traceIndex: fixture.index,
+    });
+
+    try {
+      expect(startSpy).toHaveBeenCalledOnce();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const ready = await server.inject({ method: "GET", url: "/api/readyz" });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json()).toEqual({
+        ok: false,
+        ready: false,
+        startup: startupState,
+        startupError: "boom on startup",
+      });
+    } finally {
+      fixture.index.stop();
+      await server.close();
+      startSpy.mockRestore();
+      startupSpy.mockRestore();
+    }
+  });
+
+  it("serves partial overview and warming activity while background hydration continues", async () => {
+    const fixture = await buildFixture();
+    const startupState: IndexStartupStatus = {
+      phase: "hydrating",
+      inspectorReady: true,
+      fullReady: false,
+      isPartial: true,
+      discoveredTraceCount: 240,
+      hydratedTraceCount: 120,
+      startupError: "",
+    };
+    const startupSpy = vi.spyOn(fixture.index, "getStartupStatus").mockReturnValue(startupState);
+
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    try {
+      const ready = await server.inject({ method: "GET", url: "/api/readyz" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json()).toEqual({ ok: true, ready: true, startup: startupState });
+
+      const overview = await server.inject({ method: "GET", url: "/api/overview" });
+      expect(overview.statusCode).toBe(200);
+      expect(overview.json()).toMatchObject({
+        overview: expect.any(Object),
+        startup: startupState,
+      });
+
+      const day = await server.inject({
+        method: "GET",
+        url: "/api/activity/day?date=2026-02-11&tz_offset_min=0&bin_min=5&break_min=10",
+      });
+      expect(day.statusCode).toBe(503);
+      expect(day.json()).toEqual({
+        warming: true,
+        startup: startupState,
+      });
+    } finally {
+      startupSpy.mockRestore();
+      fixture.index.stop();
+      await server.close();
     }
   });
 

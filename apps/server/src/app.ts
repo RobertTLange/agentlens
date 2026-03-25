@@ -11,6 +11,7 @@ import type {
   ActivityHeatmapMetric,
   AppConfig,
   EventsAppendedLiveEnvelope,
+  IndexStartupStatus,
   LiveBatchEnvelope,
   LiveDeltaEnvelope,
   LiveDeltaType,
@@ -2170,8 +2171,21 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   }
 
   server.get("/api/healthz", async () => ({ ok: true }));
+  server.get("/api/readyz", async (_request, reply) => {
+    const startup = traceIndex.getStartupStatus();
+    if (startup.inspectorReady) {
+      return { ok: true, ready: true, startup };
+    }
+    reply.code(503);
+    return {
+      ok: false,
+      ready: false,
+      startup,
+      ...(startup.startupError ? { startupError: startup.startupError } : {}),
+    };
+  });
 
-  server.get("/api/overview", async () => ({ overview: traceIndex.getOverview() }));
+  server.get("/api/overview", async () => ({ overview: traceIndex.getOverview(), startup: traceIndex.getStartupStatus() }));
   server.get("/api/perf", async () => ({ perf: traceIndex.getPerformanceStats() }));
   server.get("/api/activity/day", async (request, reply) => {
     const query = request.query as {
@@ -2182,6 +2196,11 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     };
 
     try {
+      const startup = traceIndex.getStartupStatus();
+      if (!startup.fullReady) {
+        reply.code(503);
+        return { warming: true, startup };
+      }
       const activityOptions = {
         ...(query.date !== undefined ? { dateLocal: query.date } : {}),
         ...(query.tz_offset_min !== undefined ? { tzOffsetMinutes: Number.parseInt(query.tz_offset_min, 10) } : {}),
@@ -2211,6 +2230,11 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     };
 
     try {
+      const startup = traceIndex.getStartupStatus();
+      if (!startup.fullReady) {
+        reply.code(503);
+        return { warming: true, startup };
+      }
       const heatmapMetric = parseActivityHeatmapMetric(query.metric);
       const heatmapColor = parseActivityHeatmapColor(query.color);
       const activityOptions = {
@@ -2243,6 +2267,11 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     };
 
     try {
+      const startup = traceIndex.getStartupStatus();
+      if (!startup.fullReady) {
+        reply.code(503);
+        return { warming: true, startup };
+      }
       const heatmapMetric = parseActivityHeatmapMetric(query.metric);
       const heatmapColor = parseActivityHeatmapColor(query.color);
       const activityOptions = {
@@ -2513,6 +2542,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         payload: {
           traces,
           overview: traceIndex.getOverview(),
+          startup: traceIndex.getStartupStatus(),
         },
       })}\n\n`,
     );

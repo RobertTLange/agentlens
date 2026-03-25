@@ -233,6 +233,20 @@ export interface TracePage {
   liveCursor: string;
 }
 
+export type IndexStartupPhase = "cold" | "bootstrapping" | "hydrating" | "ready" | "failed";
+
+export interface IndexStartupStatus {
+  phase: IndexStartupPhase;
+  inspectorReady: boolean;
+  fullReady: boolean;
+  isPartial: boolean;
+  discoveredTraceCount: number;
+  hydratedTraceCount: number;
+  startupError?: string;
+}
+
+export type TraceIndexStartupState = IndexStartupStatus;
+
 export type LiveDeltaType =
   | "trace_added"
   | "trace_updated"
@@ -259,7 +273,10 @@ export type EventsAppendedLiveEnvelope = LiveEnvelopeBase<
   { id: string; appended: number; latestEvents?: NormalizedEvent[] }
 >;
 
-export type OverviewUpdatedLiveEnvelope = LiveEnvelopeBase<"overview_updated", { overview: OverviewStats }>;
+export type OverviewUpdatedLiveEnvelope = LiveEnvelopeBase<
+  "overview_updated",
+  { overview: OverviewStats; startup: IndexStartupStatus }
+>;
 
 export type LiveDeltaEnvelope =
   | TraceUpsertLiveEnvelope
