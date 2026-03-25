@@ -393,6 +393,8 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  position: relative;
+  overflow: visible;
 }
 
 .panel-head h2 {
@@ -1420,11 +1422,12 @@ body {
 
 .activity-head {
   align-items: center;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
+  flex-wrap: wrap;
+  overflow: visible;
   scrollbar-width: none;
   -ms-overflow-style: none;
+  position: relative;
+  z-index: 6;
 }
 
 .activity-head::-webkit-scrollbar {
@@ -1451,9 +1454,12 @@ body {
   min-width: max-content;
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
   flex: 1 0 auto;
+  position: relative;
+  overflow: visible;
 }
 
 .activity-head-status {
@@ -1480,6 +1486,133 @@ body {
   font-size: 0.62rem;
   line-height: 1.35;
   white-space: nowrap;
+}
+
+.activity-head-controls {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  z-index: 7;
+}
+
+.activity-head-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.activity-head-control-label {
+  font-size: 0.58rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.activity-head-select,
+.activity-color-trigger {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 0.62rem;
+  line-height: 1.35;
+}
+
+.activity-head-select {
+  padding: 4px 10px;
+}
+
+.activity-color-menu {
+  position: relative;
+  overflow: visible;
+}
+
+.activity-color-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.activity-head-select:hover,
+.activity-color-trigger:hover {
+  border-color: #94a3b8;
+  background: #f1f5f9;
+}
+
+.activity-head-select:focus-visible,
+.activity-color-trigger:focus-visible,
+.activity-color-option:focus-visible,
+.activity-color-custom input:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.activity-color-trigger-label {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.activity-color-current-swatch,
+.activity-color-option {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+}
+
+.activity-color-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 160px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 10px;
+  background: #f8fafc;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.activity-color-swatches {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.activity-color-option {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.activity-color-option.active {
+  box-shadow: 0 0 0 2px #0f766e;
+  border-color: #0f766e;
+}
+
+.activity-color-custom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.activity-color-custom input {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
 }
 
 .activity-day-timeline {

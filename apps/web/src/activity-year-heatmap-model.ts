@@ -1,4 +1,4 @@
-import type { AgentActivityYear } from "@agentlens/contracts";
+import type { ActivityHeatmapPresentation, AgentActivityYear } from "@agentlens/contracts";
 
 const HEATMAP_LEVEL_COUNT = 4;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -12,6 +12,7 @@ export interface ActivityYearHeatmapCellModel {
   weekIndex: number;
   weekdayIndex: number;
   totalSessionsInWindow: number;
+  heatmapValue: number;
   totalEventCount: number;
   peakConcurrentSessions: number;
   level: number;
@@ -24,12 +25,14 @@ export interface ActivityYearHeatmapWeekLabelModel {
 }
 
 export interface ActivityYearHeatmapModel {
+  presentation: ActivityHeatmapPresentation;
   dayCount: number;
   weekCount: number;
   startDateLabel: string;
   endDateLabel: string;
   yearLabel: string;
   maxDailySessions: number;
+  maxHeatmapValue: number;
   weekLabels: ActivityYearHeatmapWeekLabelModel[];
   weekdayLabels: string[];
   cells: ActivityYearHeatmapCellModel[];
@@ -99,12 +102,14 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
   const endDate = parseDateLocal(year.endDateLocal);
   if (!startDate || !endDate) {
     return {
+      presentation: year.presentation,
       dayCount: year.dayCount,
       weekCount: 0,
       startDateLabel: year.startDateLocal,
       endDateLabel: year.endDateLocal,
       yearLabel: `${year.startDateLocal}-${year.endDateLocal}`,
       maxDailySessions: 0,
+      maxHeatmapValue: 0,
       weekLabels: [],
       weekdayLabels: [...WEEKDAY_LABELS],
       cells: [],
@@ -115,6 +120,7 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
   const endCalendarDate = new Date(endDate.getTime() + (6 - endDate.getUTCDay()) * MS_PER_DAY);
   const weekCount = Math.max(1, Math.floor(dayDiff(startCalendarDate, endCalendarDate) / 7) + 1);
   const maxDailySessions = year.days.reduce((max, day) => Math.max(max, day.totalSessionsInWindow), 0);
+  const maxHeatmapValue = year.days.reduce((max, day) => Math.max(max, day.heatmapValue), 0);
   const cells: ActivityYearHeatmapCellModel[] = [];
 
   for (const day of year.days) {
@@ -134,9 +140,10 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
       weekIndex,
       weekdayIndex,
       totalSessionsInWindow: day.totalSessionsInWindow,
+      heatmapValue: day.heatmapValue,
       totalEventCount: day.totalEventCount,
       peakConcurrentSessions: day.peakConcurrentSessions,
-      level: levelForCount(day.totalSessionsInWindow, maxDailySessions),
+      level: levelForCount(day.heatmapValue, maxHeatmapValue),
     });
   }
 
@@ -162,12 +169,14 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
   }
 
   return {
+    presentation: year.presentation,
     dayCount: year.dayCount,
     weekCount,
     startDateLabel: formatRangeDateLabel(year.startDateLocal),
     endDateLabel: formatRangeDateLabel(year.endDateLocal),
     yearLabel: formatYearRangeLabel(year.startDateLocal, year.endDateLocal),
     maxDailySessions,
+    maxHeatmapValue,
     weekLabels,
     weekdayLabels: [...WEEKDAY_LABELS],
     cells,

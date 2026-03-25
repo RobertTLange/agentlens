@@ -47,6 +47,11 @@ describe("ActivityResponseCache", () => {
     const build = vi
       .fn()
       .mockReturnValueOnce({
+        presentation: {
+          metric: "sessions",
+          color: "#dc2626",
+          palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
+        },
         tzOffsetMinutes: 0,
         dayCount: 7,
         slotMinutes: 30,
@@ -57,6 +62,11 @@ describe("ActivityResponseCache", () => {
         days: [],
       })
       .mockReturnValueOnce({
+        presentation: {
+          metric: "sessions",
+          color: "#dc2626",
+          palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
+        },
         tzOffsetMinutes: 0,
         dayCount: 7,
         slotMinutes: 30,
@@ -74,6 +84,8 @@ describe("ActivityResponseCache", () => {
       slotMinutes: 30,
       hourStartLocal: 7,
       hourEndLocal: 7,
+      heatmapMetric: "sessions",
+      heatmapColor: "#dc2626",
     }, build);
     const second = cache.getOrBuildWeek(4, 2_000, {
       endDateLocal: "2026-02-11",
@@ -82,6 +94,8 @@ describe("ActivityResponseCache", () => {
       slotMinutes: 30,
       hourStartLocal: 7,
       hourEndLocal: 7,
+      heatmapMetric: "sessions",
+      heatmapColor: "#dc2626",
     }, build);
 
     expect(first).not.toBe(second);
@@ -93,6 +107,11 @@ describe("ActivityResponseCache", () => {
     const build = vi
       .fn()
       .mockReturnValueOnce({
+        presentation: {
+          metric: "sessions",
+          color: "#dc2626",
+          palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
+        },
         tzOffsetMinutes: 0,
         dayCount: 80,
         startDateLocal: "2026-01-05",
@@ -109,6 +128,11 @@ describe("ActivityResponseCache", () => {
         },
       })
       .mockReturnValueOnce({
+        presentation: {
+          metric: "sessions",
+          color: "#dc2626",
+          palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
+        },
         tzOffsetMinutes: 0,
         dayCount: 80,
         startDateLocal: "2026-01-05",
@@ -129,16 +153,22 @@ describe("ActivityResponseCache", () => {
       endDateLocal: "2026-03-24",
       tzOffsetMinutes: 0,
       dayCount: 80,
+      heatmapMetric: "sessions",
+      heatmapColor: "#dc2626",
     }, build);
     const second = cache.getOrBuildYear(5, 2_000, {
       endDateLocal: "2026-03-24",
       tzOffsetMinutes: 0,
       dayCount: 80,
+      heatmapMetric: "sessions",
+      heatmapColor: "#dc2626",
     }, build);
     const third = cache.getOrBuildYear(6, 3_000, {
       endDateLocal: "2026-03-24",
       tzOffsetMinutes: 0,
       dayCount: 80,
+      heatmapMetric: "sessions",
+      heatmapColor: "#dc2626",
     }, build);
 
     expect(first).toBe(second);

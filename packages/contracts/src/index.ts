@@ -12,6 +12,7 @@ export type EventKind =
 
 export type SessionActivityStatus = "running" | "waiting_input" | "idle";
 export type ActivityBinsMode = "time" | "event_index";
+export type ActivityHeatmapMetric = "sessions" | "output_tokens" | "total_cost_usd";
 export type CostUnknownModelPolicy = "n_a" | "zero";
 export type ScanMode = "adaptive" | "fixed";
 export type RetentionStrategy = "aggressive_recency" | "full_memory";
@@ -49,6 +50,11 @@ export interface TraceInspectorConfig {
   topModelCount: number;
   showAgentBadges: boolean;
   showHealthDiagnostics: boolean;
+}
+
+export interface ActivityHeatmapConfig {
+  metric: ActivityHeatmapMetric;
+  color: string;
 }
 
 export interface RedactionConfig {
@@ -132,6 +138,7 @@ export interface AppConfig {
   sessionLogDirectories: SessionLogDirectoryConfig[];
   sources: Record<string, SourceProfileConfig>;
   traceInspector: TraceInspectorConfig;
+  activityHeatmap: ActivityHeatmapConfig;
   redaction: RedactionConfig;
   cost: CostConfig;
   models: ModelsConfig;
@@ -230,6 +237,8 @@ export interface AgentActivityBin {
   startMs: number;
   endMs: number;
   activeSessionCount: number;
+  heatmapValue: number;
+  heatmapValues?: ActivityHeatmapMetricValues;
   activeTraceIds: string[];
   primaryTraceId: string;
   activeByAgent: Record<AgentKind, number>;
@@ -238,6 +247,18 @@ export interface AgentActivityBin {
   dominantAgent: AgentKind | "none";
   dominantEventKind: EventKind | "none";
   isBreak: boolean;
+}
+
+export interface ActivityHeatmapPresentation {
+  metric: ActivityHeatmapMetric;
+  color: string;
+  palette: [string, string, string, string, string];
+}
+
+export interface ActivityHeatmapMetricValues {
+  sessions: number;
+  output_tokens: number;
+  total_cost_usd: number;
 }
 
 export interface AgentActivityDay {
@@ -259,6 +280,8 @@ export interface AgentActivityWeekDay {
   windowStartMs: number;
   windowEndMs: number;
   totalSessionsInWindow: number;
+  heatmapValue: number;
+  heatmapValues?: ActivityHeatmapMetricValues;
   peakConcurrentSessions: number;
   peakConcurrentAtMs: number | null;
   totalEventCount: number;
@@ -266,6 +289,7 @@ export interface AgentActivityWeekDay {
 }
 
 export interface AgentActivityWeek {
+  presentation: ActivityHeatmapPresentation;
   tzOffsetMinutes: number;
   dayCount: number;
   slotMinutes: number;
@@ -306,12 +330,15 @@ export interface AgentActivityYearDay {
   windowStartMs: number;
   windowEndMs: number;
   totalSessionsInWindow: number;
+  heatmapValue: number;
+  heatmapValues?: ActivityHeatmapMetricValues;
   peakConcurrentSessions: number;
   peakConcurrentAtMs: number | null;
   totalEventCount: number;
 }
 
 export interface AgentActivityYear {
+  presentation: ActivityHeatmapPresentation;
   tzOffsetMinutes: number;
   dayCount: number;
   startDateLocal: string;

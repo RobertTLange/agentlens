@@ -44,7 +44,14 @@ export class ActivityResponseCache {
       Required<
         Pick<
           BuildAgentActivityWeekOptions,
-          "endDateLocal" | "tzOffsetMinutes" | "dayCount" | "slotMinutes" | "hourStartLocal" | "hourEndLocal"
+          | "endDateLocal"
+          | "tzOffsetMinutes"
+          | "dayCount"
+          | "slotMinutes"
+          | "hourStartLocal"
+          | "hourEndLocal"
+          | "heatmapMetric"
+          | "heatmapColor"
         >
       >
     >,
@@ -60,7 +67,11 @@ export class ActivityResponseCache {
       Required<
         Pick<
           BuildAgentActivityYearOptions,
-          "endDateLocal" | "tzOffsetMinutes" | "dayCount"
+          | "endDateLocal"
+          | "tzOffsetMinutes"
+          | "dayCount"
+          | "heatmapMetric"
+          | "heatmapColor"
         >
       >
     >,
@@ -77,6 +88,7 @@ export class ActivityResponseCache {
       windowEndMs: number;
       binMinutes: number;
       breakMinutes: number;
+      heatmapMetric: string;
     }>,
     build: () => WindowActivityValue,
   ): WindowActivityValue {
@@ -118,7 +130,14 @@ export class ActivityResponseCache {
       Required<
         Pick<
           BuildAgentActivityWeekOptions,
-          "endDateLocal" | "tzOffsetMinutes" | "dayCount" | "slotMinutes" | "hourStartLocal" | "hourEndLocal"
+          | "endDateLocal"
+          | "tzOffsetMinutes"
+          | "dayCount"
+          | "slotMinutes"
+          | "hourStartLocal"
+          | "hourEndLocal"
+          | "heatmapMetric"
+          | "heatmapColor"
         >
       >
     >,
@@ -133,6 +152,7 @@ export class ActivityResponseCache {
       windowEndMs: number;
       binMinutes: number;
       breakMinutes: number;
+      heatmapMetric: string;
     }>,
   ): string {
     return `window|v=${version}|${stableParamsKey(options)}`;
@@ -140,7 +160,14 @@ export class ActivityResponseCache {
 
   private buildYearKey(
     version: number,
-    options: Readonly<Required<Pick<BuildAgentActivityYearOptions, "endDateLocal" | "tzOffsetMinutes" | "dayCount">>>,
+    options: Readonly<
+      Required<
+        Pick<
+          BuildAgentActivityYearOptions,
+          "endDateLocal" | "tzOffsetMinutes" | "dayCount" | "heatmapMetric" | "heatmapColor"
+        >
+      >
+    >,
   ): string {
     return `year|v=${version}|${stableParamsKey(options)}`;
   }

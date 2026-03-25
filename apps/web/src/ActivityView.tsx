@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import type { AgentActivityDay, AgentActivityWeek, AgentActivityYear, AgentKind } from "@agentlens/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject } from "react";
+import type {
+  ActivityHeatmapMetric,
+  ActivityHeatmapMetricValues,
+  ActivityHeatmapPresentation,
+  AgentActivityDay,
+  AgentActivityWeek,
+  AgentActivityYear,
+  AgentKind,
+} from "@agentlens/contracts";
 import { buildActivityViewModel, type ActivityTimelineRowModel } from "./activity-view-model.js";
 import {
   buildActivityWeekHeatmapModel,
@@ -8,7 +16,7 @@ import {
   type TraceTokenTotalsSnapshot,
 } from "./activity-week-heatmap-model.js";
 import { buildActivityYearHeatmapModel } from "./activity-year-heatmap-model.js";
-import { formatCompactNumber, formatPercent, iconForAgent } from "./view-model.js";
+import { formatCompactNumber, formatPercent, formatUsd, iconForAgent } from "./view-model.js";
 
 const API = "";
 const DAY_MINUTES = 24 * 60;
@@ -46,6 +54,20 @@ const AGENT_LEGEND_ITEMS: Array<{ label: string; className: string }> = [
   { label: "unknown", className: "agent-border-unknown" },
 ];
 const AGENT_TOOLTIP_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "pi", "unknown"];
+const HEATMAP_METRIC_OPTIONS: Array<{ value: ActivityHeatmapMetric; label: string }> = [
+  { value: "sessions", label: "Sessions" },
+  { value: "output_tokens", label: "Output Tokens" },
+  { value: "total_cost_usd", label: "Total Cost" },
+];
+const HEATMAP_COLOR_PRESETS: Array<{ label: string; value: string }> = [
+  { label: "Red", value: "#dc2626" },
+  { label: "Green", value: "#16a34a" },
+  { label: "Blue", value: "#2563eb" },
+  { label: "Amber", value: "#d97706" },
+  { label: "Teal", value: "#0f766e" },
+];
+const DEFAULT_HEATMAP_COLOR = "#dc2626";
+const ACTIVITY_REQUEST_TIMEOUT_MS = 10_000;
 
 interface ActivityDayResponse {
   activity: AgentActivityDay;
@@ -115,7 +137,15 @@ function deriveBinMinutesForViewport(viewportWidth: number): number {
 
 function buildWeekCellTooltip(
   day: { dayLabel: string; dateLocal: string; totalSessionsInWindow: number },
-  cell: { timeLabel: string; activeSessionCount: number; activeByAgent: Record<AgentKind, number>; eventCount: number; level: number },
+  cell: {
+    timeLabel: string;
+    activeSessionCount: number;
+    heatmapValue: number;
+    activeByAgent: Record<AgentKind, number>;
+    eventCount: number;
+    level: number;
+  },
+  metric: ActivityHeatmapMetric,
 ): string {
   const activeAgentSummary = AGENT_TOOLTIP_ORDER.flatMap((agent) => {
     const count = cell.activeByAgent[agent] ?? 0;
@@ -126,6 +156,7 @@ function buildWeekCellTooltip(
     `${day.dayLabel} (${day.dateLocal})`,
     `${cell.timeLabel}`,
     `sessions ${cell.activeSessionCount}`,
+    `${heatmapMetricLabel(metric)} ${formatHeatmapMetricValue(metric, cell.heatmapValue)}`,
     `sessions by agent ${activeAgentSummary || "none"}`,
     `events ${cell.eventCount}`,
     `day sessions ${day.totalSessionsInWindow}`,
@@ -155,17 +186,121 @@ function buildYearCellTooltip(cell: {
   dayLabel: string;
   dateLocal: string;
   totalSessionsInWindow: number;
+  heatmapValue: number;
   totalEventCount: number;
   peakConcurrentSessions: number;
   level: number;
-}): string {
+}, metric: ActivityHeatmapMetric): string {
   return [
     `${cell.dayLabel} (${cell.dateLocal})`,
     `sessions ${cell.totalSessionsInWindow}`,
+    `${heatmapMetricLabel(metric)} ${formatHeatmapMetricValue(metric, cell.heatmapValue)}`,
     `events ${cell.totalEventCount}`,
     `peak conc. ${cell.peakConcurrentSessions}`,
     `intensity ${cell.level}/4`,
   ].join(" · ");
+}
+
+function heatmapMetricLabel(metric: ActivityHeatmapMetric): string {
+  if (metric === "output_tokens") return "out tokens";
+  if (metric === "total_cost_usd") return "cost";
+  return "sessions";
+}
+
+function formatHeatmapMetricValue(metric: ActivityHeatmapMetric, value: number): string {
+  if (metric === "total_cost_usd") return formatUsd(value);
+  return formatCompactNumber(value);
+}
+
+function weekDayHeatmapSummary(day: { totalSessionsInWindow: number; heatmapValue?: number }, metric: ActivityHeatmapMetric): string {
+  if (metric === "sessions") {
+    return formatCompactNumber(day.totalSessionsInWindow);
+  }
+  return formatHeatmapMetricValue(metric, day.heatmapValue ?? 0);
+}
+
+function heatmapPaletteStyle(palette: readonly string[]): CSSProperties {
+  return {
+    "--activity-week-level-0": palette[0] ?? "#ffffff",
+    "--activity-week-level-1": palette[1] ?? "#fee2e2",
+    "--activity-week-level-2": palette[2] ?? "#fca5a5",
+    "--activity-week-level-3": palette[3] ?? "#ef4444",
+    "--activity-week-level-4": palette[4] ?? "#b91c1c",
+  } as CSSProperties;
+}
+
+function normalizeHeatmapColor(color: string): string {
+  return color.trim().toLowerCase();
+}
+
+function heatmapMetricValue(metric: ActivityHeatmapMetric, values: ActivityHeatmapMetricValues | undefined, fallback: number): number {
+  if (!values) return fallback;
+  if (metric === "sessions") return values.sessions;
+  if (metric === "output_tokens") return values.output_tokens;
+  return values.total_cost_usd;
+}
+
+function hexChannel(color: string, start: number): number {
+  return Number.parseInt(color.slice(start, start + 2), 16);
+}
+
+function toHexChannel(value: number): string {
+  return Math.round(Math.max(0, Math.min(255, value)))
+    .toString(16)
+    .padStart(2, "0");
+}
+
+function mixHexColor(color: string, colorWeight: number): string {
+  const normalized = normalizeHeatmapColor(color);
+  const baseWeight = Math.max(0, Math.min(1, colorWeight));
+  const whiteWeight = 1 - baseWeight;
+  const red = hexChannel(normalized, 1) * baseWeight + 255 * whiteWeight;
+  const green = hexChannel(normalized, 3) * baseWeight + 255 * whiteWeight;
+  const blue = hexChannel(normalized, 5) * baseWeight + 255 * whiteWeight;
+  return `#${toHexChannel(red)}${toHexChannel(green)}${toHexChannel(blue)}`;
+}
+
+function buildLocalHeatmapPresentation(metric: ActivityHeatmapMetric, color: string): ActivityHeatmapPresentation {
+  const normalizedColor = normalizeHeatmapColor(color);
+  return {
+    metric,
+    color: normalizedColor,
+    palette: [
+      "#ffffff",
+      mixHexColor(normalizedColor, 0.18),
+      mixHexColor(normalizedColor, 0.38),
+      mixHexColor(normalizedColor, 0.62),
+      mixHexColor(normalizedColor, 0.82),
+    ],
+  };
+}
+
+function applyWeekHeatmapOverrides(week: AgentActivityWeek, metric: ActivityHeatmapMetric, color: string): AgentActivityWeek {
+  const presentation = buildLocalHeatmapPresentation(metric, color);
+  return {
+    ...week,
+    presentation,
+    days: week.days.map((day) => ({
+      ...day,
+      heatmapValue: heatmapMetricValue(metric, day.heatmapValues, day.heatmapValue),
+      bins: day.bins.map((bin) => ({
+        ...bin,
+        heatmapValue: heatmapMetricValue(metric, bin.heatmapValues, bin.heatmapValue),
+      })),
+    })),
+  };
+}
+
+function applyYearHeatmapOverrides(year: AgentActivityYear, metric: ActivityHeatmapMetric, color: string): AgentActivityYear {
+  const presentation = buildLocalHeatmapPresentation(metric, color);
+  return {
+    ...year,
+    presentation,
+    days: year.days.map((day) => ({
+      ...day,
+      heatmapValue: heatmapMetricValue(metric, day.heatmapValues, day.heatmapValue),
+    })),
+  };
 }
 
 interface UsageSummarySectionProps {
@@ -445,6 +580,11 @@ function buildSessionSegments(
 
 function weekSnapshotFromDayActivity(day: AgentActivityDay): AgentActivityWeek {
   return {
+    presentation: {
+      metric: "sessions",
+      color: "#dc2626",
+      palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
+    },
     tzOffsetMinutes: day.tzOffsetMinutes,
     dayCount: 1,
     slotMinutes: day.binMinutes,
@@ -458,6 +598,7 @@ function weekSnapshotFromDayActivity(day: AgentActivityDay): AgentActivityWeek {
         windowStartMs: day.windowStartMs,
         windowEndMs: day.windowEndMs,
         totalSessionsInWindow: day.totalSessionsInWindow,
+        heatmapValue: day.totalSessionsInWindow,
         peakConcurrentSessions: day.peakConcurrentSessions,
         peakConcurrentAtMs: day.peakConcurrentAtMs,
         totalEventCount: day.totalEventCount,
@@ -472,6 +613,12 @@ export function ActivityView({
   traceAgentById,
   traceTokenTotalsById,
 }: ActivityViewProps): JSX.Element {
+  const dayRequestSeqRef = useRef(0);
+  const weekRequestSeqRef = useRef(0);
+  const yearRequestSeqRef = useRef(0);
+  const dayAbortRef = useRef<AbortController | null>(null);
+  const weekAbortRef = useRef<AbortController | null>(null);
+  const yearAbortRef = useRef<AbortController | null>(null);
   const [selectedDateLocal, setSelectedDateLocal] = useState(() => defaultSelectedActivityDateLocal());
   const [selectedWeekEndDateLocal, setSelectedWeekEndDateLocal] = useState(() => todayLocalDateString());
   const [todayDateLocal, setTodayDateLocal] = useState(() => todayLocalDateString());
@@ -484,6 +631,14 @@ export function ActivityView({
   const [isDaySummaryExpanded, setIsDaySummaryExpanded] = useState(false);
   const [isWeekSummaryExpanded, setIsWeekSummaryExpanded] = useState(false);
   const [isYearSummaryExpanded, setIsYearSummaryExpanded] = useState(false);
+  const [defaultHeatmapMetric, setDefaultHeatmapMetric] = useState<ActivityHeatmapMetric>("sessions");
+  const [defaultHeatmapColor, setDefaultHeatmapColor] = useState(DEFAULT_HEATMAP_COLOR);
+  const [selectedHeatmapMetric, setSelectedHeatmapMetric] = useState<ActivityHeatmapMetric | null>(null);
+  const [selectedHeatmapColor, setSelectedHeatmapColor] = useState<string | null>(null);
+  const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
+  const [dayError, setDayError] = useState("");
+  const [weekError, setWeekError] = useState("");
+  const [yearError, setYearError] = useState("");
   const [status, setStatus] = useState("Loading daily activity...");
 
   const selectActivityDate = useCallback(
@@ -496,7 +651,41 @@ export function ActivityView({
     [todayDateLocal],
   );
 
+  const displayedHeatmapMetric = selectedHeatmapMetric ?? defaultHeatmapMetric;
+  const displayedHeatmapColor = selectedHeatmapColor ?? defaultHeatmapColor;
+
+  const handleHeatmapMetricChange = useCallback(
+    (metric: ActivityHeatmapMetric): void => {
+      setSelectedHeatmapMetric(metric === defaultHeatmapMetric ? null : metric);
+    },
+    [defaultHeatmapMetric],
+  );
+
+  const handleHeatmapColorChange = useCallback(
+    (color: string): void => {
+      const normalizedColor = normalizeHeatmapColor(color);
+      setSelectedHeatmapColor(normalizedColor === defaultHeatmapColor ? null : normalizedColor);
+      setIsColorPickerOpen(false);
+    },
+    [defaultHeatmapColor],
+  );
+
+  const abortInFlightRequest = useCallback((ref: MutableRefObject<AbortController | null>): void => {
+    ref.current?.abort();
+    ref.current = null;
+  }, []);
+
   const fetchDayActivity = useCallback(async (dateLocal: string): Promise<void> => {
+    const requestSeq = dayRequestSeqRef.current + 1;
+    dayRequestSeqRef.current = requestSeq;
+    abortInFlightRequest(dayAbortRef);
+    const abortController = new AbortController();
+    dayAbortRef.current = abortController;
+    let didTimeout = false;
+    const timeoutId = window.setTimeout(() => {
+      didTimeout = true;
+      abortController.abort();
+    }, ACTIVITY_REQUEST_TIMEOUT_MS);
     const tzOffsetMinutes = new Date().getTimezoneOffset();
     const binMinutes = deriveBinMinutesForViewport(window.innerWidth || 1280);
     const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -504,22 +693,44 @@ export function ActivityView({
 
     setIsDayLoading(true);
     try {
-      const dayResponse = await fetch(dayUrl, { cache: "no-store" });
+      const dayResponse = await fetch(dayUrl, { cache: "no-store", signal: abortController.signal });
       if (!dayResponse.ok) {
         const payload = (await dayResponse.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error || `HTTP ${dayResponse.status}`);
       }
       const dayPayload = (await dayResponse.json()) as ActivityDayResponse;
+      if (requestSeq !== dayRequestSeqRef.current) return;
       setActivity(dayPayload.activity);
+      setDayError("");
       setStatus(`Daily updated ${refreshedAt}`);
     } catch (error) {
-      setStatus(`Daily activity failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (requestSeq !== dayRequestSeqRef.current) return;
+      if (abortController.signal.aborted && !didTimeout) return;
+      const message = didTimeout
+        ? "Daily activity timed out"
+        : `Daily activity failed: ${error instanceof Error ? error.message : String(error)}`;
+      setDayError(message);
+      setStatus(message);
     } finally {
-      setIsDayLoading(false);
+      window.clearTimeout(timeoutId);
+      if (requestSeq === dayRequestSeqRef.current) {
+        dayAbortRef.current = null;
+        setIsDayLoading(false);
+      }
     }
-  }, []);
+  }, [abortInFlightRequest]);
 
   const fetchWeekActivity = useCallback(async (endDateLocal: string): Promise<void> => {
+    const requestSeq = weekRequestSeqRef.current + 1;
+    weekRequestSeqRef.current = requestSeq;
+    abortInFlightRequest(weekAbortRef);
+    const abortController = new AbortController();
+    weekAbortRef.current = abortController;
+    let didTimeout = false;
+    const timeoutId = window.setTimeout(() => {
+      didTimeout = true;
+      abortController.abort();
+    }, ACTIVITY_REQUEST_TIMEOUT_MS);
     const tzOffsetMinutes = new Date().getTimezoneOffset();
     const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const weekUrl =
@@ -532,22 +743,51 @@ export function ActivityView({
 
     setIsWeekLoading(true);
     try {
-      const weekResponse = await fetch(weekUrl, { cache: "no-store" });
+      const weekResponse = await fetch(weekUrl, { cache: "no-store", signal: abortController.signal });
       if (!weekResponse.ok) {
         const payload = (await weekResponse.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error || `HTTP ${weekResponse.status}`);
       }
       const weekPayload = (await weekResponse.json()) as ActivityWeekResponse;
+      if (requestSeq !== weekRequestSeqRef.current) return;
+      setDefaultHeatmapMetric((current) =>
+        current === weekPayload.activity.presentation.metric ? current : weekPayload.activity.presentation.metric,
+      );
+      setDefaultHeatmapColor((current) => {
+        const next = weekPayload.activity.presentation.color;
+        return current === next ? current : next;
+      });
       setActivityWeek(weekPayload.activity);
+      setWeekError("");
       setStatus(`Week updated ${refreshedAt}`);
     } catch (error) {
-      setStatus(`Week Heatmap failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (requestSeq !== weekRequestSeqRef.current) return;
+      if (abortController.signal.aborted && !didTimeout) return;
+      const message = didTimeout
+        ? "Week Heatmap timed out"
+        : `Week Heatmap failed: ${error instanceof Error ? error.message : String(error)}`;
+      setWeekError(message);
+      setStatus(message);
     } finally {
-      setIsWeekLoading(false);
+      window.clearTimeout(timeoutId);
+      if (requestSeq === weekRequestSeqRef.current) {
+        weekAbortRef.current = null;
+        setIsWeekLoading(false);
+      }
     }
-  }, []);
+  }, [abortInFlightRequest]);
 
   const fetchYearActivity = useCallback(async (endDateLocal: string): Promise<void> => {
+    const requestSeq = yearRequestSeqRef.current + 1;
+    yearRequestSeqRef.current = requestSeq;
+    abortInFlightRequest(yearAbortRef);
+    const abortController = new AbortController();
+    yearAbortRef.current = abortController;
+    let didTimeout = false;
+    const timeoutId = window.setTimeout(() => {
+      didTimeout = true;
+      abortController.abort();
+    }, ACTIVITY_REQUEST_TIMEOUT_MS);
     const tzOffsetMinutes = new Date().getTimezoneOffset();
     const refreshedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const yearUrl =
@@ -557,20 +797,39 @@ export function ActivityView({
 
     setIsYearLoading(true);
     try {
-      const yearResponse = await fetch(yearUrl, { cache: "no-store" });
+      const yearResponse = await fetch(yearUrl, { cache: "no-store", signal: abortController.signal });
       if (!yearResponse.ok) {
         const payload = (await yearResponse.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error || `HTTP ${yearResponse.status}`);
       }
       const yearPayload = (await yearResponse.json()) as ActivityYearResponse;
+      if (requestSeq !== yearRequestSeqRef.current) return;
+      setDefaultHeatmapMetric((current) =>
+        current === yearPayload.activity.presentation.metric ? current : yearPayload.activity.presentation.metric,
+      );
+      setDefaultHeatmapColor((current) => {
+        const next = yearPayload.activity.presentation.color;
+        return current === next ? current : next;
+      });
       setActivityYear(yearPayload.activity);
+      setYearError("");
       setStatus(`Year updated ${refreshedAt}`);
     } catch (error) {
-      setStatus(`Year Heatmap failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (requestSeq !== yearRequestSeqRef.current) return;
+      if (abortController.signal.aborted && !didTimeout) return;
+      const message = didTimeout
+        ? "Year Heatmap timed out"
+        : `Year Heatmap failed: ${error instanceof Error ? error.message : String(error)}`;
+      setYearError(message);
+      setStatus(message);
     } finally {
-      setIsYearLoading(false);
+      window.clearTimeout(timeoutId);
+      if (requestSeq === yearRequestSeqRef.current) {
+        yearAbortRef.current = null;
+        setIsYearLoading(false);
+      }
     }
-  }, []);
+  }, [abortInFlightRequest]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -581,6 +840,14 @@ export function ActivityView({
       window.clearInterval(intervalId);
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      abortInFlightRequest(dayAbortRef);
+      abortInFlightRequest(weekAbortRef);
+      abortInFlightRequest(yearAbortRef);
+    };
+  }, [abortInFlightRequest]);
 
   useEffect(() => {
     let isDisposed = false;
@@ -637,19 +904,41 @@ export function ActivityView({
     void fetchYearActivity(todayDateLocal);
   }, [fetchYearActivity, todayDateLocal]);
 
+  const effectiveActivityWeek = useMemo(
+    () => (activityWeek ? applyWeekHeatmapOverrides(activityWeek, displayedHeatmapMetric, displayedHeatmapColor) : null),
+    [activityWeek, displayedHeatmapColor, displayedHeatmapMetric],
+  );
+  const effectiveActivityYear = useMemo(
+    () => (activityYear ? applyYearHeatmapOverrides(activityYear, displayedHeatmapMetric, displayedHeatmapColor) : null),
+    [activityYear, displayedHeatmapColor, displayedHeatmapMetric],
+  );
   const model = useMemo(() => (activity ? buildActivityViewModel(activity) : null), [activity]);
-  const weekModel = useMemo(() => (activityWeek ? buildActivityWeekHeatmapModel(activityWeek) : null), [activityWeek]);
-  const yearModel = useMemo(() => (activityYear ? buildActivityYearHeatmapModel(activityYear) : null), [activityYear]);
+  const weekModel = useMemo(
+    () => (effectiveActivityWeek ? buildActivityWeekHeatmapModel(effectiveActivityWeek) : null),
+    [effectiveActivityWeek],
+  );
+  const yearModel = useMemo(
+    () => (effectiveActivityYear ? buildActivityYearHeatmapModel(effectiveActivityYear) : null),
+    [effectiveActivityYear],
+  );
+  const weekHeatmapStyle = useMemo(
+    () => (weekModel ? heatmapPaletteStyle(weekModel.presentation.palette) : undefined),
+    [weekModel],
+  );
+  const yearHeatmapStyle = useMemo(
+    () => (yearModel ? heatmapPaletteStyle(yearModel.presentation.palette) : undefined),
+    [yearModel],
+  );
   const dailyUsageSummary = useMemo(
     () =>
       activity ? buildWeeklyUsageSummary(weekSnapshotFromDayActivity(activity), traceAgentById, traceTokenTotalsById) : null,
     [activity, traceAgentById, traceTokenTotalsById],
   );
   const weeklyUsageSummary = useMemo(
-    () => (activityWeek ? buildWeeklyUsageSummary(activityWeek, traceAgentById, traceTokenTotalsById) : null),
-    [activityWeek, traceAgentById, traceTokenTotalsById],
+    () => (effectiveActivityWeek ? buildWeeklyUsageSummary(effectiveActivityWeek, traceAgentById, traceTokenTotalsById) : null),
+    [effectiveActivityWeek, traceAgentById, traceTokenTotalsById],
   );
-  const yearlyUsageSummary = activityYear?.usageSummary ?? null;
+  const yearlyUsageSummary = effectiveActivityYear?.usageSummary ?? null;
   const binCount = model?.rows.length ?? 0;
   const { segments, laneCount } = useMemo(
     () => (model ? buildSessionSegments(model.rows, traceAgentById) : { segments: [], laneCount: 1 }),
@@ -683,6 +972,70 @@ export function ActivityView({
           <div className="activity-head-meta mono">{activity ? `${activity.dateLocal} overview` : "today"}</div>
         </div>
         <div className="activity-head-right">
+          <div className="activity-head-controls" aria-label="heatmap display controls">
+            <label className="activity-head-control">
+              <span className="mono activity-head-control-label">metric</span>
+              <select
+                className="mono activity-head-select"
+                aria-label="Heatmap metric"
+                value={displayedHeatmapMetric}
+                onChange={(event) => {
+                  handleHeatmapMetricChange(event.target.value as ActivityHeatmapMetric);
+                }}
+              >
+                {HEATMAP_METRIC_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="activity-color-menu">
+              <button
+                type="button"
+                className="mono activity-color-trigger"
+                aria-label="Heatmap color"
+                aria-expanded={isColorPickerOpen}
+                data-current-color={displayedHeatmapColor}
+                onClick={() => {
+                  setIsColorPickerOpen((current) => !current);
+                }}
+              >
+                <span className="activity-color-trigger-label">color</span>
+                <span className="activity-color-current-swatch" style={{ background: displayedHeatmapColor }} aria-hidden="true" />
+              </button>
+              {isColorPickerOpen ? (
+                <div className="activity-color-popover" role="dialog" aria-label="Heatmap color picker">
+                  <div className="activity-color-swatches">
+                    {HEATMAP_COLOR_PRESETS.map((preset) => (
+                      <button
+                        key={preset.value}
+                        type="button"
+                        className={`activity-color-option ${displayedHeatmapColor === preset.value ? "active" : ""}`}
+                        aria-label={`Use ${preset.label} heatmap color`}
+                        data-color={preset.value}
+                        onClick={() => {
+                          handleHeatmapColorChange(preset.value);
+                        }}
+                        style={{ background: preset.value }}
+                      />
+                    ))}
+                  </div>
+                  <label className="activity-color-custom">
+                    <span className="mono activity-head-control-label">custom</span>
+                    <input
+                      type="color"
+                      aria-label="Custom heatmap color"
+                      value={displayedHeatmapColor}
+                      onChange={(event) => {
+                        handleHeatmapColorChange(event.target.value);
+                      }}
+                    />
+                  </label>
+                </div>
+              ) : null}
+            </div>
+          </div>
           <div className="activity-head-status mono">{headerStatus}</div>
           {activity && model ? (
             <div className="activity-head-stats" aria-label="daily activity summary">
@@ -817,11 +1170,13 @@ export function ActivityView({
         )}
 
         {weekModel ? (
-          <section className="activity-week-heatmap" aria-label="weekly activity heatmap">
+          <section className="activity-week-heatmap" aria-label="weekly activity heatmap" style={weekHeatmapStyle}>
             <div className="activity-week-plot">
               <div className="activity-week-head">
                 <div className="mono activity-week-title">Weekly Activity</div>
-                <div className="mono activity-week-meta">{`${weekModel.startDateLabel}-${weekModel.endDateLabel} · ${weekModel.windowLabel} · ${weekModel.slotMinutes}m bins`}</div>
+                <div className="mono activity-week-meta">
+                  {`${weekModel.startDateLabel}-${weekModel.endDateLabel} · ${weekModel.windowLabel} · ${weekModel.slotMinutes}m bins · ${heatmapMetricLabel(weekModel.presentation.metric)}`}
+                </div>
               </div>
               <div className="activity-week-scale" aria-hidden="true">
                 {weekModel.scaleLabels.map((label) => (
@@ -850,7 +1205,7 @@ export function ActivityView({
                       }}
                       title={`Show Daily Activity for ${day.dateLocal}`}
                     >
-                      {`${day.dayLabel} · ${formatCompactNumber(day.totalSessionsInWindow)}`}
+                      {`${day.dayLabel} · ${weekDayHeatmapSummary(day, weekModel.presentation.metric)}`}
                     </button>
                     <div
                       className="activity-week-row-cells"
@@ -861,7 +1216,7 @@ export function ActivityView({
                       }
                     >
                       {day.cells.map((cell) => {
-                        const tooltip = buildWeekCellTooltip(day, cell);
+                        const tooltip = buildWeekCellTooltip(day, cell, weekModel.presentation.metric);
                         return (
                           <button
                             key={cell.key}
@@ -882,13 +1237,13 @@ export function ActivityView({
                 ))}
               </div>
               <div className="activity-week-legend" aria-hidden="true">
-                <span className="mono">less</span>
+                <span className="mono">{`less ${heatmapMetricLabel(weekModel.presentation.metric)}`}</span>
                 <span className="activity-week-legend-swatch level-0" />
                 <span className="activity-week-legend-swatch level-1" />
                 <span className="activity-week-legend-swatch level-2" />
                 <span className="activity-week-legend-swatch level-3" />
                 <span className="activity-week-legend-swatch level-4" />
-                <span className="mono">more</span>
+                <span className="mono">{`more ${heatmapMetricLabel(weekModel.presentation.metric)}`}</span>
               </div>
               {weeklyUsageSummary ? (
                 <button
@@ -922,15 +1277,19 @@ export function ActivityView({
               <div className="mono activity-week-meta">Loading...</div>
             </div>
           </section>
-        ) : null}
+        ) : (
+          <section className="activity-week-heatmap activity-week-empty" aria-label="weekly activity heatmap unavailable">
+            <div className="empty">{weekError || "Weekly activity unavailable."}</div>
+          </section>
+        )}
 
         {yearModel ? (
-          <section className="activity-year-heatmap" aria-label="yearly activity heatmap">
+          <section className="activity-year-heatmap" aria-label="yearly activity heatmap" style={yearHeatmapStyle}>
             <div className="activity-year-plot">
               <div className="activity-year-head">
                 <div className="mono activity-year-title">Yearly Activity</div>
                 <div className="mono activity-year-meta">
-                  {`${yearModel.yearLabel} · ${yearModel.startDateLabel}-${yearModel.endDateLabel} · daily aggregation`}
+                  {`${yearModel.yearLabel} · ${yearModel.startDateLabel}-${yearModel.endDateLabel} · daily aggregation · ${heatmapMetricLabel(yearModel.presentation.metric)}`}
                 </div>
               </div>
               <div className="activity-year-chart">
@@ -970,7 +1329,7 @@ export function ActivityView({
                         onClick={() => {
                           selectActivityDate(cell.dateLocal, "year");
                         }}
-                        title={buildYearCellTooltip(cell)}
+                        title={buildYearCellTooltip(cell, yearModel.presentation.metric)}
                         aria-label={`Show Daily Activity for ${cell.dateLocal}`}
                       />
                     ))}
@@ -978,13 +1337,13 @@ export function ActivityView({
                 </div>
               </div>
               <div className="activity-week-legend" aria-hidden="true">
-                <span className="mono">less</span>
+                <span className="mono">{`less ${heatmapMetricLabel(yearModel.presentation.metric)}`}</span>
                 <span className="activity-week-legend-swatch level-0" />
                 <span className="activity-week-legend-swatch level-1" />
                 <span className="activity-week-legend-swatch level-2" />
                 <span className="activity-week-legend-swatch level-3" />
                 <span className="activity-week-legend-swatch level-4" />
-                <span className="mono">more</span>
+                <span className="mono">{`more ${heatmapMetricLabel(yearModel.presentation.metric)}`}</span>
               </div>
               {yearlyUsageSummary ? (
                 <button
@@ -1018,7 +1377,11 @@ export function ActivityView({
               <div className="mono activity-year-meta">Loading...</div>
             </div>
           </section>
-        ) : null}
+        ) : (
+          <section className="activity-year-heatmap activity-year-empty" aria-label="yearly activity heatmap unavailable">
+            <div className="empty">{yearError || "Yearly activity unavailable."}</div>
+          </section>
+        )}
       </>
     </section>
   );

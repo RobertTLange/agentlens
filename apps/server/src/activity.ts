@@ -1,6 +1,9 @@
 import type {
+  ActivityHeatmapMetricValues,
   ActivityUsageSummary,
   ActivityUsageSummaryRow,
+  ActivityHeatmapMetric,
+  ActivityHeatmapPresentation,
   AgentActivityBin,
   AgentActivityDay,
   AgentActivityWeek,
@@ -53,6 +56,8 @@ export interface BuildAgentActivityWeekOptions {
   slotMinutes?: number;
   hourStartLocal?: number;
   hourEndLocal?: number;
+  heatmapMetric?: ActivityHeatmapMetric;
+  heatmapColor?: string;
   nowMs?: number;
   cache?: ActivityResponseCache;
   cacheVersion?: number;
@@ -62,6 +67,8 @@ export interface BuildAgentActivityYearOptions {
   endDateLocal?: string;
   tzOffsetMinutes?: number;
   dayCount?: number;
+  heatmapMetric?: ActivityHeatmapMetric;
+  heatmapColor?: string;
   nowMs?: number;
   cache?: ActivityResponseCache;
   cacheVersion?: number;
@@ -91,6 +98,8 @@ interface YearDayAccumulator {
   windowStartMs: number;
   windowEndMs: number;
   totalSessionIds: Set<string>;
+  heatmapValue: number;
+  heatmapValues: ActivityHeatmapMetricValues;
   totalEventCount: number;
   boundaryEvents: Array<{ atMs: number; delta: number }>;
   agentSlotCounts: Array<Record<AgentKind, number>>;
@@ -225,8 +234,99 @@ function createUsageAccumulator(): ActivityUsageAccumulator {
   };
 }
 
+function createEmptyHeatmapMetricValues(): ActivityHeatmapMetricValues {
+  return {
+    sessions: 0,
+    output_tokens: 0,
+    total_cost_usd: 0,
+  };
+}
+
 function sanitizeTokenValue(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function sanitizeCostValue(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function normalizeHexColor(value: string): string {
+  const trimmed = value.trim();
+  const shortMatch = /^#([0-9a-fA-F]{3})$/.exec(trimmed);
+  if (shortMatch) {
+    const digits = shortMatch[1] ?? "";
+    return `#${digits
+      .split("")
+      .map((digit) => `${digit}${digit}`)
+      .join("")
+      .toLowerCase()}`;
+  }
+  const longMatch = /^#([0-9a-fA-F]{6})$/.exec(trimmed);
+  if (longMatch) {
+    return `#${(longMatch[1] ?? "").toLowerCase()}`;
+  }
+  return "#dc2626";
+}
+
+function hexChannel(color: string, start: number): number {
+  return Number.parseInt(color.slice(start, start + 2), 16);
+}
+
+function toHexChannel(value: number): string {
+  return Math.round(clamp(value, 0, 255))
+    .toString(16)
+    .padStart(2, "0");
+}
+
+function mixHexColor(color: string, colorWeight: number): string {
+  const normalized = normalizeHexColor(color);
+  const baseWeight = clamp(colorWeight, 0, 1);
+  const whiteWeight = 1 - baseWeight;
+  const red = hexChannel(normalized, 1) * baseWeight + 255 * whiteWeight;
+  const green = hexChannel(normalized, 3) * baseWeight + 255 * whiteWeight;
+  const blue = hexChannel(normalized, 5) * baseWeight + 255 * whiteWeight;
+  return `#${toHexChannel(red)}${toHexChannel(green)}${toHexChannel(blue)}`;
+}
+
+function buildHeatmapPresentation(metric: ActivityHeatmapMetric, color: string): ActivityHeatmapPresentation {
+  const normalizedColor = normalizeHexColor(color);
+  return {
+    metric,
+    color: normalizedColor,
+    palette: [
+      "#ffffff",
+      mixHexColor(normalizedColor, 0.18),
+      mixHexColor(normalizedColor, 0.38),
+      mixHexColor(normalizedColor, 0.62),
+      mixHexColor(normalizedColor, 0.82),
+    ],
+  };
+}
+
+function resolveHeatmapMetricValue(summary: TraceSummary, metric: ActivityHeatmapMetric): number {
+  if (metric === "output_tokens") {
+    return sanitizeTokenValue(summary.tokenTotals?.outputTokens);
+  }
+  if (metric === "total_cost_usd") {
+    return sanitizeCostValue(summary.costEstimateUsd);
+  }
+  return 0;
+}
+
+function resolveAllHeatmapMetricValues(summary: TraceSummary): ActivityHeatmapMetricValues {
+  return {
+    sessions: 0,
+    output_tokens: resolveHeatmapMetricValue(summary, "output_tokens"),
+    total_cost_usd: resolveHeatmapMetricValue(summary, "total_cost_usd"),
+  };
+}
+
+function sumHeatmapMetricForBins(bins: AgentActivityBin[], metric: ActivityHeatmapMetric): number {
+  return bins.reduce((sum, bin) => {
+    if (metric === "sessions") return sum + (bin.heatmapValues?.sessions ?? bin.activeSessionCount);
+    if (metric === "output_tokens") return sum + (bin.heatmapValues?.output_tokens ?? 0);
+    return sum + (bin.heatmapValues?.total_cost_usd ?? 0);
+  }, 0);
 }
 
 function totalEventCountForBins(bins: AgentActivityBin[]): number {
@@ -353,6 +453,7 @@ function computeWindowActivity(
   windowEndMs: number,
   binMinutes: number,
   breakMinutes: number,
+  heatmapMetric: ActivityHeatmapMetric,
 ): WindowActivityResult {
   const binMs = binMinutes * 60_000;
   const totalWindowMs = Math.max(0, windowEndMs - windowStartMs);
@@ -366,6 +467,8 @@ function computeWindowActivity(
       startMs,
       endMs,
       activeSessionCount: 0,
+      heatmapValue: 0,
+      heatmapValues: createEmptyHeatmapMetricValues(),
       activeTraceIds: [],
       primaryTraceId: "",
       activeByAgent: createEmptyAgentCounts(),
@@ -394,6 +497,7 @@ function computeWindowActivity(
       const detail = traceIndex.getSessionDetail(summary.id);
       const activityArtifacts = traceIndex.getSessionActivityArtifacts(summary.id);
       const activeSegments: SessionSpan[] = activityArtifacts.activeSegments;
+      const metricValues = resolveAllHeatmapMetricValues(summary);
 
       for (const segment of activeSegments) {
         if (segment.endMs < windowStartMs || segment.startMs >= windowEndMs) continue;
@@ -410,6 +514,9 @@ function computeWindowActivity(
             bin.activeTraceIds.push(summary.id);
             bin.activeSessionCount += 1;
             bin.activeByAgent[summary.agent] += 1;
+            bin.heatmapValues ??= createEmptyHeatmapMetricValues();
+            bin.heatmapValues.output_tokens += metricValues.output_tokens;
+            bin.heatmapValues.total_cost_usd += metricValues.total_cost_usd;
             contributingSessionIds.add(summary.id);
           }
         }
@@ -440,6 +547,17 @@ function computeWindowActivity(
       });
       bin.primaryTraceId = bin.activeTraceIds[0] ?? "";
     }
+    if (heatmapMetric === "sessions") {
+      bin.heatmapValue = bin.activeSessionCount;
+    }
+    bin.heatmapValues ??= createEmptyHeatmapMetricValues();
+    bin.heatmapValues.sessions = bin.activeSessionCount;
+    bin.heatmapValue =
+      heatmapMetric === "sessions"
+        ? bin.heatmapValues.sessions
+        : heatmapMetric === "output_tokens"
+          ? bin.heatmapValues.output_tokens
+          : bin.heatmapValues.total_cost_usd;
     bin.dominantAgent = pickDominantAgent(bin.activeByAgent);
     bin.dominantEventKind = pickDominantEventKind(bin.eventKindCounts);
     if (bin.activeSessionCount > peakConcurrentSessions) {
@@ -469,9 +587,10 @@ function buildWindowActivity(
     cacheVersion?: number;
     nowMs: number;
   },
+  heatmapMetric: ActivityHeatmapMetric,
 ): WindowActivityResult {
   if (!options.cache || options.cacheVersion === undefined) {
-    return computeWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes);
+    return computeWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes, heatmapMetric);
   }
   return options.cache.getOrBuildWindow(
     options.cacheVersion,
@@ -481,8 +600,9 @@ function buildWindowActivity(
       windowEndMs,
       binMinutes,
       breakMinutes,
+      heatmapMetric,
     },
-    () => computeWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes),
+    () => computeWindowActivity(traceIndex, windowStartMs, windowEndMs, binMinutes, breakMinutes, heatmapMetric),
   );
 }
 
@@ -543,6 +663,7 @@ export function buildAgentActivityDay(
     options.cache && options.cacheVersion !== undefined
       ? { cache: options.cache, cacheVersion: options.cacheVersion, nowMs }
       : { nowMs },
+    "sessions",
   );
 
   return {
@@ -575,6 +696,8 @@ export function buildAgentActivityWeek(
   const requestedEndDateLocal = options.endDateLocal?.trim() ?? "";
   const endDateLocal = requestedEndDateLocal || toLocalDateString(nowMs, tzOffsetMinutes);
   parseDateLocal(endDateLocal);
+  const heatmapMetric = options.heatmapMetric ?? traceIndex.getConfig().activityHeatmap.metric;
+  const heatmapColor = options.heatmapColor ?? traceIndex.getConfig().activityHeatmap.color;
 
   const requestedDayCount = validateInt(options.dayCount, "day_count");
   const dayCount = clamp(requestedDayCount ?? DEFAULT_WEEK_DAY_COUNT, MIN_WEEK_DAY_COUNT, MAX_WEEK_DAY_COUNT);
@@ -607,6 +730,8 @@ export function buildAgentActivityWeek(
         slotMinutes,
         hourStartLocal,
         hourEndLocal,
+        heatmapMetric,
+        heatmapColor,
       },
       () =>
         buildAgentActivityWeek(traceIndex, {
@@ -618,6 +743,8 @@ export function buildAgentActivityWeek(
           slotMinutes,
           hourStartLocal,
           hourEndLocal,
+          heatmapMetric,
+          heatmapColor,
         }),
     );
   }
@@ -644,12 +771,22 @@ export function buildAgentActivityWeek(
       options.cache && options.cacheVersion !== undefined
         ? { cache: options.cache, cacheVersion: options.cacheVersion, nowMs }
         : { nowMs },
+      heatmapMetric,
     );
     days.push({
       dateLocal,
       windowStartMs,
       windowEndMs,
       totalSessionsInWindow: windowActivity.totalSessionsInWindow,
+      heatmapValue:
+        heatmapMetric === "sessions"
+          ? windowActivity.totalSessionsInWindow
+          : sumHeatmapMetricForBins(windowActivity.bins, heatmapMetric),
+      heatmapValues: {
+        sessions: windowActivity.totalSessionsInWindow,
+        output_tokens: sumHeatmapMetricForBins(windowActivity.bins, "output_tokens"),
+        total_cost_usd: sumHeatmapMetricForBins(windowActivity.bins, "total_cost_usd"),
+      },
       peakConcurrentSessions: windowActivity.peakConcurrentSessions,
       peakConcurrentAtMs: windowActivity.peakConcurrentAtMs,
       totalEventCount: totalEventCountForBins(windowActivity.bins),
@@ -658,6 +795,7 @@ export function buildAgentActivityWeek(
   }
 
   return {
+    presentation: buildHeatmapPresentation(heatmapMetric, heatmapColor),
     tzOffsetMinutes,
     dayCount,
     slotMinutes,
@@ -684,6 +822,8 @@ export function buildAgentActivityYear(
   const requestedEndDateLocal = options.endDateLocal?.trim() ?? "";
   const endDateLocal = requestedEndDateLocal || toLocalDateString(nowMs, tzOffsetMinutes);
   parseDateLocal(endDateLocal);
+  const heatmapMetric = options.heatmapMetric ?? traceIndex.getConfig().activityHeatmap.metric;
+  const heatmapColor = options.heatmapColor ?? traceIndex.getConfig().activityHeatmap.color;
 
   const requestedDayCount = validateInt(options.dayCount, "day_count");
   const maxDayCount = clamp(requestedDayCount ?? MAX_WEEK_DAY_COUNT, MIN_WEEK_DAY_COUNT, MAX_WEEK_DAY_COUNT);
@@ -718,6 +858,8 @@ export function buildAgentActivityYear(
         endDateLocal,
         tzOffsetMinutes,
         dayCount: effectiveDayCount,
+        heatmapMetric,
+        heatmapColor,
       },
       () =>
         buildAgentActivityYear(traceIndex, {
@@ -726,6 +868,8 @@ export function buildAgentActivityYear(
           endDateLocal,
           tzOffsetMinutes,
           dayCount: effectiveDayCount,
+          heatmapMetric,
+          heatmapColor,
         }),
     );
   }
@@ -747,6 +891,8 @@ export function buildAgentActivityYear(
       windowStartMs,
       windowEndMs,
       totalSessionIds: new Set<string>(),
+      heatmapValue: 0,
+      heatmapValues: createEmptyHeatmapMetricValues(),
       totalEventCount: 0,
       boundaryEvents: [],
       agentSlotCounts: Array.from({ length: slotCount }, () => createEmptyAgentCounts()),
@@ -762,6 +908,7 @@ export function buildAgentActivityYear(
     if (span.endMs < overallStartMs || span.startMs >= overallEndMs) continue;
 
     const activityArtifacts = traceIndex.getSessionActivityArtifacts(summary.id);
+    const summaryMetricValues = resolveAllHeatmapMetricValues(summary);
     let summaryContributed = false;
 
     for (const timestampMs of activityArtifacts.eventTimestamps) {
@@ -789,6 +936,7 @@ export function buildAgentActivityYear(
         const overlapEndExclusiveMs = Math.min(clampedEndExclusiveMs, dayState.windowEndMs);
         if (overlapEndExclusiveMs <= overlapStartMs) continue;
 
+        const wasAlreadyActiveToday = dayState.totalSessionIds.has(summary.id);
         dayState.totalSessionIds.add(summary.id);
         dayState.boundaryEvents.push({ atMs: overlapStartMs, delta: 1 });
         dayState.boundaryEvents.push({ atMs: overlapEndExclusiveMs, delta: -1 });
@@ -802,6 +950,10 @@ export function buildAgentActivityYear(
         );
         for (let slotIndex = startSlotIndex; slotIndex <= endSlotIndex; slotIndex += 1) {
           dayState.agentSlotCounts[slotIndex]![summary.agent] += 1;
+        }
+        if (!wasAlreadyActiveToday) {
+          dayState.heatmapValues.output_tokens += summaryMetricValues.output_tokens;
+          dayState.heatmapValues.total_cost_usd += summaryMetricValues.total_cost_usd;
         }
       }
     }
@@ -849,6 +1001,17 @@ export function buildAgentActivityYear(
       windowStartMs: dayState.windowStartMs,
       windowEndMs: dayState.windowEndMs,
       totalSessionsInWindow: dayState.totalSessionIds.size,
+      heatmapValue:
+        heatmapMetric === "sessions"
+          ? dayState.totalSessionIds.size
+          : heatmapMetric === "output_tokens"
+            ? dayState.heatmapValues.output_tokens
+            : dayState.heatmapValues.total_cost_usd,
+      heatmapValues: {
+        sessions: dayState.totalSessionIds.size,
+        output_tokens: dayState.heatmapValues.output_tokens,
+        total_cost_usd: dayState.heatmapValues.total_cost_usd,
+      },
       peakConcurrentSessions,
       peakConcurrentAtMs,
       totalEventCount: dayState.totalEventCount,
@@ -856,6 +1019,7 @@ export function buildAgentActivityYear(
   });
 
   return {
+    presentation: buildHeatmapPresentation(heatmapMetric, heatmapColor),
     tzOffsetMinutes,
     dayCount: effectiveDayCount,
     startDateLocal,

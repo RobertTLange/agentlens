@@ -66,6 +66,7 @@ function makeYearFixture(): AgentActivityYear {
       windowStartMs: dateMs,
       windowEndMs: dateMs + 24 * 60 * 60 * 1000,
       totalSessionsInWindow: sessions,
+      heatmapValue: sessions,
       peakConcurrentSessions: sessions,
       peakConcurrentAtMs: sessions > 0 ? bins[0]?.startMs ?? dateMs : null,
       totalEventCount: bins.reduce((sum, bin) => sum + bin.eventCount, 0),
@@ -83,6 +84,11 @@ function makeYearFixture(): AgentActivityYear {
   };
 
   return {
+    presentation: {
+      metric: "sessions",
+      color: "#dc2626",
+      palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
+    },
     tzOffsetMinutes: 0,
     dayCount: dayDates.length,
     startDateLocal: dayDates[0] ?? "2026-02-24",
@@ -101,6 +107,7 @@ describe("activity year heatmap model", () => {
     expect(model.dayCount).toBe(7);
     expect(model.weekCount).toBeGreaterThanOrEqual(2);
     expect(model.yearLabel).toContain("2026");
+    expect(model.presentation.metric).toBe("sessions");
     expect(cells).toHaveLength(7);
     expect(model.weekLabels.length).toBeGreaterThan(0);
 
@@ -109,5 +116,28 @@ describe("activity year heatmap model", () => {
     expect(marchFirst?.totalSessionsInWindow).toBe(4);
     expect(marchFirst?.totalEventCount).toBeGreaterThan(0);
     expect(marchFirst?.level).toBe(4);
+  });
+
+  it("uses daily heatmap values for yearly intensity", () => {
+    const year = makeYearFixture();
+    year.presentation = {
+      metric: "total_cost_usd",
+      color: "#2563eb",
+      palette: ["#ffffff", "#dbeafe", "#93c5fd", "#3b82f6", "#1d4ed8"],
+    };
+    year.days[0]!.heatmapValue = 0.25;
+    year.days[1]!.heatmapValue = 0.5;
+    year.days[2]!.heatmapValue = 1.0;
+    year.days[3]!.heatmapValue = 0;
+    year.days[4]!.heatmapValue = 1.5;
+    year.days[5]!.heatmapValue = 2.0;
+    year.days[6]!.heatmapValue = 0.75;
+
+    const model = buildActivityYearHeatmapModel(year);
+    const marchFirst = model.cells.find((cell) => cell.dateLocal === "2026-03-01");
+
+    expect(model.presentation.metric).toBe("total_cost_usd");
+    expect(model.maxHeatmapValue).toBe(2.0);
+    expect(marchFirst).toMatchObject({ heatmapValue: 2.0, level: 4 });
   });
 });

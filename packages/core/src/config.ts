@@ -4,6 +4,8 @@ import os from "node:os";
 import TOML, { type JsonMap } from "@iarna/toml";
 import type {
   AppConfig,
+  ActivityHeatmapConfig,
+  ActivityHeatmapMetric,
   AgentKind,
   CostConfig,
   CostModelRate,
@@ -213,6 +215,40 @@ function mergeTraceInspector(input?: Partial<TraceInspectorConfig>): TraceInspec
   };
 }
 
+function normalizeActivityHeatmapMetric(value: unknown): ActivityHeatmapMetric | null {
+  if (value === "sessions" || value === "output_tokens" || value === "total_cost_usd") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeHexColor(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  const shortMatch = /^#([0-9a-fA-F]{3})$/.exec(trimmed);
+  if (shortMatch) {
+    const digits = shortMatch[1] ?? "";
+    return `#${digits
+      .split("")
+      .map((digit) => `${digit}${digit}`)
+      .join("")
+      .toLowerCase()}`;
+  }
+  const longMatch = /^#([0-9a-fA-F]{6})$/.exec(trimmed);
+  if (longMatch) {
+    return `#${(longMatch[1] ?? "").toLowerCase()}`;
+  }
+  return null;
+}
+
+function mergeActivityHeatmap(input?: Partial<ActivityHeatmapConfig>): ActivityHeatmapConfig {
+  const defaults = DEFAULT_CONFIG.activityHeatmap;
+  return {
+    metric: normalizeActivityHeatmapMetric(input?.metric) ?? defaults.metric,
+    color: normalizeHexColor(input?.color) ?? defaults.color,
+  };
+}
+
 function mergeRedaction(input?: Partial<RedactionConfig>): RedactionConfig {
   const defaults = DEFAULT_CONFIG.redaction;
   return {
@@ -365,6 +401,7 @@ export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
     sessionLogDirectories: mergeSessionLogDirectories(input?.sessionLogDirectories, input?.sessionJsonlDirectories),
     sources,
     traceInspector: mergeTraceInspector(input?.traceInspector),
+    activityHeatmap: mergeActivityHeatmap(input?.activityHeatmap),
     redaction: mergeRedaction(input?.redaction),
     cost: mergeCost(input?.cost),
     models: mergeModels(input?.models),
