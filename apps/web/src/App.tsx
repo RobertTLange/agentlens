@@ -43,8 +43,8 @@ const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 const PRIMARY_RECENT_SESSION_COUNT = 20;
 const OLDER_TRACE_PAGE_SIZE = 40;
-const EVENT_APPEND_REVEAL_CHUNK_SIZE = 4;
-const EVENT_APPEND_REVEAL_INTERVAL_MS = 48;
+const EVENT_APPEND_REVEAL_CHUNK_SIZE = 8;
+const EVENT_APPEND_REVEAL_INTERVAL_MS = 16;
 const EVENT_KIND_OPTIONS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"];
 const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
   system: "system",
