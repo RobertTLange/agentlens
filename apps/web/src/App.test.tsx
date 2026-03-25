@@ -9,6 +9,7 @@ import type {
   EventKind,
   NormalizedEvent,
   OverviewStats,
+  TraceIndexStartupState,
   TracePage,
   TraceSummary,
 } from "@agentlens/contracts";
@@ -795,6 +796,7 @@ let activityDay: AgentActivityDay;
 let activityDayByDate: Record<string, AgentActivityDay>;
 let activityWeek: AgentActivityWeek;
 let activityYear: AgentActivityYear;
+let startupState: TraceIndexStartupState;
 
 beforeEach(() => {
   tracesById = {
@@ -817,6 +819,15 @@ beforeEach(() => {
   activityDayByDate = { [activityDay.dateLocal]: activityDay };
   activityWeek = makeActivityWeek();
   activityYear = makeActivityYear();
+  startupState = {
+    phase: "ready",
+    inspectorReady: true,
+    fullReady: true,
+    isPartial: false,
+    discoveredTraceCount: Object.keys(tracesById).length,
+    hydratedTraceCount: Object.keys(tracesById).length,
+    startupError: "",
+  };
   window.history.replaceState(null, "", "/");
 
   vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
@@ -835,18 +846,24 @@ beforeEach(() => {
       const method = String(init?.method ?? "GET").toUpperCase();
       requestedUrls.push(url);
       if (url.includes("/api/overview")) {
-        return new Response(JSON.stringify({ overview }), { status: 200 });
+        return new Response(JSON.stringify({ overview, startup: startupState }), { status: 200 });
       }
       if (url.includes("/api/traces")) {
         return new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 });
       }
       if (url.includes("/api/activity/day")) {
+        if (!startupState.fullReady) {
+          return new Response(JSON.stringify({ warming: true, startup: startupState }), { status: 503 });
+        }
         const parsed = new URL(url, "http://localhost");
         const requestedDate = parsed.searchParams.get("date") ?? "";
         const resolvedDay = activityDayByDate[requestedDate] ?? activityDay;
         return new Response(JSON.stringify({ activity: resolvedDay }), { status: 200 });
       }
       if (url.includes("/api/activity/year")) {
+        if (!startupState.fullReady) {
+          return new Response(JSON.stringify({ warming: true, startup: startupState }), { status: 503 });
+        }
         const parsed = new URL(url, "http://localhost");
         const metric = parsed.searchParams.get("metric");
         const color = parsed.searchParams.get("color");
@@ -857,6 +874,9 @@ beforeEach(() => {
         return new Response(JSON.stringify({ activity: yearForMetricAndColor(activityYear, resolvedMetric, resolvedColor) }), { status: 200 });
       }
       if (url.includes("/api/activity/week")) {
+        if (!startupState.fullReady) {
+          return new Response(JSON.stringify({ warming: true, startup: startupState }), { status: 503 });
+        }
         const parsed = new URL(url, "http://localhost");
         const metric = parsed.searchParams.get("metric");
         const color = parsed.searchParams.get("color");
@@ -949,6 +969,24 @@ describe("App sessions list live motion", () => {
       "https://github.com/RobertTLange/agentlens",
     );
     expect(document.querySelector("footer")).toBeNull();
+  });
+
+  it("shows warming state in the inspector while history hydration is still partial", async () => {
+    startupState = {
+      phase: "hydrating",
+      inspectorReady: true,
+      fullReady: false,
+      isPartial: true,
+      discoveredTraceCount: 240,
+      hydratedTraceCount: 120,
+      startupError: "",
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    expect(document.body.textContent?.toLowerCase()).toContain("warming");
+    expect(document.body.textContent).toContain("120/240");
   });
 
   it("switches to the activity view and renders daily, weekly, and yearly activity heatmaps", async () => {
@@ -1088,6 +1126,86 @@ describe("App sessions list live motion", () => {
     expect(summaryTitleTexts).toContain("Day Summary");
     expect(summaryTitleTexts).toContain("Week Summary");
     expect(summaryTitleTexts).toContain("Year Summary");
+  });
+
+  it("shows an indexing message in the activity view while full hydration is still running", async () => {
+    startupState = {
+      phase: "hydrating",
+      inspectorReady: true,
+      fullReady: false,
+      isPartial: true,
+      discoveredTraceCount: 240,
+      hydratedTraceCount: 120,
+      startupError: "",
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/activity/day"))).toBe(true));
+    expect(document.body.textContent?.toLowerCase()).toContain("indexing history");
+    expect(document.body.textContent).toContain("120/240");
+  });
+
+  it("refetches activity immediately when background hydration finishes", async () => {
+    startupState = {
+      phase: "hydrating",
+      inspectorReady: true,
+      fullReady: false,
+      isPartial: true,
+      discoveredTraceCount: 240,
+      hydratedTraceCount: 120,
+      startupError: "",
+    };
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.body.textContent?.toLowerCase()).toContain("indexing history"));
+
+    startupState = {
+      phase: "ready",
+      inspectorReady: true,
+      fullReady: true,
+      isPartial: false,
+      discoveredTraceCount: 240,
+      hydratedTraceCount: 240,
+      startupError: "",
+    };
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("overview_updated", { overview, startup: startupState });
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-week-cell").length).toBeGreaterThan(0));
+    await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
+    expect(document.body.textContent?.toLowerCase()).not.toContain("indexing history");
   });
 
   it("lets the user override heatmap metric and color from the activity header", async () => {
@@ -3579,6 +3697,105 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(2));
     await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(2));
     expect(countTraceDetailRequests("trace-c")).toBe(1);
+  });
+
+  it("keeps the first appended event when live updates arrive before initial detail load resolves", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-startup-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    const deferredTraceResponses = new Map<string, { resolve: (response: Response) => void }>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+        const method = String(init?.method ?? "GET").toUpperCase();
+        requestedUrls.push(url);
+        if (url.includes("/api/overview")) {
+          return Promise.resolve(new Response(JSON.stringify({ overview }), { status: 200 }));
+        }
+        if (url.includes("/api/traces")) {
+          return Promise.resolve(new Response(JSON.stringify({ traces: Object.values(tracesById) }), { status: 200 }));
+        }
+        if (method === "GET" && url.includes("/api/trace/trace-c")) {
+          if (!deferredTraceResponses.has(url)) {
+            return new Promise<Response>((resolve) => {
+              deferredTraceResponses.set(url, { resolve });
+            });
+          }
+          const tracePage = tracePagesById["trace-c"] ?? Object.values(tracePagesById)[0];
+          return Promise.resolve(new Response(JSON.stringify(tracePage), { status: 200 }));
+        }
+        if (url.includes("/api/trace/")) {
+          const traceId = traceIdFromTraceUrl(url);
+          const tracePage = tracePagesById[traceId] ?? Object.values(tracePagesById)[0];
+          return Promise.resolve(new Response(JSON.stringify(tracePage), { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 404 }));
+      }) as typeof fetch,
+    );
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    const appendedEvent: NormalizedEvent = {
+      ...makeEvent("event-startup-new", { signature: "new payload" }),
+      index: 5,
+      offset: 5,
+      timestampMs: 2_000,
+      preview: "new payload",
+      textBlocks: ["new payload"],
+      tocLabel: "new payload",
+      searchText: "new payload",
+    };
+    const updatedSummary = {
+      ...selectedTrace,
+      mtimeMs: selectedTrace.mtimeMs + 2_000,
+      lastEventTs: appendedEvent.timestampMs,
+      eventCount: selectedTrace.eventCount + 1,
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(updatedSummary, [firstEvent, appendedEvent]);
+
+    act(() => {
+      source.emit("batch", {
+        events: [
+          { id: "1", type: "trace_updated", version: 1, payload: { summary: updatedSummary } },
+          {
+            id: "2",
+            type: "events_appended",
+            version: 2,
+            payload: { id: "trace-c", appended: 1, latestEvents: [appendedEvent] },
+          },
+        ],
+      });
+    });
+    flushRafQueue();
+
+    await waitFor(() => {
+      const cards = Array.from(document.querySelectorAll(".event-card"));
+      expect(cards.length).toBeGreaterThanOrEqual(1);
+      expect(cards.some((card) => card.textContent?.includes("new payload"))).toBe(true);
+    });
+
+    const deferred = deferredTraceResponses.values().next().value as { resolve: (response: Response) => void } | undefined;
+    if (!deferred) throw new Error("missing deferred trace response");
+    act(() => {
+      deferred.resolve(new Response(JSON.stringify(makeTracePageWithEvents(selectedTrace, [firstEvent])), { status: 200 }));
+    });
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".toc-row").length).toBeGreaterThanOrEqual(1);
+      expect(document.querySelectorAll(".event-card").length).toBeGreaterThanOrEqual(1);
+      expect(document.querySelector(".event-card")?.textContent).toContain("new payload");
+    });
+    expect(countTraceDetailRequests("trace-c")).toBeGreaterThanOrEqual(1);
   });
 
   it("drains large appended event chunks through a TOC queue", async () => {

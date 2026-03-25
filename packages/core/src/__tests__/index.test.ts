@@ -9,6 +9,47 @@ async function createTempRoot(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), "agentlens-core-"));
 }
 
+function buildCodexTraceLog(sessionId: string, sequence: number): string {
+  const firstTs = new Date(Date.UTC(2026, 1, 11, 10, 0, sequence)).toISOString();
+  const secondTs = new Date(Date.UTC(2026, 1, 11, 10, 0, sequence + 1)).toISOString();
+  return [
+    JSON.stringify({
+      timestamp: firstTs,
+      type: "session_meta",
+      payload: { id: sessionId, cwd: "/tmp/project", cli_version: "0.1.0" },
+    }),
+    JSON.stringify({
+      timestamp: secondTs,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: `trace ${sequence}` }],
+      },
+    }),
+  ].join("\n");
+}
+
+async function waitForCondition(
+  predicate: () => void,
+  options: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const intervalMs = options.intervalMs ?? 25;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      predicate();
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+}
+
 describe("trace index", () => {
   it("defaults sessionLogDirectories to common agent homes with explicit log types", () => {
     const config = mergeConfig();
@@ -52,6 +93,113 @@ describe("trace index", () => {
       { directory: "~/.gemini", logType: "gemini" },
       { directory: "~/.pi", logType: "pi" },
     ]);
+  });
+
+  it("arms the watcher before bootstrap hydration during start", async () => {
+    const baseConfig = mergeConfig({ sessionLogDirectories: [] });
+    const config = {
+      ...baseConfig,
+      sessionLogDirectories: [],
+      sources: Object.fromEntries(
+        Object.entries(baseConfig.sources).map(([key, value]) => [
+          key,
+          {
+            ...value,
+            enabled: false,
+            roots: [],
+          },
+        ]),
+      ),
+    };
+    const index = new TraceIndex(config);
+    const internal = index as unknown as {
+      bootstrapRecentTraces: () => Promise<void>;
+      restartWatcher: () => Promise<void>;
+    };
+    const calls: string[] = [];
+    const bootstrapSpy = vi.spyOn(internal, "bootstrapRecentTraces").mockImplementation(async () => {
+      calls.push("bootstrap");
+    });
+    const restartWatcherSpy = vi.spyOn(internal, "restartWatcher").mockImplementation(async () => {
+      calls.push("watcher");
+    });
+
+    try {
+      await index.start();
+      expect(calls).toEqual(["watcher", "bootstrap"]);
+    } finally {
+      bootstrapSpy.mockRestore();
+      restartWatcherSpy.mockRestore();
+      index.stop();
+    }
+  });
+
+  it("becomes inspector-ready before full hydration finishes during start", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "11");
+    await mkdir(codexDir, { recursive: true });
+
+    for (let traceIndex = 0; traceIndex < 130; traceIndex += 1) {
+      const tracePath = path.join(codexDir, `bootstrap-${String(traceIndex).padStart(3, "0")}.jsonl`);
+      await writeFile(tracePath, buildCodexTraceLog(`bootstrap-${traceIndex}`, traceIndex), "utf8");
+    }
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+
+    try {
+      await index.start();
+
+      const startup = index.getStartupState();
+      expect(startup.inspectorReady).toBe(true);
+      expect(startup.fullReady).toBe(false);
+      expect(startup.isPartial).toBe(true);
+      expect(startup.discoveredTraceCount).toBe(130);
+      expect(startup.hydratedTraceCount).toBeLessThan(130);
+      expect(index.getSummaries()).toHaveLength(startup.hydratedTraceCount);
+
+      await waitForCondition(() => {
+        const ready = index.getStartupState();
+        expect(ready.fullReady).toBe(true);
+        expect(ready.isPartial).toBe(false);
+        expect(ready.hydratedTraceCount).toBe(130);
+      });
+      expect(index.getSummaries()).toHaveLength(130);
+    } finally {
+      index.stop();
+    }
   });
 
   it("parses codex home session files and computes overview", async () => {

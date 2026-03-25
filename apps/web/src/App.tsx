@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 
 import type {
   ActivityHeatmapMetric,
   EventKind,
+  IndexStartupStatus,
   LiveBatchEnvelope,
   LiveDeltaEnvelope,
   OverviewStats,
@@ -57,6 +58,11 @@ const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
   meta: "meta",
 };
 const DEFAULT_VISIBLE_EVENT_KINDS: EventKind[] = EVENT_KIND_OPTIONS.filter((kind) => kind !== "meta");
+
+interface OverviewResponse {
+  overview: OverviewStats;
+  startup: IndexStartupStatus;
+}
 
 interface StopTraceResponse {
   ok?: boolean;
@@ -250,6 +256,30 @@ function appendLatestEventsToTracePage(page: TracePage, latestEvents: TracePage[
   };
 }
 
+function buildOptimisticTracePage(
+  summary: TraceSummary,
+  latestEvents: TracePage["events"],
+  includeMeta: boolean,
+): TracePage {
+  const visibleEvents = includeMeta ? latestEvents : latestEvents.filter((event) => event.eventKind !== "meta");
+  const events = sortTimelineItems(visibleEvents, "first-latest");
+  return {
+    summary,
+    events,
+    toc: events.map((event) => ({
+      eventId: event.eventId,
+      index: event.index,
+      timestampMs: event.timestampMs,
+      eventKind: event.eventKind,
+      label: event.tocLabel || event.preview,
+      colorKey: event.eventKind,
+      toolType: event.toolType,
+    })),
+    nextBefore: "",
+    liveCursor: String(Math.max(summary.eventCount, events.length)),
+  };
+}
+
 function isLiveDeltaEnvelope(value: unknown): value is LiveDeltaEnvelope {
   if (!value || typeof value !== "object") return false;
   const type = (value as { type?: unknown }).type;
@@ -265,6 +295,24 @@ function readLiveDeltaBatch(value: unknown): LiveDeltaEnvelope[] {
   const events = (value as LiveBatchEnvelope["payload"]).events;
   if (!Array.isArray(events)) return [];
   return events.filter(isLiveDeltaEnvelope);
+}
+
+function mergeLatestTraceEvents(
+  existingEvents: TracePage["events"],
+  latestEvents: TracePage["events"],
+): TracePage["events"] {
+  if (latestEvents.length === 0) return existingEvents;
+  const byId = new Map(existingEvents.map((event) => [event.eventId, event] as const));
+  for (const event of latestEvents) {
+    byId.set(event.eventId, event);
+  }
+  return sortTimelineItems(Array.from(byId.values()), "first-latest");
+}
+
+function isTraceSummaryNewer(current: TraceSummary, detail: TraceSummary): boolean {
+  return current.eventCount > detail.eventCount ||
+    (current.lastEventTs ?? 0) > (detail.lastEventTs ?? 0) ||
+    current.mtimeMs > detail.mtimeMs;
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -332,6 +380,7 @@ function decodeBase64Url(input: string): string {
 
 export function App(): JSX.Element {
   const [overview, setOverview] = useState<OverviewStats | null>(null);
+  const [startup, setStartup] = useState<IndexStartupStatus | null>(null);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [activeAdHocEncodedPath, setActiveAdHocEncodedPath] = useState(() =>
     typeof window === "undefined" ? "" : adHocEncodedPathFromLocationPathname(window.location.pathname),
@@ -378,6 +427,8 @@ export function App(): JSX.Element {
   const [inspectorPendingAppendCount, setInspectorPendingAppendCount] = useState(0);
   const selectedIdRef = useRef("");
   const tracesRef = useRef<TraceSummary[]>([]);
+  const pageRef = useRef<TracePage | null>(null);
+  const pendingLatestEventsByTraceIdRef = useRef<Map<string, TracePage["events"]>>(new Map());
   const eventTypeFilterRef = useRef<HTMLDivElement | null>(null);
   const timelineStripRef = useRef<HTMLDivElement | null>(null);
   const eventsScrollRef = useRef<HTMLDivElement | null>(null);
@@ -587,6 +638,10 @@ export function App(): JSX.Element {
   }, [lastLiveUpdateMs, newestEventTsMs, status]);
   const headerStatus = flashStatus || baseHeaderStatus;
   const heroStatusClassName = `hero-status mono${flashStatus ? " flash-active" : ""}${isFlashStatusFading ? " flash-fading" : ""}`;
+  const startupSummary = useMemo(() => {
+    if (!startup?.isPartial) return "";
+    return `warming ${startup.hydratedTraceCount}/${startup.discoveredTraceCount}`;
+  }, [startup]);
   const toolCallTypeCountRows = useMemo(() => {
     const rows: Array<Array<{ toolType: string; count: number }>> = [];
     for (let index = 0; index < toolCallTypeCountsPreview.length; index += TOOL_CALL_TYPES_PER_SUMMARY_ROW) {
@@ -859,6 +914,10 @@ export function App(): JSX.Element {
   }, [traces]);
 
   useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+
+  useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
 
@@ -995,12 +1054,13 @@ export function App(): JSX.Element {
     const loadBoot = async (): Promise<void> => {
       try {
         const [overviewResp, tracesResp] = await Promise.all([
-          fetchJson<{ overview: OverviewStats }>(`${API}/api/overview`),
+          fetchJson<OverviewResponse>(`${API}/api/overview`),
           fetchJson<{ traces: TraceSummary[] }>(`${API}/api/traces?limit=${RECENT_TRACE_LIMIT}`),
         ]);
         const sorted = limitRecentTraces(tracesResp.traces.map(applyManualStopOverride));
         tracesRef.current = sorted;
         setOverview(overviewResp.overview);
+        setStartup(overviewResp.startup);
         setTraces(sorted);
         setSelectedId((prev) => {
           if (prev) return prev;
@@ -1017,6 +1077,7 @@ export function App(): JSX.Element {
       if (!id) return;
       delete manualStopAtByTraceIdRef.current[id];
       removeTracePageCacheEntries(tracePageCacheRef.current, id);
+      pendingLatestEventsByTraceIdRef.current.delete(id);
       removeTraceRow(id);
       setEnteringTraceIds((prev) => {
         if (!prev.has(id)) return prev;
@@ -1089,6 +1150,7 @@ export function App(): JSX.Element {
       const selectedSummaryById = new Map<string, TraceSummary>();
       const latestEventsByTraceId = new Map<string, TracePage["events"]>();
       let latestOverview: OverviewStats | null = null;
+      let latestStartup: IndexStartupStatus | null = null;
       let tracesChanged = false;
       let needsSelectedRefetch = false;
 
@@ -1123,6 +1185,7 @@ export function App(): JSX.Element {
         }
         if (delta.type === "overview_updated") {
           latestOverview = delta.payload.overview;
+          latestStartup = delta.payload.startup;
         }
       }
 
@@ -1150,13 +1213,28 @@ export function App(): JSX.Element {
       if (latestOverview) {
         setOverview(latestOverview);
       }
+      if (latestStartup) {
+        setStartup(latestStartup);
+      }
       const selectedId = selectedIdRef.current;
       const selectedSummary = selectedSummaryById.get(selectedId);
+      const pendingLatestEvents = pendingLatestEventsByTraceIdRef.current.get(selectedId) ?? [];
+      const latestEvents = mergeLatestTraceEvents(
+        pendingLatestEvents,
+        dedupedLatestEventsByTraceId.get(selectedId) ?? [],
+      );
+      const hasLiveAppendPayload = latestEvents.length > 0;
+      const hasDetailState =
+        pageRef.current?.summary.id === selectedId ||
+        tracePageCacheRef.current.has(buildTracePageCacheKey(selectedId, false)) ||
+        tracePageCacheRef.current.has(buildTracePageCacheKey(selectedId, true));
+      if (hasLiveAppendPayload) {
+        pendingLatestEventsByTraceIdRef.current.set(selectedId, latestEvents);
+      }
       if (selectedSummary) {
         setPage((prev) => (prev?.summary.id === selectedId ? { ...prev, summary: selectedSummary } : prev));
       }
-      const latestEvents = dedupedLatestEventsByTraceId.get(selectedId);
-      if (latestEvents && latestEvents.length > 0) {
+      if (hasLiveAppendPayload && hasDetailState) {
         setPage((prev) => (prev?.summary.id === selectedId ? appendLatestEventsToTracePage(prev, latestEvents) : prev));
         for (const includeMeta of [false, true]) {
           const cacheKey = buildTracePageCacheKey(selectedId, includeMeta);
@@ -1171,6 +1249,18 @@ export function App(): JSX.Element {
             summaryStamp: buildTraceSummaryStamp(nextPage.summary),
           });
         }
+        pendingLatestEventsByTraceIdRef.current.delete(selectedId);
+      } else if (hasLiveAppendPayload && selectedId) {
+        const optimisticSummary = selectedSummary ?? tracesRef.current.find((trace) => trace.id === selectedId) ?? pageRef.current?.summary;
+        if (optimisticSummary) {
+          const optimisticPage = buildOptimisticTracePage(optimisticSummary, latestEvents, includeMeta);
+          setPage((prev) => (prev?.summary.id === selectedId ? prev : optimisticPage));
+          upsertTracePageCache(tracePageCacheRef.current, buildTracePageCacheKey(selectedId, includeMeta), {
+            page: optimisticPage,
+            summaryStamp: buildTraceSummaryStamp(optimisticSummary),
+          });
+        }
+        setLiveTick((value) => value + 1);
       } else if (needsSelectedRefetch && selectedId) {
         setLiveTick((value) => value + 1);
       }
@@ -1194,7 +1284,7 @@ export function App(): JSX.Element {
     source.addEventListener("snapshot", (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data) as {
-          payload?: { traces?: TraceSummary[]; overview?: OverviewStats };
+          payload?: { traces?: TraceSummary[]; overview?: OverviewStats; startup?: IndexStartupStatus };
         };
         const nextTraces = limitRecentTraces((data.payload?.traces ?? []).map(applyManualStopOverride));
         tracesRef.current = nextTraces;
@@ -1203,6 +1293,7 @@ export function App(): JSX.Element {
           setSelectedId((prev) => prev || nextTraces[0]?.id || "");
         }
         if (data.payload?.overview) setOverview(data.payload.overview);
+        if (data.payload?.startup) setStartup(data.payload.startup);
         setStatus(`Live: ${nextTraces.length} traces`);
         setLastLiveUpdateMs(Date.now());
       } catch {
@@ -1293,6 +1384,7 @@ export function App(): JSX.Element {
     const cacheKey = buildTracePageCacheKey(selectedId, includeMeta);
     const selectedSummaryStamp = selectedTraceSummaryStamp;
     const cachedEntry = tracePageCacheRef.current.get(cacheKey);
+    const hasPendingOptimisticEvents = pendingLatestEventsByTraceIdRef.current.has(selectedId);
     const selectedAdHocEncodedPath = isAdHocTraceSelection(selectedId) ? selectedId.slice(AD_HOC_TRACE_ID_PREFIX.length) : "";
     const isAdHocSelection = Boolean(selectedAdHocEncodedPath);
 
@@ -1324,6 +1416,7 @@ export function App(): JSX.Element {
       (isAdHocSelection
         ? sameTraceAsPreviousLoad && includeMetaChanged
         : !selectedSummaryStamp ||
+          hasPendingOptimisticEvents ||
           cachedEntry.summaryStamp !== selectedSummaryStamp ||
           (sameTraceAsPreviousLoad && (includeMetaChanged || liveTickChanged)));
     if (!shouldFetch) {
@@ -1348,11 +1441,22 @@ export function App(): JSX.Element {
           setDeepLinkWarning("");
           setActiveAdHocEncodedPath(selectedAdHocEncodedPath);
         }
+        const latestSummary = tracesRef.current.find((trace) => trace.id === selectedId);
+        const effectiveSummary =
+          latestSummary && isTraceSummaryNewer(latestSummary, detail.summary) ? latestSummary : detail.summary;
+        const pendingLatestEvents = pendingLatestEventsByTraceIdRef.current.get(selectedId) ?? [];
+        const mergedDetail = pendingLatestEvents.length > 0
+          ? appendLatestEventsToTracePage(
+            { ...detail, summary: effectiveSummary },
+            pendingLatestEvents,
+          )
+          : { ...detail, summary: effectiveSummary };
+        pendingLatestEventsByTraceIdRef.current.delete(selectedId);
         upsertTracePageCache(tracePageCacheRef.current, cacheKey, {
-          page: detail,
-          summaryStamp: buildTraceSummaryStamp(detail.summary),
+          page: mergedDetail,
+          summaryStamp: buildTraceSummaryStamp(mergedDetail.summary),
         });
-        applyTraceDetail(detail);
+        applyTraceDetail(mergedDetail);
       } catch (error) {
         if (abortController.signal.aborted) return;
         if (error instanceof Error && error.name === "AbortError") return;
@@ -1880,6 +1984,7 @@ export function App(): JSX.Element {
             <span>{`events ${overview?.eventCount ?? 0}`}</span>
             <span>{`errors ${overview?.errorCount ?? 0}`}</span>
             <span>{`tool io ${(overview?.toolUseCount ?? 0) + (overview?.toolResultCount ?? 0)}`}</span>
+            {startupSummary ? <span>{startupSummary}</span> : null}
           </div>
           <div className="hero-actions">
             <div className="hero-view-toggle" role="tablist" aria-label="Primary view selector">
@@ -2246,6 +2351,7 @@ export function App(): JSX.Element {
     </>
       ) : (
         <ActivityView
+          startup={startup}
           traceAgentById={traceAgentById}
           traceTokenTotalsById={traceTokenTotalsById}
           selectedHeatmapMetric={selectedHeatmapMetric}

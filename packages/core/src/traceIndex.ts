@@ -7,6 +7,7 @@ import type {
   ActivityBinsMode,
   AppConfig,
   EventKind,
+  IndexStartupStatus,
   IndexPerformanceStats,
   NamedCount,
   NormalizedEvent,
@@ -49,6 +50,9 @@ const DIRTY_REFRESH_DELAY_MS = 25;
 const WATCH_WRITE_STABILITY_MIN_MS = 35;
 const WATCH_WRITE_STABILITY_MAX_MS = 75;
 const WATCH_WRITE_POLL_INTERVAL_MS = 20;
+const STARTUP_RECENT_TRACE_LIMIT = 120;
+const BACKGROUND_HYDRATE_BATCH_SIZE = 25;
+const BACKGROUND_HYDRATE_DELAY_MS = 25;
 
 interface TraceEntry {
   file: DiscoveredTraceFile;
@@ -113,6 +117,18 @@ interface ParserCursorState {
   parsedSizeBytes: number;
   pendingText: string;
   parserName: string;
+}
+
+function createInitialStartupStatus(): IndexStartupStatus {
+  return {
+    phase: "cold",
+    inspectorReady: false,
+    fullReady: false,
+    isPartial: false,
+    discoveredTraceCount: 0,
+    hydratedTraceCount: 0,
+    startupError: "",
+  };
 }
 
 function emptyEventKindCounts(): Record<EventKind, number> {
@@ -641,6 +657,11 @@ export class TraceIndex extends EventEmitter {
   private queuedForceFullRefresh = false;
   private dirtyPaths = new Set<string>();
   private forceReparsePaths = new Set<string>();
+  private pendingHydrationFiles: DiscoveredTraceFile[] = [];
+  private pendingHydrationIds = new Set<string>();
+  private pendingHydrationPaths = new Set<string>();
+  private pendingHydrationCursor = 0;
+  private startupStatus: IndexStartupStatus = createInitialStartupStatus();
   private adaptiveIntervalMs: number;
   private perf: IndexPerformanceStats = {
     refreshCount: 0,
@@ -689,8 +710,19 @@ export class TraceIndex extends EventEmitter {
 
   async start(): Promise<void> {
     this.started = true;
-    await this.refresh();
-    if (!this.started) return;
+    this.startupStatus = {
+      phase: "bootstrapping",
+      inspectorReady: false,
+      fullReady: false,
+      isPartial: false,
+      discoveredTraceCount: 0,
+      hydratedTraceCount: 0,
+      startupError: "",
+    };
+    this.pendingHydrationFiles = [];
+    this.pendingHydrationIds.clear();
+    this.pendingHydrationPaths.clear();
+    this.pendingHydrationCursor = 0;
     await this.restartWatcher();
     if (!this.started) {
       if (this.watcher) {
@@ -699,6 +731,20 @@ export class TraceIndex extends EventEmitter {
       }
       return;
     }
+    try {
+      await this.bootstrapRecentTraces();
+    } catch (error) {
+      this.startupStatus = {
+        ...this.startupStatus,
+        phase: "failed",
+        inspectorReady: false,
+        fullReady: false,
+        isPartial: false,
+        startupError: error instanceof Error ? error.message : String(error),
+      };
+      throw error;
+    }
+    if (!this.started) return;
     this.scheduleNextRefresh(this.computeBaseIntervalMs());
   }
 
@@ -713,6 +759,10 @@ export class TraceIndex extends EventEmitter {
       this.watcher = null;
     }
     this.forceReparsePaths.clear();
+    this.pendingHydrationFiles = [];
+    this.pendingHydrationIds.clear();
+    this.pendingHydrationPaths.clear();
+    this.pendingHydrationCursor = 0;
   }
 
   async refresh(): Promise<void> {
@@ -734,6 +784,14 @@ export class TraceIndex extends EventEmitter {
     return this.streamVersion;
   }
 
+  getStartupStatus(): IndexStartupStatus {
+    return { ...this.startupStatus };
+  }
+
+  getStartupState(): IndexStartupStatus {
+    return this.getStartupStatus();
+  }
+
   getTopTools(limit = 12): NamedCount[] {
     const counts = new Map<string, number>();
     for (const entry of this.entries.values()) {
@@ -745,6 +803,97 @@ export class TraceIndex extends EventEmitter {
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .slice(0, Math.max(1, limit))
       .map(([name, count]) => ({ name, count }));
+  }
+
+  private async bootstrapRecentTraces(): Promise<void> {
+    const bootstrapNowMs = nowMs();
+    const files = await discoverTraceFiles(this.config);
+    this.lastFullRefreshAtMs = bootstrapNowMs;
+    this.forceReparsePaths.clear();
+
+    const nextPathToId = new Map<string, string>();
+    for (const file of files) {
+      nextPathToId.set(file.path, file.id);
+    }
+    this.pathToId = nextPathToId;
+
+    const bootstrapFiles = files.slice(0, STARTUP_RECENT_TRACE_LIMIT);
+    const pendingFiles = files.slice(bootstrapFiles.length);
+    this.pendingHydrationFiles = pendingFiles;
+    this.pendingHydrationIds = new Set(pendingFiles.map((file) => file.id));
+    this.pendingHydrationPaths = new Set(pendingFiles.map((file) => file.path));
+    this.pendingHydrationCursor = 0;
+    this.startupStatus = {
+      phase: bootstrapFiles.length > 0 ? "bootstrapping" : pendingFiles.length > 0 ? "hydrating" : "ready",
+      inspectorReady: false,
+      fullReady: pendingFiles.length === 0,
+      isPartial: pendingFiles.length > 0,
+      discoveredTraceCount: files.length,
+      hydratedTraceCount: 0,
+      startupError: "",
+    };
+
+    const stats: RefreshStats = {
+      parsedFileCount: 0,
+      dirtyPathCount: 0,
+      usedFullRefresh: false,
+      hadFileMutations: false,
+    };
+    for (const file of bootstrapFiles) {
+      const changed = await this.upsertFile(file, bootstrapNowMs);
+      if (changed) {
+        stats.parsedFileCount += 1;
+        stats.hadFileMutations = true;
+      }
+    }
+
+    this.startupStatus = {
+      ...this.startupStatus,
+      phase: pendingFiles.length > 0 ? "hydrating" : "ready",
+      inspectorReady: true,
+      fullReady: pendingFiles.length === 0,
+      isPartial: pendingFiles.length > 0,
+      hydratedTraceCount: this.entries.size,
+    };
+    this.finishMutationBatch(bootstrapNowMs, stats);
+  }
+
+  private finishMutationBatch(refreshNowMs: number, stats: RefreshStats): void {
+    this.applyRetention(refreshNowMs);
+    this.refreshActivityStatus(refreshNowMs, stats);
+    this.perf.trackedFiles = this.entries.size;
+    this.perf.dirtyPathQueue = this.dirtyPaths.size;
+    const retentionStats = this.buildRetentionStats();
+    this.perf.hotTraces = retentionStats.hotTraces;
+    this.perf.warmTraces = retentionStats.warmTraces;
+    this.perf.coldTraces = retentionStats.coldTraces;
+    this.perf.materializedTraces = retentionStats.materializedTraces;
+    this.emitOverviewUpdated();
+  }
+
+  private emitOverviewUpdated(): void {
+    this.emitStream("overview_updated", {
+      overview: this.getOverview(),
+      startup: this.getStartupStatus(),
+    });
+  }
+
+  private hasPendingHydrationWork(): boolean {
+    return this.pendingHydrationIds.size > 0;
+  }
+
+  private updateStartupProgress(): void {
+    const remainingCount = this.pendingHydrationIds.size;
+    const discoveredTraceCount = this.startupStatus.discoveredTraceCount;
+    this.startupStatus = {
+      ...this.startupStatus,
+      phase: this.startupStatus.startupError ? "failed" : remainingCount > 0 ? "hydrating" : "ready",
+      inspectorReady: true,
+      fullReady: remainingCount === 0,
+      isPartial: remainingCount > 0,
+      discoveredTraceCount,
+      hydratedTraceCount: Math.max(0, discoveredTraceCount - remainingCount),
+    };
   }
 
   private buildRetentionStats(): Pick<
@@ -937,6 +1086,7 @@ export class TraceIndex extends EventEmitter {
   }
 
   private shouldRunFullRefresh(nowMsValue: number): boolean {
+    if (this.hasPendingHydrationWork()) return false;
     if (this.lastFullRefreshAtMs <= 0) return true;
     const fullIntervalMs = Math.max(1_000, this.config.scan.fullRescanIntervalMs);
     return nowMsValue - this.lastFullRefreshAtMs >= fullIntervalMs;
@@ -964,6 +1114,8 @@ export class TraceIndex extends EventEmitter {
       this.refreshInFlight = false;
       if (this.refreshPending || this.queuedForceFullRefresh) {
         this.scheduleNextRefresh(25);
+      } else if (this.hasPendingHydrationWork()) {
+        this.scheduleNextRefresh(BACKGROUND_HYDRATE_DELAY_MS);
       } else if (this.started) {
         this.scheduleNextRefresh();
       }
@@ -1002,19 +1154,23 @@ export class TraceIndex extends EventEmitter {
     };
     if (useFullRefresh) {
       await this.refreshFull(refreshNowMs, stats);
-    } else {
+    } else if (this.dirtyPaths.size > 0) {
       await this.refreshDirty(refreshNowMs, stats);
+    } else if (this.hasPendingHydrationWork()) {
+      await this.hydratePendingBatch(refreshNowMs, stats);
     }
-    this.applyRetention(refreshNowMs);
-    this.refreshActivityStatus(refreshNowMs, stats);
-    this.perf.trackedFiles = this.entries.size;
-    this.perf.dirtyPathQueue = this.dirtyPaths.size;
-    const retentionStats = this.buildRetentionStats();
-    this.perf.hotTraces = retentionStats.hotTraces;
-    this.perf.warmTraces = retentionStats.warmTraces;
-    this.perf.coldTraces = retentionStats.coldTraces;
-    this.perf.materializedTraces = retentionStats.materializedTraces;
-    this.emitStream("overview_updated", { overview: this.getOverview() });
+    if (this.startupStatus.inspectorReady && this.hasPendingHydrationWork()) {
+      this.updateStartupProgress();
+    } else if (this.startupStatus.inspectorReady && !this.startupStatus.fullReady) {
+      this.startupStatus = {
+        ...this.startupStatus,
+        phase: "ready",
+        fullReady: true,
+        isPartial: false,
+        hydratedTraceCount: this.startupStatus.discoveredTraceCount,
+      };
+    }
+    this.finishMutationBatch(refreshNowMs, stats);
     return stats;
   }
 
@@ -1022,6 +1178,10 @@ export class TraceIndex extends EventEmitter {
     const files = await discoverTraceFiles(this.config);
     this.lastFullRefreshAtMs = refreshNowMs;
     this.forceReparsePaths.clear();
+    this.pendingHydrationFiles = [];
+    this.pendingHydrationIds.clear();
+    this.pendingHydrationPaths.clear();
+    this.pendingHydrationCursor = 0;
 
     const nextIds = new Set(files.map((file) => file.id));
     const nextPathToId = new Map<string, string>();
@@ -1047,6 +1207,15 @@ export class TraceIndex extends EventEmitter {
       }
       this.applyRetention(refreshNowMs);
     }
+    this.startupStatus = {
+      phase: "ready",
+      inspectorReady: true,
+      fullReady: true,
+      isPartial: false,
+      discoveredTraceCount: files.length,
+      hydratedTraceCount: files.length,
+      startupError: "",
+    };
   }
 
   private async refreshDirty(refreshNowMs: number, stats: RefreshStats): Promise<void> {
@@ -1078,6 +1247,8 @@ export class TraceIndex extends EventEmitter {
           this.emitStream("trace_removed", { id: existingId });
           stats.hadFileMutations = true;
         }
+        this.pendingHydrationPaths.delete(normalizedPath);
+        this.pendingHydrationIds.delete(existingId ?? "");
         this.pathToId.delete(normalizedPath);
         continue;
       }
@@ -1099,6 +1270,31 @@ export class TraceIndex extends EventEmitter {
         stats.parsedFileCount += 1;
         stats.hadFileMutations = true;
       }
+      this.pendingHydrationIds.delete(file.id);
+      this.pendingHydrationPaths.delete(file.path);
+    }
+  }
+
+  private async hydratePendingBatch(refreshNowMs: number, stats: RefreshStats): Promise<void> {
+    if (!this.hasPendingHydrationWork()) return;
+    let processedCount = 0;
+    while (this.pendingHydrationCursor < this.pendingHydrationFiles.length && processedCount < BACKGROUND_HYDRATE_BATCH_SIZE) {
+      const file = this.pendingHydrationFiles[this.pendingHydrationCursor];
+      this.pendingHydrationCursor += 1;
+      if (!file) continue;
+      if (!this.pendingHydrationIds.has(file.id) || !this.pendingHydrationPaths.has(file.path)) continue;
+      this.pendingHydrationIds.delete(file.id);
+      this.pendingHydrationPaths.delete(file.path);
+      const changed = await this.upsertFile(file, refreshNowMs);
+      if (changed) {
+        stats.parsedFileCount += 1;
+        stats.hadFileMutations = true;
+      }
+      processedCount += 1;
+    }
+    if (this.pendingHydrationCursor >= this.pendingHydrationFiles.length) {
+      this.pendingHydrationFiles = [];
+      this.pendingHydrationCursor = 0;
     }
   }
 
