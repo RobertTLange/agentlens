@@ -119,11 +119,13 @@ export function normalizePricingModelId(model: string): string {
   normalized = normalized.replace(/^global\.anthropic\./, "");
   normalized = normalized.replace(/^anthropic\//, "");
   normalized = normalized.replace(/^openai\//, "");
+  normalized = normalized.replace(/^google\//, "");
+  normalized = normalized.replace(/^models\//, "");
   normalized = normalized.replace(/-v\d+(?::\d+)?$/, "");
 
   if (normalized.includes("/")) {
     const tail = normalized.split("/").at(-1)?.trim() ?? normalized;
-    if (tail.startsWith("claude-") || tail.startsWith("gpt-")) normalized = tail;
+    if (tail.startsWith("claude-") || tail.startsWith("gpt-") || tail.startsWith("gemini-")) normalized = tail;
   }
 
   const claudeMatch = normalized.match(/^claude-(haiku|sonnet|opus)-4-(5|6)(?:-\d{8})?$/);
