@@ -1426,6 +1426,7 @@ export function ActivityView({
                           className={`activity-year-cell level-${cell.level} ${selectedDateLocal === cell.dateLocal ? "active" : ""}`}
                           data-date-local={cell.dateLocal}
                           data-tooltip={tooltip}
+                          data-weekday-index={String(cell.weekdayIndex)}
                           style={{ gridColumn: `${cell.weekIndex + 1}`, gridRow: `${cell.weekdayIndex + 1}` }}
                           onClick={() => {
                             selectActivityDate(cell.dateLocal, "year");

@@ -1851,6 +1851,30 @@ describe("App sessions list live motion", () => {
     expect(tooltip).toContain("intensity ");
   });
 
+  it("marks top-edge yearly cells for edge-safe hover positioning", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
+    const topEdgeCell = document.querySelector('.activity-year-cell[data-date-local="2026-02-01"]');
+    if (!(topEdgeCell instanceof HTMLButtonElement)) {
+      throw new Error("missing top-edge yearly activity cell");
+    }
+
+    expect(topEdgeCell.getAttribute("data-weekday-index")).toBe("0");
+  });
+
   it("compresses timeline columns when inactivity exceeds four hours", async () => {
     const startMs = Date.UTC(2026, 1, 22, 0, 0, 0);
     const binMinutes = 5;

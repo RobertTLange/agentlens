@@ -2148,6 +2148,20 @@ body {
   opacity: 1;
 }
 
+.activity-year-cell[data-weekday-index="0"]::after {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+
+.activity-year-cell[data-weekday-index="0"]::before {
+  top: calc(100% + 1px);
+  bottom: auto;
+  border-top: 1px solid rgba(15, 23, 42, 0.14);
+  border-left: 1px solid rgba(15, 23, 42, 0.14);
+  border-right: none;
+  border-bottom: none;
+}
+
 .activity-year-grid .activity-year-cell:nth-last-child(-n + 8)::after {
   left: auto;
   right: 0;
@@ -2158,6 +2172,10 @@ body {
   left: auto;
   right: 4px;
   transform: none;
+}
+
+.activity-year-grid .activity-year-cell[data-weekday-index="0"]:nth-last-child(-n + 8)::before {
+  right: 4px;
 }
 
 .activity-year-cell.active {
