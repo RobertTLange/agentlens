@@ -65,6 +65,12 @@ export interface RedactionConfig {
   valuePattern: string;
 }
 
+export interface PricingSyncConfig {
+  enabled: boolean;
+  ttlMs: number;
+  timeoutMs: number;
+}
+
 export interface CostModelRate {
   model: string;
   inputPer1MUsd: number;
@@ -140,6 +146,7 @@ export interface AppConfig {
   traceInspector: TraceInspectorConfig;
   activityHeatmap: ActivityHeatmapConfig;
   redaction: RedactionConfig;
+  pricingSync: PricingSyncConfig;
   cost: CostConfig;
   models: ModelsConfig;
 }

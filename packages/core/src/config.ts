@@ -10,6 +10,8 @@ import type {
   CostConfig,
   CostModelRate,
   ModelsConfig,
+  ModelContextWindow,
+  PricingSyncConfig,
   RetentionConfig,
   RedactionConfig,
   ScanConfig,
@@ -20,6 +22,11 @@ import type {
 import { DEFAULT_CONFIG, DEFAULT_SOURCE_PROFILES } from "./sourceProfiles.js";
 
 export const DEFAULT_CONFIG_PATH = path.join(os.homedir(), ".agentlens", "config.toml");
+
+export interface PricingDefaultsOverride {
+  modelRates: CostModelRate[];
+  contextWindows: ModelContextWindow[];
+}
 
 function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<SourceProfileConfig>): SourceProfileConfig {
   const merged: SourceProfileConfig = {
@@ -37,7 +44,7 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
   return merged;
 }
 
-type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
+export type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
 
 function isAgentKind(value: string): value is AgentKind {
   return (
@@ -260,6 +267,15 @@ function mergeRedaction(input?: Partial<RedactionConfig>): RedactionConfig {
   };
 }
 
+function mergePricingSync(input?: Partial<PricingSyncConfig>): PricingSyncConfig {
+  const defaults = DEFAULT_CONFIG.pricingSync;
+  return {
+    enabled: input?.enabled ?? defaults.enabled,
+    ttlMs: positiveMsOrDefault(input?.ttlMs, defaults.ttlMs),
+    timeoutMs: positiveMsOrDefault(input?.timeoutMs, defaults.timeoutMs),
+  };
+}
+
 function normalizeCostModelRate(value: unknown): CostModelRate | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<CostModelRate>;
@@ -304,9 +320,9 @@ function normalizeCostModelRate(value: unknown): CostModelRate | null {
   return normalized;
 }
 
-function mergeCost(input?: Partial<CostConfig>): CostConfig {
+function mergeCost(input?: Partial<CostConfig>, defaultModelRates: CostModelRate[] = DEFAULT_CONFIG.cost.modelRates): CostConfig {
   const defaults = DEFAULT_CONFIG.cost;
-  const defaultRates = defaults.modelRates.map(normalizeCostModelRate).filter((value): value is CostModelRate => value !== null);
+  const defaultRates = defaultModelRates.map(normalizeCostModelRate).filter((value): value is CostModelRate => value !== null);
   const inputRates = Array.isArray(input?.modelRates)
     ? input.modelRates.map(normalizeCostModelRate).filter((value): value is CostModelRate => value !== null)
     : [];
@@ -327,7 +343,10 @@ function mergeCost(input?: Partial<CostConfig>): CostConfig {
   };
 }
 
-function mergeModels(input?: Partial<ModelsConfig>): ModelsConfig {
+function mergeModels(
+  input?: Partial<ModelsConfig>,
+  defaultContextWindows: ModelContextWindow[] = DEFAULT_CONFIG.models.contextWindows,
+): ModelsConfig {
   const defaults = DEFAULT_CONFIG.models;
   const defaultWindow = toFiniteNumber(input?.defaultContextWindowTokens);
   const normalizedInputContextWindows =
@@ -341,15 +360,15 @@ function mergeModels(input?: Partial<ModelsConfig>): ModelsConfig {
           })
           .filter((entry): entry is { model: string; contextWindowTokens: number } => entry !== null)
       : [];
-  const windowByModel = new Map(defaults.contextWindows.map((entry) => [entry.model, entry] as const));
+  const windowByModel = new Map(defaultContextWindows.map((entry) => [entry.model, entry] as const));
   for (const entry of normalizedInputContextWindows) {
     windowByModel.set(entry.model, entry);
   }
   const appendedInputContextWindows = normalizedInputContextWindows.filter(
-    (entry) => !defaults.contextWindows.some((defaultEntry) => defaultEntry.model === entry.model),
+    (entry) => !defaultContextWindows.some((defaultEntry) => defaultEntry.model === entry.model),
   );
   const contextWindows = [
-    ...defaults.contextWindows.map((entry) => windowByModel.get(entry.model) ?? entry),
+    ...defaultContextWindows.map((entry) => windowByModel.get(entry.model) ?? entry),
     ...appendedInputContextWindows,
   ];
 
@@ -360,7 +379,10 @@ function mergeModels(input?: Partial<ModelsConfig>): ModelsConfig {
   };
 }
 
-export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
+export function mergeConfigWithPricingDefaults(
+  input?: PartialAppConfigInput,
+  pricingDefaults?: PricingDefaultsOverride,
+): AppConfig {
   const sources: Record<string, SourceProfileConfig> = {};
   const inputSources = input?.sources ?? {};
   const hasExplicitSources = input?.sources !== undefined;
@@ -403,19 +425,68 @@ export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
     traceInspector: mergeTraceInspector(input?.traceInspector),
     activityHeatmap: mergeActivityHeatmap(input?.activityHeatmap),
     redaction: mergeRedaction(input?.redaction),
-    cost: mergeCost(input?.cost),
-    models: mergeModels(input?.models),
+    pricingSync: mergePricingSync(input?.pricingSync),
+    cost: mergeCost(input?.cost, pricingDefaults?.modelRates),
+    models: mergeModels(input?.models, pricingDefaults?.contextWindows),
   };
 }
 
-export async function loadConfig(configPath = DEFAULT_CONFIG_PATH): Promise<AppConfig> {
+export function mergeConfig(input?: PartialAppConfigInput): AppConfig {
+  return mergeConfigWithPricingDefaults(input);
+}
+
+export async function readConfigInput(configPath = DEFAULT_CONFIG_PATH): Promise<PartialAppConfigInput> {
   try {
     const raw = await readFile(configPath, "utf8");
-    const parsed = TOML.parse(raw) as PartialAppConfigInput;
-    return mergeConfig(parsed);
+    return TOML.parse(raw) as PartialAppConfigInput;
   } catch {
-    return mergeConfig();
+    return {};
   }
+}
+
+export function stripBundledPricingOverrides(input: PartialAppConfigInput): PartialAppConfigInput {
+  const next = structuredClone(input);
+
+  if (Array.isArray(next.cost?.modelRates)) {
+    const defaultRates = new Map(
+      DEFAULT_CONFIG.cost.modelRates
+        .map(normalizeCostModelRate)
+        .filter((value): value is CostModelRate => value !== null)
+        .map((rate) => [rate.model, rate] as const),
+    );
+    const keptRates = next.cost.modelRates.filter((candidate) => {
+      const normalized = normalizeCostModelRate(candidate);
+      if (!normalized) return false;
+      const bundled = defaultRates.get(normalized.model);
+      return !bundled || JSON.stringify(normalized) !== JSON.stringify(bundled);
+    });
+    next.cost = {
+      ...next.cost,
+      modelRates: keptRates,
+    };
+  }
+
+  if (Array.isArray(next.models?.contextWindows)) {
+    const defaultWindows = new Map(DEFAULT_CONFIG.models.contextWindows.map((entry) => [entry.model, entry.contextWindowTokens] as const));
+    const keptWindows = next.models.contextWindows.filter((entry) => {
+      const model = String(entry?.model ?? "").trim();
+      const contextWindowTokens = toFiniteNumber(entry?.contextWindowTokens);
+      if (!model || contextWindowTokens === null) return false;
+      const bundled = defaultWindows.get(model);
+      return bundled === undefined || bundled !== Math.round(contextWindowTokens);
+    });
+    next.models = {
+      ...next.models,
+      contextWindows: keptWindows,
+    };
+  }
+
+  return next;
+}
+
+export async function loadConfig(configPath = DEFAULT_CONFIG_PATH): Promise<AppConfig> {
+  const parsed = await readConfigInput(configPath);
+  return mergeConfig(parsed);
 }
 
 export async function saveConfig(config: AppConfig, configPath = DEFAULT_CONFIG_PATH): Promise<void> {

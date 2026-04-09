@@ -118,6 +118,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     valuePattern:
       "(?i)(sk-[a-z0-9_-]+|ghp_[a-z0-9]+|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\\-_]{20,}|xox[baprs]-[A-Za-z0-9-]+|-----BEGIN [A-Z ]+ PRIVATE KEY-----)",
   },
+  pricingSync: {
+    enabled: true,
+    ttlMs: 86_400_000,
+    timeoutMs: 5_000,
+  },
   cost: {
     enabled: true,
     currency: "USD",

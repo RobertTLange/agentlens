@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig, mergeConfig } from "../config.js";
+import { loadConfig, mergeConfig, mergeConfigWithPricingDefaults } from "../config.js";
 
 describe("config", () => {
   it("provides defaults for trace inspector, redaction, cost, and model context windows", () => {
@@ -15,6 +15,9 @@ describe("config", () => {
     expect(config.traceInspector.includeMetaDefault).toBe(false);
     expect(config.traceInspector.topModelCount).toBe(3);
     expect(config.redaction.alwaysOn).toBe(true);
+    expect(config.pricingSync.enabled).toBe(true);
+    expect(config.pricingSync.ttlMs).toBe(86_400_000);
+    expect(config.pricingSync.timeoutMs).toBe(5_000);
     expect(config.cost.enabled).toBe(true);
     expect(config.cost.unknownModelPolicy).toBe("n_a");
     expect(config.cost.modelRates.length).toBeGreaterThan(20);
@@ -162,6 +165,11 @@ replacement = "[MASK]"
 keyPattern = "(?i)token"
 valuePattern = "(?i)sk-[a-z0-9_-]+"
 
+[pricingSync]
+enabled = false
+ttlMs = 1234
+timeoutMs = 6789
+
 [cost]
 enabled = true
 currency = "USD"
@@ -216,6 +224,9 @@ maxResidentEventsPerWarmTrace = 20
     const config = await loadConfig(configPath);
     expect(config.traceInspector.topModelCount).toBe(2);
     expect(config.redaction.replacement).toBe("[MASK]");
+    expect(config.pricingSync.enabled).toBe(false);
+    expect(config.pricingSync.ttlMs).toBe(1234);
+    expect(config.pricingSync.timeoutMs).toBe(6789);
     const gpt53CodexRate = config.cost.modelRates.find((rate) => rate.model === "gpt-5.3-codex");
     expect(gpt53CodexRate?.cachedCreate1hPer1MUsd).toBe(1.25);
     expect(gpt53CodexRate?.longContextThresholdTokens).toBe(272000);
@@ -265,6 +276,65 @@ maxResidentEventsPerWarmTrace = 20
     expect(gpt54Rate?.longContextThresholdTokens).toBe(200_000);
     expect(codexWindow?.contextWindowTokens).toBe(123_000);
     expect(gpt54Window?.contextWindowTokens).toBe(1_050_000);
+  });
+
+  it("applies runtime pricing defaults before explicit user overrides", () => {
+    const config = mergeConfigWithPricingDefaults(
+      {
+        cost: {
+          enabled: true,
+          currency: "USD",
+          unknownModelPolicy: "n_a",
+          modelRates: [
+            {
+              model: "gpt-5.4",
+              inputPer1MUsd: 9,
+              outputPer1MUsd: 10,
+              cachedReadPer1MUsd: 1,
+              cachedCreatePer1MUsd: 2,
+              reasoningOutputPer1MUsd: 3,
+            },
+          ],
+        },
+        models: {
+          defaultContextWindowTokens: 200_000,
+          contextWindows: [{ model: "gpt-5.4", contextWindowTokens: 123_000 }],
+        },
+      },
+      {
+        modelRates: [
+          {
+            model: "gpt-5.4",
+            inputPer1MUsd: 2.5,
+            outputPer1MUsd: 15,
+            cachedReadPer1MUsd: 0.25,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+            contextWindowTokens: 1_050_000,
+          },
+          {
+            model: "gemini-3.1-pro-preview",
+            inputPer1MUsd: 2,
+            outputPer1MUsd: 12,
+            cachedReadPer1MUsd: 0.2,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+            contextWindowTokens: 1_048_576,
+          },
+        ],
+        contextWindows: [
+          { model: "gpt-5.4", contextWindowTokens: 1_050_000 },
+          { model: "gemini-3.1-pro-preview", contextWindowTokens: 1_048_576 },
+        ],
+      },
+    );
+
+    expect(config.cost.modelRates.find((rate) => rate.model === "gpt-5.4")?.inputPer1MUsd).toBe(9);
+    expect(config.cost.modelRates.find((rate) => rate.model === "gemini-3.1-pro-preview")?.inputPer1MUsd).toBe(2);
+    expect(config.models.contextWindows.find((entry) => entry.model === "gpt-5.4")?.contextWindowTokens).toBe(123_000);
+    expect(config.models.contextWindows.find((entry) => entry.model === "gemini-3.1-pro-preview")?.contextWindowTokens).toBe(
+      1_048_576,
+    );
   });
 
   it("falls back to default activity heatmap values for invalid input", () => {
