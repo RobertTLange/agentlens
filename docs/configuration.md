@@ -32,15 +32,17 @@ agentlens config set scan.includeMetaDefault true
 
 ## Pricing Defaults
 
-Vendor pricing defaults are checked in under `packages/core/src/generatedPricing.ts`.
+Default pricing and context-window metadata are checked in under `packages/core/src/generatedPricing.ts`.
 
-Refresh them from the official Anthropic/OpenAI docs with:
+Refresh them from `models.dev/api.json` with:
 
 ```bash
 npm run sync:pricing
 ```
 
-Tiered defaults include long-context thresholds and Anthropic split cache-write rates when available.
+`models.dev` is the primary source of truth for default rates and context windows across a curated first-party provider set.
+AgentLens applies a small local Anthropic override layer after import so split cache-write tiers (`5m` vs `1h`) and long-context premiums stay accurate where `models.dev` only exposes generic cache-write pricing.
+User-configured `[cost]` and `[models]` overrides still take precedence over the generated defaults.
 
 ## Practical Scan Settings
 

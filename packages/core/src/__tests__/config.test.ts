@@ -17,11 +17,12 @@ describe("config", () => {
     expect(config.redaction.alwaysOn).toBe(true);
     expect(config.cost.enabled).toBe(true);
     expect(config.cost.unknownModelPolicy).toBe("n_a");
-    expect(config.cost.modelRates.length).toBeGreaterThan(0);
+    expect(config.cost.modelRates.length).toBeGreaterThan(20);
     expect(config.cost.modelRates.some((rate) => rate.model === "gpt-5.3-codex")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "gpt-5.4")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "claude-sonnet-4.6")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "claude-opus-4-5-20251101")).toBe(true);
+    expect(config.cost.modelRates.some((rate) => rate.model === "openai/gpt-5.4")).toBe(true);
     expect(config.models.defaultContextWindowTokens).toBeGreaterThan(0);
     expect(config.models.contextWindows.some((entry) => entry.model === "gpt-5.2-codex")).toBe(true);
     expect(config.activityHeatmap.metric).toBe("sessions");
@@ -41,12 +42,12 @@ describe("config", () => {
     ).toBe(true);
     expect(
       config.models.contextWindows.some(
-        (entry) => entry.model === "claude-opus-4.6" && entry.contextWindowTokens === 200_000,
+        (entry) => entry.model === "claude-opus-4.6" && entry.contextWindowTokens === 1_000_000,
       ),
     ).toBe(true);
     expect(
       config.models.contextWindows.some(
-        (entry) => entry.model === "claude-sonnet-4.6" && entry.contextWindowTokens === 200_000,
+        (entry) => entry.model === "claude-sonnet-4.6" && entry.contextWindowTokens === 1_000_000,
       ),
     ).toBe(true);
     expect(
@@ -54,6 +55,17 @@ describe("config", () => {
         (entry) => entry.model === "claude-haiku-4.5" && entry.contextWindowTokens === 200_000,
       ),
     ).toBe(true);
+    const gpt54Rate = config.cost.modelRates.find((rate) => rate.model === "gpt-5.4");
+    const sonnet46Rate = config.cost.modelRates.find((rate) => rate.model === "claude-sonnet-4.6");
+    expect(gpt54Rate?.inputPer1MUsd).toBe(2.5);
+    expect(gpt54Rate?.outputPer1MUsd).toBe(15);
+    expect(gpt54Rate?.cachedReadPer1MUsd).toBe(0.25);
+    expect(gpt54Rate?.longContextThresholdTokens).toBe(200_000);
+    expect(gpt54Rate?.longContextInputPer1MUsd).toBe(5);
+    expect(gpt54Rate?.longContextOutputPer1MUsd).toBe(22.5);
+    expect(sonnet46Rate?.cachedCreatePer1MUsd).toBe(3.75);
+    expect(sonnet46Rate?.cachedCreate5mPer1MUsd).toBe(3.75);
+    expect(sonnet46Rate?.cachedCreate1hPer1MUsd).toBe(6);
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.pi", logType: "pi" });
     const defaultEnabledSources = [
@@ -249,8 +261,8 @@ maxResidentEventsPerWarmTrace = 20
 
     expect(codexRate?.inputPer1MUsd).toBe(9);
     expect(codexRate?.outputPer1MUsd).toBe(10);
-    expect(gpt54Rate?.inputPer1MUsd).toBe(1.25);
-    expect(gpt54Rate?.longContextThresholdTokens).toBe(272_000);
+    expect(gpt54Rate?.inputPer1MUsd).toBe(2.5);
+    expect(gpt54Rate?.longContextThresholdTokens).toBe(200_000);
     expect(codexWindow?.contextWindowTokens).toBe(123_000);
     expect(gpt54Window?.contextWindowTokens).toBe(1_050_000);
   });

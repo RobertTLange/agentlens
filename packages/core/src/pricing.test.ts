@@ -83,14 +83,15 @@ describe("pricing", () => {
         modelRates: [
           {
             model: "gpt-5.4",
-            inputPer1MUsd: 1.25,
-            outputPer1MUsd: 7.5,
-            cachedReadPer1MUsd: 0.125,
+            inputPer1MUsd: 2.5,
+            outputPer1MUsd: 15,
+            cachedReadPer1MUsd: 0.25,
             cachedCreatePer1MUsd: 0,
             reasoningOutputPer1MUsd: 0,
-            longContextThresholdTokens: 272_000,
-            longContextInputPer1MUsd: 2.5,
-            longContextOutputPer1MUsd: 11.25,
+            longContextThresholdTokens: 200_000,
+            longContextInputPer1MUsd: 5,
+            longContextOutputPer1MUsd: 22.5,
+            longContextCachedReadPer1MUsd: 0.5,
             contextWindowTokens: 1_050_000,
           },
         ],
@@ -100,7 +101,7 @@ describe("pricing", () => {
     const shortCost = estimateUsageCost(
       {
         model: "gpt-5.4-2026-02-28",
-        promptTokens: 200_000,
+        promptTokens: 180_000,
         inputTokens: 180_000,
         cachedReadTokens: 20_000,
         cachedCreateTokens: 0,
@@ -122,7 +123,64 @@ describe("pricing", () => {
       config.cost,
     );
 
-    expect(shortCost).toBe(0.5275);
-    expect(longCost).toBe(0.9025);
+    expect(shortCost).toBe(1.055);
+    expect(longCost).toBe(1.81);
+  });
+
+  it("prefers provider-qualified pricing when a raw model id has a more specific override", () => {
+    const config = mergeConfig({
+      cost: {
+        enabled: true,
+        currency: "USD",
+        unknownModelPolicy: "n_a",
+        modelRates: [
+          {
+            model: "gpt-5.4",
+            inputPer1MUsd: 2.5,
+            outputPer1MUsd: 15,
+            cachedReadPer1MUsd: 0.25,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+          },
+          {
+            model: "openai/gpt-5.4",
+            inputPer1MUsd: 3,
+            outputPer1MUsd: 18,
+            cachedReadPer1MUsd: 0.3,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+          },
+        ],
+      },
+    });
+
+    const bareCost = estimateUsageCost(
+      {
+        model: "gpt-5.4",
+        promptTokens: 100_000,
+        inputTokens: 100_000,
+        cachedReadTokens: 0,
+        cachedCreateTokens: 0,
+        outputTokens: 50_000,
+        reasoningOutputTokens: 0,
+      },
+      config.cost,
+    );
+
+    const qualifiedCost = estimateUsageCost(
+      {
+        model: "openai/gpt-5.4",
+        promptTokens: 100_000,
+        inputTokens: 100_000,
+        cachedReadTokens: 0,
+        cachedCreateTokens: 0,
+        outputTokens: 50_000,
+        reasoningOutputTokens: 0,
+      },
+      config.cost,
+    );
+
+    expect(bareCost).toBe(1);
+    expect(qualifiedCost).toBe(1.2);
   });
 });
