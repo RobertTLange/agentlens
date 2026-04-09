@@ -1825,6 +1825,32 @@ describe("App sessions list live motion", () => {
     expect(tooltip).not.toContain("primary ");
   });
 
+  it("adds aggregate hover data to yearly activity cells", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const activityButton = Array.from(document.querySelectorAll(".hero-view-button")).find((node) =>
+      node.textContent?.includes("Activity"),
+    );
+    if (!(activityButton instanceof HTMLButtonElement)) {
+      throw new Error("missing activity view switch button");
+    }
+
+    act(() => {
+      activityButton.click();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".activity-year-cell").length).toBeGreaterThan(0));
+    const tooltip = Array.from(document.querySelectorAll(".activity-year-cell"))
+      .map((node) => node.getAttribute("data-tooltip") ?? "")
+      .find((text) => text.includes("sessions 1") && text.includes("peak conc. 2"));
+
+    expect(tooltip).toBeTruthy();
+    expect(tooltip).toContain("out tokens");
+    expect(tooltip).toContain("events ");
+    expect(tooltip).toContain("intensity ");
+  });
+
   it("compresses timeline columns when inactivity exceeds four hours", async () => {
     const startMs = Date.UTC(2026, 1, 22, 0, 0, 0);
     const binMinutes = 5;

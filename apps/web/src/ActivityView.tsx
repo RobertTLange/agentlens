@@ -1417,20 +1417,24 @@ export function ActivityView({
                     className="activity-year-grid"
                     style={{ "--activity-year-week-count": String(Math.max(1, yearModel.weekCount)) } as CSSProperties}
                   >
-                    {yearModel.cells.map((cell) => (
-                      <button
-                        key={cell.key}
-                        type="button"
-                        className={`activity-year-cell level-${cell.level} ${selectedDateLocal === cell.dateLocal ? "active" : ""}`}
-                        data-date-local={cell.dateLocal}
-                        style={{ gridColumn: `${cell.weekIndex + 1}`, gridRow: `${cell.weekdayIndex + 1}` }}
-                        onClick={() => {
-                          selectActivityDate(cell.dateLocal, "year");
-                        }}
-                        title={buildYearCellTooltip(cell, yearModel.presentation.metric)}
-                        aria-label={`Show Daily Activity for ${cell.dateLocal}`}
-                      />
-                    ))}
+                    {yearModel.cells.map((cell) => {
+                      const tooltip = buildYearCellTooltip(cell, yearModel.presentation.metric);
+                      return (
+                        <button
+                          key={cell.key}
+                          type="button"
+                          className={`activity-year-cell level-${cell.level} ${selectedDateLocal === cell.dateLocal ? "active" : ""}`}
+                          data-date-local={cell.dateLocal}
+                          data-tooltip={tooltip}
+                          style={{ gridColumn: `${cell.weekIndex + 1}`, gridRow: `${cell.weekdayIndex + 1}` }}
+                          onClick={() => {
+                            selectActivityDate(cell.dateLocal, "year");
+                          }}
+                          title={tooltip}
+                          aria-label={`Show Daily Activity for ${cell.dateLocal}`}
+                        />
+                      );
+                    })}
                   </div>
                 </div>
               </div>
