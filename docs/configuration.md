@@ -27,20 +27,38 @@ agentlens config set scan.includeMetaDefault true
 - `[sources.*]`: discovery roots + include/exclude globs
 - `[traceInspector]`: UI defaults for trace inspector behavior
 - `[redaction]`: key/value redaction rules
+- `[pricingSync]`: live pricing refresh behavior for `agentlens --browser`
 - `[cost]`: model pricing tables + estimation policy
 - `[models]`: context window defaults/overrides
 
 ## Pricing Defaults
 
-Vendor pricing defaults are checked in under `packages/core/src/generatedPricing.ts`.
+Default pricing and context-window metadata are checked in under `packages/core/src/generatedPricing.ts`.
 
-Refresh them from the official Anthropic/OpenAI docs with:
+Refresh them from `models.dev/api.json` with:
 
 ```bash
 npm run sync:pricing
 ```
 
-Tiered defaults include long-context thresholds and Anthropic split cache-write rates when available.
+`models.dev` is the primary source of truth for default rates and context windows across a curated first-party provider set.
+AgentLens applies a small local Anthropic override layer after import so split cache-write tiers (`5m` vs `1h`) and long-context premiums stay accurate where `models.dev` only exposes generic cache-write pricing.
+User-configured `[cost]` and `[models]` overrides still take precedence over the generated defaults.
+
+## Browser Pricing Sync
+
+At `agentlens --browser` launch, AgentLens can refresh pricing from `models.dev`, cache the result under `~/.agentlens/`, and start the browser server with an effective config that uses the fresh or cached pricing data.
+
+```toml
+[pricingSync]
+enabled = true
+ttlMs = 86400000
+timeoutMs = 5000
+```
+
+- `enabled`: turn launch-time pricing refresh on or off
+- `ttlMs`: how long a fetched pricing cache stays fresh
+- `timeoutMs`: maximum time to wait for `models.dev` before falling back to cached or bundled defaults
 
 ## Practical Scan Settings
 

@@ -11,7 +11,7 @@
     "typecheck": "npm run -ws typecheck",
     "pretest": "npm -w packages/contracts run build && npm -w packages/core run build",
     "test": "npm run -ws test",
-    "sync:pricing": "node scripts/sync-pricing.mjs",
+    "sync:pricing": "node --experimental-strip-types scripts/sync-pricing.ts",
     "dev:server": "npm -w apps/server run dev",
     "dev:web": "npm -w apps/web run dev",
     "dev:cli": "npm -w apps/cli run dev"

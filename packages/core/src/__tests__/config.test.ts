@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig, mergeConfig } from "../config.js";
+import { loadConfig, mergeConfig, mergeConfigWithPricingDefaults } from "../config.js";
 
 describe("config", () => {
   it("provides defaults for trace inspector, redaction, cost, and model context windows", () => {
@@ -15,13 +15,17 @@ describe("config", () => {
     expect(config.traceInspector.includeMetaDefault).toBe(false);
     expect(config.traceInspector.topModelCount).toBe(3);
     expect(config.redaction.alwaysOn).toBe(true);
+    expect(config.pricingSync.enabled).toBe(true);
+    expect(config.pricingSync.ttlMs).toBe(86_400_000);
+    expect(config.pricingSync.timeoutMs).toBe(5_000);
     expect(config.cost.enabled).toBe(true);
     expect(config.cost.unknownModelPolicy).toBe("n_a");
-    expect(config.cost.modelRates.length).toBeGreaterThan(0);
+    expect(config.cost.modelRates.length).toBeGreaterThan(20);
     expect(config.cost.modelRates.some((rate) => rate.model === "gpt-5.3-codex")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "gpt-5.4")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "claude-sonnet-4.6")).toBe(true);
     expect(config.cost.modelRates.some((rate) => rate.model === "claude-opus-4-5-20251101")).toBe(true);
+    expect(config.cost.modelRates.some((rate) => rate.model === "openai/gpt-5.4")).toBe(true);
     expect(config.models.defaultContextWindowTokens).toBeGreaterThan(0);
     expect(config.models.contextWindows.some((entry) => entry.model === "gpt-5.2-codex")).toBe(true);
     expect(config.activityHeatmap.metric).toBe("sessions");
@@ -41,12 +45,12 @@ describe("config", () => {
     ).toBe(true);
     expect(
       config.models.contextWindows.some(
-        (entry) => entry.model === "claude-opus-4.6" && entry.contextWindowTokens === 200_000,
+        (entry) => entry.model === "claude-opus-4.6" && entry.contextWindowTokens === 1_000_000,
       ),
     ).toBe(true);
     expect(
       config.models.contextWindows.some(
-        (entry) => entry.model === "claude-sonnet-4.6" && entry.contextWindowTokens === 200_000,
+        (entry) => entry.model === "claude-sonnet-4.6" && entry.contextWindowTokens === 1_000_000,
       ),
     ).toBe(true);
     expect(
@@ -54,6 +58,17 @@ describe("config", () => {
         (entry) => entry.model === "claude-haiku-4.5" && entry.contextWindowTokens === 200_000,
       ),
     ).toBe(true);
+    const gpt54Rate = config.cost.modelRates.find((rate) => rate.model === "gpt-5.4");
+    const sonnet46Rate = config.cost.modelRates.find((rate) => rate.model === "claude-sonnet-4.6");
+    expect(gpt54Rate?.inputPer1MUsd).toBe(2.5);
+    expect(gpt54Rate?.outputPer1MUsd).toBe(15);
+    expect(gpt54Rate?.cachedReadPer1MUsd).toBe(0.25);
+    expect(gpt54Rate?.longContextThresholdTokens).toBe(200_000);
+    expect(gpt54Rate?.longContextInputPer1MUsd).toBe(5);
+    expect(gpt54Rate?.longContextOutputPer1MUsd).toBe(22.5);
+    expect(sonnet46Rate?.cachedCreatePer1MUsd).toBe(3.75);
+    expect(sonnet46Rate?.cachedCreate5mPer1MUsd).toBe(3.75);
+    expect(sonnet46Rate?.cachedCreate1hPer1MUsd).toBe(6);
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.pi", logType: "pi" });
     const defaultEnabledSources = [
@@ -150,6 +165,11 @@ replacement = "[MASK]"
 keyPattern = "(?i)token"
 valuePattern = "(?i)sk-[a-z0-9_-]+"
 
+[pricingSync]
+enabled = false
+ttlMs = 1234
+timeoutMs = 6789
+
 [cost]
 enabled = true
 currency = "USD"
@@ -204,6 +224,9 @@ maxResidentEventsPerWarmTrace = 20
     const config = await loadConfig(configPath);
     expect(config.traceInspector.topModelCount).toBe(2);
     expect(config.redaction.replacement).toBe("[MASK]");
+    expect(config.pricingSync.enabled).toBe(false);
+    expect(config.pricingSync.ttlMs).toBe(1234);
+    expect(config.pricingSync.timeoutMs).toBe(6789);
     const gpt53CodexRate = config.cost.modelRates.find((rate) => rate.model === "gpt-5.3-codex");
     expect(gpt53CodexRate?.cachedCreate1hPer1MUsd).toBe(1.25);
     expect(gpt53CodexRate?.longContextThresholdTokens).toBe(272000);
@@ -249,10 +272,69 @@ maxResidentEventsPerWarmTrace = 20
 
     expect(codexRate?.inputPer1MUsd).toBe(9);
     expect(codexRate?.outputPer1MUsd).toBe(10);
-    expect(gpt54Rate?.inputPer1MUsd).toBe(1.25);
-    expect(gpt54Rate?.longContextThresholdTokens).toBe(272_000);
+    expect(gpt54Rate?.inputPer1MUsd).toBe(2.5);
+    expect(gpt54Rate?.longContextThresholdTokens).toBe(200_000);
     expect(codexWindow?.contextWindowTokens).toBe(123_000);
     expect(gpt54Window?.contextWindowTokens).toBe(1_050_000);
+  });
+
+  it("applies runtime pricing defaults before explicit user overrides", () => {
+    const config = mergeConfigWithPricingDefaults(
+      {
+        cost: {
+          enabled: true,
+          currency: "USD",
+          unknownModelPolicy: "n_a",
+          modelRates: [
+            {
+              model: "gpt-5.4",
+              inputPer1MUsd: 9,
+              outputPer1MUsd: 10,
+              cachedReadPer1MUsd: 1,
+              cachedCreatePer1MUsd: 2,
+              reasoningOutputPer1MUsd: 3,
+            },
+          ],
+        },
+        models: {
+          defaultContextWindowTokens: 200_000,
+          contextWindows: [{ model: "gpt-5.4", contextWindowTokens: 123_000 }],
+        },
+      },
+      {
+        modelRates: [
+          {
+            model: "gpt-5.4",
+            inputPer1MUsd: 2.5,
+            outputPer1MUsd: 15,
+            cachedReadPer1MUsd: 0.25,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+            contextWindowTokens: 1_050_000,
+          },
+          {
+            model: "gemini-3.1-pro-preview",
+            inputPer1MUsd: 2,
+            outputPer1MUsd: 12,
+            cachedReadPer1MUsd: 0.2,
+            cachedCreatePer1MUsd: 0,
+            reasoningOutputPer1MUsd: 0,
+            contextWindowTokens: 1_048_576,
+          },
+        ],
+        contextWindows: [
+          { model: "gpt-5.4", contextWindowTokens: 1_050_000 },
+          { model: "gemini-3.1-pro-preview", contextWindowTokens: 1_048_576 },
+        ],
+      },
+    );
+
+    expect(config.cost.modelRates.find((rate) => rate.model === "gpt-5.4")?.inputPer1MUsd).toBe(9);
+    expect(config.cost.modelRates.find((rate) => rate.model === "gemini-3.1-pro-preview")?.inputPer1MUsd).toBe(2);
+    expect(config.models.contextWindows.find((entry) => entry.model === "gpt-5.4")?.contextWindowTokens).toBe(123_000);
+    expect(config.models.contextWindows.find((entry) => entry.model === "gemini-3.1-pro-preview")?.contextWindowTokens).toBe(
+      1_048_576,
+    );
   });
 
   it("falls back to default activity heatmap values for invalid input", () => {

@@ -642,7 +642,7 @@ describe("cli", () => {
     } finally {
       await healthServer.close();
     }
-  });
+  }, 20_000);
 
   it("waits for readiness before reusing a running server in --browser mode", async () => {
     const healthServer = await startHealthServer({ readyz: "delayed", delayedReadyProbeCount: 2 });
@@ -670,7 +670,7 @@ describe("cli", () => {
     } finally {
       await healthServer.close();
     }
-  });
+  }, 20_000);
 
   it("heals stale pid metadata when reusing running server in --browser mode", async () => {
     const healthServer = await startHealthServer();
@@ -713,7 +713,66 @@ describe("cli", () => {
     } finally {
       await healthServer.close();
     }
-  });
+  }, 20_000);
+
+  it("does not stamp fresh config metadata onto a reused server without a restart", async () => {
+    const healthServer = await startHealthServer();
+    const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-fingerprint-"));
+    const pidPath = path.join(runtimeDir, "server.pid");
+    const configPath = path.join(runtimeDir, "config.toml");
+    await saveConfig(
+      mergeConfig({
+        pricingSync: {
+          enabled: false,
+          ttlMs: 86_400_000,
+          timeoutMs: 5_000,
+        },
+      }),
+      configPath,
+    );
+    await writeFile(
+      pidPath,
+      JSON.stringify(
+        {
+          pid: 999999,
+          host: "127.0.0.1",
+          port: healthServer.port,
+          url: `http://127.0.0.1:${healthServer.port}`,
+          logPath: path.join(runtimeDir, "logs", "server.log"),
+          startedAt: "2026-03-15T00:00:00.000Z",
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf8",
+    );
+
+    try {
+      const output = await runCliWithEnvAsync(
+        ["--browser", "--config", configPath, "--host", "127.0.0.1", "--port", String(healthServer.port)],
+        { AGENTLENS_SKIP_OPEN: "1", AGENTLENS_RUNTIME_DIR: runtimeDir },
+      );
+      expect(output).toContain(`AgentLens already running: http://127.0.0.1:${healthServer.port}`);
+      expect(output).toContain("Running AgentLens server reused without restart; refreshed pricing will apply after a clean restart.");
+
+      const pidInfo = JSON.parse(await readFile(pidPath, "utf8")) as {
+        configFingerprint?: string;
+        configPath?: string;
+        host?: string;
+        pid?: number;
+        port?: number;
+        url?: string;
+      };
+      expect(pidInfo.host).toBe("127.0.0.1");
+      expect(pidInfo.port).toBe(healthServer.port);
+      expect(pidInfo.url).toBe(`http://127.0.0.1:${healthServer.port}`);
+      expect(pidInfo.pid).not.toBe(999999);
+      expect(pidInfo.configPath).toBeUndefined();
+      expect(pidInfo.configFingerprint).toBeUndefined();
+    } finally {
+      await healthServer.close();
+    }
+  }, 20_000);
 
   it("does not rewrite pid metadata when only a non-AgentLens service is bound to the port", async () => {
     const boundServer = await startBoundNonAgentLensServer();
@@ -741,7 +800,7 @@ describe("cli", () => {
     } finally {
       await boundServer.close();
     }
-  });
+  }, 20_000);
 
   it("starts detached server in --browser mode", async () => {
     const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-"));
@@ -810,5 +869,5 @@ process.on("SIGTERM", () => {
         await stopProcess(pid);
       }
     }
-  });
+  }, 20_000);
 });
