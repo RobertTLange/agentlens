@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
 import os from "node:os";
@@ -17,6 +17,7 @@ export interface LaunchBrowserOptions {
   host?: string;
   port?: string | number;
   configPath: string;
+  configFingerprint?: string;
   runtimeDir?: string;
   startupTimeoutMs?: number;
   skipOpen?: boolean;
@@ -29,6 +30,7 @@ export interface LaunchBrowserResult {
   pid?: number;
   logPath?: string;
   pidPath?: string;
+  warning?: string;
 }
 
 interface OpenCommand {
@@ -43,6 +45,8 @@ interface RuntimeState {
   pidPath: string;
   port: number;
   url: string;
+  configPath?: string;
+  configFingerprint?: string;
 }
 
 interface ReadinessProbeResult {
@@ -268,6 +272,8 @@ async function writeRuntimeState({
   pidPath,
   port,
   url,
+  configPath,
+  configFingerprint,
 }: RuntimeState): Promise<void> {
   if (typeof logPath === "string") {
     await mkdir(path.dirname(logPath), { recursive: true });
@@ -282,6 +288,8 @@ async function writeRuntimeState({
         port,
         url,
         ...(typeof logPath === "string" ? { logPath } : {}),
+        ...(typeof configPath === "string" ? { configPath } : {}),
+        ...(typeof configFingerprint === "string" ? { configFingerprint } : {}),
         startedAt: new Date().toISOString(),
       },
       null,
@@ -289,6 +297,16 @@ async function writeRuntimeState({
     ) + "\n",
     "utf8",
   );
+}
+
+async function readRuntimeState(pidPath: string): Promise<Partial<RuntimeState> | null> {
+  try {
+    const raw = await readFile(pidPath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<RuntimeState>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function getRuntimePaths(runtimeDir: string): { logPath: string; pidPath: string } {
@@ -302,11 +320,13 @@ async function spawnServer({
   host,
   port,
   configPath,
+  configFingerprint,
   runtimeDir,
 }: {
   host: string;
   port: number;
   configPath: string;
+  configFingerprint?: string;
   runtimeDir: string;
 }): Promise<{ pid: number; pidPath: string; logPath: string }> {
   const { logPath, pidPath } = getRuntimePaths(runtimeDir);
@@ -340,14 +360,16 @@ async function spawnServer({
 
     child.unref();
 
-    await writeRuntimeState({
-      host,
-      logPath,
-      pid,
-      pidPath,
-      port,
-      url: toBaseUrl(host, port),
-    });
+      await writeRuntimeState({
+        host,
+        logPath,
+        pid,
+        pidPath,
+        port,
+        url: toBaseUrl(host, port),
+        ...(configPath ? { configPath } : {}),
+        ...(configFingerprint ? { configFingerprint } : {}),
+      });
 
     return { pid, pidPath, logPath };
   } finally {
@@ -357,6 +379,15 @@ async function spawnServer({
 
 function shouldSkipOpen(skipOpen?: boolean): boolean {
   return skipOpen === true || process.env.AGENTLENS_SKIP_OPEN === "1";
+}
+
+async function waitForPortUnbound(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!(await isPortBound(host, port, 250))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return !(await isPortBound(host, port, 250));
 }
 
 export async function launchBrowser(options: LaunchBrowserOptions): Promise<LaunchBrowserResult> {
@@ -369,10 +400,58 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
   const readyUrl = `${url}/api/readyz`;
   const skipOpen = shouldSkipOpen(options.skipOpen);
   const { pidPath } = getRuntimePaths(runtimeDir);
+  const runtimeState = await readRuntimeState(pidPath);
   const readiness = await probeServerReadiness(readyUrl);
   const healthy = readiness.status === "unavailable" ? await isServerHealthy(healthUrl) : readiness.status === "ready";
 
   if (healthy || (await isPortBound(host, port))) {
+    const listeningPid = await resolveListeningPid(port);
+    const managedPidMatches =
+      typeof runtimeState?.pid === "number" && typeof listeningPid === "number" && runtimeState.pid === listeningPid;
+    const runtimeMatchesTarget =
+      runtimeState?.host === host && runtimeState?.port === port && runtimeState?.url === url;
+    const shouldRestartManagedServer =
+      Boolean(options.configFingerprint) &&
+      typeof runtimeState?.configFingerprint === "string" &&
+      runtimeState.configFingerprint !== options.configFingerprint &&
+      managedPidMatches &&
+      runtimeMatchesTarget;
+
+    if (shouldRestartManagedServer && typeof runtimeState?.pid === "number") {
+      try {
+        process.kill(runtimeState.pid, "SIGTERM");
+        if (await waitForPortUnbound(host, port, 5_000)) {
+          const restarted = await spawnServer({
+            host,
+            port,
+            configPath: options.configPath,
+            ...(options.configFingerprint ? { configFingerprint: options.configFingerprint } : {}),
+            runtimeDir,
+          });
+          const ready = await waitForServerStartup(readyUrl, healthUrl, startupTimeoutMs);
+          const readyWithGrace = ready.status === "ready" || ready.status === "healthy"
+            ? ready
+            : await waitForServerStartup(readyUrl, healthUrl, STARTUP_TIMEOUT_GRACE_MS);
+          if (readyWithGrace.status !== "ready" && readyWithGrace.status !== "healthy") {
+            throw new Error(buildReadinessTimeoutMessage(url, restarted.logPath, readyWithGrace.startupError));
+          }
+          if (!skipOpen) {
+            await openBrowser(url);
+          }
+          return {
+            status: "started",
+            url,
+            openedBrowser: !skipOpen,
+            pid: restarted.pid,
+            pidPath: restarted.pidPath,
+            logPath: restarted.logPath,
+          };
+        }
+      } catch {
+        // Fall through to reuse path below if restart fails.
+      }
+    }
+
     let reuseStatus: StartupWaitResult["status"] | "unknown" =
       readiness.status === "ready" ? "ready" : healthy ? "healthy" : "unknown";
     if (readiness.status === "not_ready") {
@@ -386,13 +465,23 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
       reuseStatus = readyWithGrace.status;
     }
     const isReusableAgentLens = reuseStatus === "ready" || reuseStatus === "healthy";
-    const pid = isReusableAgentLens ? await resolveListeningPid(port) : undefined;
+    const pid = isReusableAgentLens ? listeningPid ?? (await resolveListeningPid(port)) : undefined;
+    const configMismatchWarning =
+      isReusableAgentLens &&
+      Boolean(options.configFingerprint) &&
+      typeof runtimeState?.configFingerprint === "string" &&
+      runtimeState.configFingerprint !== options.configFingerprint &&
+      !shouldRestartManagedServer
+        ? "Running AgentLens server reused without restart; refreshed pricing will apply after a clean restart."
+        : undefined;
     if (isReusableAgentLens) {
       await writeRuntimeState({
         host,
         pidPath,
         port,
         url,
+        ...(options.configPath ? { configPath: options.configPath } : {}),
+        ...(options.configFingerprint ? { configFingerprint: options.configFingerprint } : {}),
         ...(typeof pid === "number" ? { pid } : {}),
       });
     }
@@ -405,6 +494,7 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
       openedBrowser: !skipOpen,
       ...(isReusableAgentLens ? { pidPath } : {}),
       ...(typeof pid === "number" ? { pid } : {}),
+      ...(configMismatchWarning ? { warning: configMismatchWarning } : {}),
     };
   }
 
@@ -412,6 +502,7 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
     host,
     port,
     configPath: options.configPath,
+    ...(options.configFingerprint ? { configFingerprint: options.configFingerprint } : {}),
     runtimeDir,
   });
 

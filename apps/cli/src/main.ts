@@ -11,6 +11,7 @@ import {
   TraceIndex,
 } from "@agentlens/core";
 import { launchBrowser } from "./browser.js";
+import { prepareBrowserConfig } from "./pricing-launch.js";
 
 const LATEST_KEYWORD = "latest";
 const DEFAULT_HISTORY_LIMIT = 50;
@@ -711,10 +712,17 @@ program.action(async () => {
     return;
   }
 
+  const prepared = await prepareBrowserConfig({
+    configPath: opts.config,
+  });
+  console.log(prepared.statusLine);
+
   const launched = await launchBrowser({
     host: opts.host,
     port: opts.port,
-    configPath: opts.config,
+    configPath: prepared.configPath,
+    configFingerprint: prepared.configFingerprint,
+    runtimeDir: prepared.runtimeDir,
   });
 
   if (launched.status === "reused") {
@@ -730,6 +738,9 @@ program.action(async () => {
   }
   if (launched.logPath) {
     console.log(`Log file: ${launched.logPath}`);
+  }
+  if (launched.warning) {
+    console.log(launched.warning);
   }
   if (!launched.openedBrowser) {
     console.log("Browser open skipped (AGENTLENS_SKIP_OPEN=1).");
