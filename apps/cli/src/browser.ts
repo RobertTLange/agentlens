@@ -390,6 +390,29 @@ async function waitForPortUnbound(host: string, port: number, timeoutMs: number)
   return !(await isPortBound(host, port, 250));
 }
 
+function resolveReusedConfigState(
+  runtimeState: Partial<RuntimeState> | null,
+  options: Pick<LaunchBrowserOptions, "configFingerprint" | "configPath">,
+): Pick<RuntimeState, "configPath" | "configFingerprint"> {
+  const existingConfigState: Pick<RuntimeState, "configPath" | "configFingerprint"> = {
+    ...(typeof runtimeState?.configPath === "string" ? { configPath: runtimeState.configPath } : {}),
+    ...(typeof runtimeState?.configFingerprint === "string" ? { configFingerprint: runtimeState.configFingerprint } : {}),
+  };
+
+  if (
+    typeof options.configFingerprint === "string" &&
+    options.configFingerprint.length > 0 &&
+    runtimeState?.configFingerprint === options.configFingerprint
+  ) {
+    return {
+      ...(options.configPath ? { configPath: options.configPath } : existingConfigState.configPath ? { configPath: existingConfigState.configPath } : {}),
+      configFingerprint: options.configFingerprint,
+    };
+  }
+
+  return existingConfigState;
+}
+
 export async function launchBrowser(options: LaunchBrowserOptions): Promise<LaunchBrowserResult> {
   const host = resolveHost(options.host);
   const port = parsePort(options.port);
@@ -466,22 +489,25 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
     }
     const isReusableAgentLens = reuseStatus === "ready" || reuseStatus === "healthy";
     const pid = isReusableAgentLens ? listeningPid ?? (await resolveListeningPid(port)) : undefined;
+    const requestedConfigFingerprint =
+      typeof options.configFingerprint === "string" && options.configFingerprint.length > 0 ? options.configFingerprint : undefined;
+    const runtimeFingerprintMatches =
+      typeof requestedConfigFingerprint === "string" && runtimeState?.configFingerprint === requestedConfigFingerprint;
     const configMismatchWarning =
       isReusableAgentLens &&
-      Boolean(options.configFingerprint) &&
-      typeof runtimeState?.configFingerprint === "string" &&
-      runtimeState.configFingerprint !== options.configFingerprint &&
+      typeof requestedConfigFingerprint === "string" &&
+      !runtimeFingerprintMatches &&
       !shouldRestartManagedServer
         ? "Running AgentLens server reused without restart; refreshed pricing will apply after a clean restart."
         : undefined;
     if (isReusableAgentLens) {
+      const reusedConfigState = resolveReusedConfigState(runtimeState, options);
       await writeRuntimeState({
         host,
         pidPath,
         port,
         url,
-        ...(options.configPath ? { configPath: options.configPath } : {}),
-        ...(options.configFingerprint ? { configFingerprint: options.configFingerprint } : {}),
+        ...reusedConfigState,
         ...(typeof pid === "number" ? { pid } : {}),
       });
     }
