@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -11,6 +12,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../..");
 const tsxBin = path.resolve(repoRoot, "node_modules/.bin/tsx");
 const cliMain = path.resolve(repoRoot, "apps/cli/src/main.ts");
+const cliPackageJson = JSON.parse(readFileSync(path.resolve(repoRoot, "apps/cli/package.json"), "utf8")) as {
+  version: string;
+};
 
 function buildFixtureConfig(codexSessionsRoot: string) {
   return mergeConfig({
@@ -629,6 +633,10 @@ describe("cli", () => {
 
     const noArgsOutput = runCli([]);
     expect(noArgsOutput).toContain("Usage: agentlens");
+  });
+
+  it("prints the package version with --version", () => {
+    expect(runCli(["--version"])).toBe(cliPackageJson.version);
   });
 
   it("reuses running server in --browser mode", async () => {

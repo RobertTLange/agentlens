@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import { Command } from "commander";
 import type { AppConfig, NamedCount, TraceSummary } from "@agentlens/contracts";
 import {
@@ -13,6 +14,8 @@ import {
 import { launchBrowser } from "./browser.js";
 import { prepareBrowserConfig } from "./pricing-launch.js";
 
+const require = createRequire(import.meta.url);
+const cliPackageJson = require("../package.json") as { version: string };
 const LATEST_KEYWORD = "latest";
 const DEFAULT_HISTORY_LIMIT = 50;
 const STATUS_ORDER: TraceSummary["activityStatus"][] = ["running", "waiting_input", "idle"];
@@ -232,6 +235,7 @@ function resolveTraceIdOrLatest(
 
 const program = new Command();
 program.name("agentlens").description("Inspect local agent interaction traces");
+program.version(cliPackageJson.version);
 program.option("--config <path>", "Config path", DEFAULT_CONFIG_PATH);
 program.option("--browser", "Launch AgentLens in the background and open the web app");
 program.option("--host <host>", "Server host", process.env.AGENTLENS_HOST ?? "127.0.0.1");
