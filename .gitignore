@@ -5,5 +5,6 @@ node_modules/
 .vite/
 coverage/
 .pytest_cache/
+.playwright-cli/
 .DS_Store
 *.tsbuildinfo
