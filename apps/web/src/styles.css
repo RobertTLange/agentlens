@@ -3098,6 +3098,14 @@ body {
   }
 }
 
+@media (max-width: 560px) {
+  .detail-summary-cards:not(.detail-summary-cards-four-up),
+  .detail-summary-cards,
+  .detail-summary-cards.detail-summary-cards-four-up {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 520px) {
   .grid {
     grid-template-columns: 1fr;
