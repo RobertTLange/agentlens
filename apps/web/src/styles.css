@@ -2774,6 +2774,7 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
+  min-width: 0;
   padding: 10px;
   display: grid;
   gap: 10px;
@@ -2785,6 +2786,10 @@ body {
   padding: 9px;
   background: #fff;
   position: relative;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   content-visibility: auto;
   contain-intrinsic-size: 168px;
   transition:
@@ -2831,11 +2836,18 @@ body {
   color: var(--muted);
   font-size: 0.72rem;
   padding-right: 88px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .event-card h3 {
   margin: 6px 0;
   font-size: 0.95rem;
+  min-width: 0;
+  max-width: 100%;
+  line-height: 1.25;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -2863,11 +2875,14 @@ body {
   padding: 8px;
   font-size: 0.78rem;
   font-family: "IBM Plex Mono", monospace;
+  min-width: 0;
   max-width: 100%;
 }
 
 .subtle {
   color: var(--muted);
+  min-width: 0;
+  max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -2886,6 +2901,15 @@ body {
   font-size: 0.65rem;
   color: #1e3a8a;
   background: #eff6ff;
+}
+
+.event-card .kind,
+.event-card .event-agent-badge {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .kind {
@@ -2986,9 +3010,18 @@ body {
   }
 
   .grid {
-    grid-template-columns: 1fr;
-    grid-template-rows: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.4fr);
+    grid-template-rows: minmax(0, 1fr);
     height: 100%;
+  }
+
+  .toc-panel {
+    display: none;
+  }
+
+  .detail-summary-cards,
+  .detail-summary-cards.detail-summary-cards-four-up {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .event-kind-filter-menu {
@@ -3062,5 +3095,12 @@ body {
 
   .activity-time {
     font-size: 0.52rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 0.62fr) minmax(0, 1.38fr);
   }
 }
