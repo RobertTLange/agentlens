@@ -4,9 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [TBD]
 ### Added
 - Added `agentlens --version` to print the published CLI package version.
+
+### Fixed
+- Improved narrow browser resizing so Sessions and Trace Inspector remain usable while the Timeline TOC is hidden.
+- Wrapped long Trace Inspector event text inside event cards instead of overflowing at narrow widths.
 
 ## [0.3.0] - 2026-03-25
 ### Added
@@ -71,7 +75,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Documentation
 - Updated Gemini-related docs as part of the initial release train.
 
-[Unreleased]: https://github.com/RobertTLange/agentlens/compare/v0.3.0...HEAD
+[TBD]: https://github.com/RobertTLange/agentlens/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/RobertTLange/agentlens/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/RobertTLange/agentlens/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/RobertTLange/agentlens/compare/v0.2.1...v0.2.2
