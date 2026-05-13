@@ -364,12 +364,99 @@ function isWaitResolutionEvent(event: NormalizedEvent): boolean {
   return event.eventKind === "user" || event.eventKind === "tool_use" || event.eventKind === "tool_result";
 }
 
+function isPassiveActivityEvent(event: NormalizedEvent): boolean {
+  const raw = asRecord(event.raw);
+  const payload = asRecord(raw.payload);
+  const part = asRecord(raw.part);
+  const rawType = normalizeMarkerText(event.rawType || raw.type);
+  const payloadType = normalizeMarkerText(payload.type);
+  const partType = normalizeMarkerText(part.type);
+
+  if (rawType === "token count" || payloadType === "token count") return true;
+  if (rawType === "last prompt" || rawType === "ai title" || rawType === "permission mode") return true;
+  if (rawType === "attachment" || rawType === "file history snapshot" || rawType === "queue operation") return true;
+  if (rawType === "model change" || rawType === "thinking level change") return true;
+  if (rawType === "info" || rawType === "session" || rawType === "session meta" || rawType === "session diff meta") return true;
+  if (partType === "snapshot" || partType === "patch" || partType === "file") return true;
+  if (Object.prototype.hasOwnProperty.call(raw, "$set")) return true;
+  if (event.eventKind === "system" && event.textBlocks.length === 0) return true;
+  if (event.eventKind === "meta" && !payloadType && !partType && event.textBlocks.length === 0) return true;
+  return false;
+}
+
 function findPendingWaitSignalEvent(events: NormalizedEvent[]): NormalizedEvent | undefined {
   for (let idx = events.length - 1; idx >= 0; idx -= 1) {
     const event = events[idx];
     if (!event) continue;
     if (isWaitResolutionEvent(event)) return undefined;
     if (hasStructuredWaitingSignal(event) || hasTextWaitingSignal(event)) return event;
+    if (isPassiveActivityEvent(event)) continue;
+    if (event.eventKind === "assistant" && event.textBlocks.length > 0) return undefined;
+  }
+  return undefined;
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> {
+  try {
+    return asRecord(JSON.parse(value) as unknown);
+  } catch {
+    return {};
+  }
+}
+
+function hasFinalAnswerMarker(event: NormalizedEvent): boolean {
+  const raw = asRecord(event.raw);
+  const message = asRecord(raw.message);
+  const part = asRecord(raw.part);
+  const partMetadata = asRecord(part.metadata);
+  const partOpenaiMetadata = asRecord(partMetadata.openai);
+  if (normalizeMarkerText(partMetadata.phase) === "final answer") return true;
+  if (normalizeMarkerText(partOpenaiMetadata.phase) === "final answer") return true;
+
+  for (const item of Array.isArray(message.content) ? message.content : []) {
+    const itemRecord = asRecord(item);
+    if (normalizeMarkerText(itemRecord.phase) === "final answer") return true;
+    const signature = asString(itemRecord.textSignature);
+    if (signature && normalizeMarkerText(parseJsonRecord(signature).phase) === "final answer") return true;
+  }
+
+  return false;
+}
+
+function isTerminalDoneEvent(event: NormalizedEvent): boolean {
+  const raw = asRecord(event.raw);
+  const payload = asRecord(raw.payload);
+  const message = asRecord(raw.message);
+  const part = asRecord(raw.part);
+  const rawType = normalizeMarkerText(raw.type || event.rawType);
+  const payloadType = normalizeMarkerText(payload.type);
+  const messageStopReason = normalizeMarkerText(message.stop_reason || message.stopReason || raw.stop_reason || raw.stopReason);
+  const partType = normalizeMarkerText(part.type);
+  const partReason = normalizeMarkerText(part.reason);
+
+  if (payloadType === "task complete") return true;
+  if (rawType === "assistant" && messageStopReason === "end turn") return true;
+  if (event.eventKind === "assistant" && messageStopReason === "stop") return true;
+  if (partType === "step finish" && partReason === "stop") return true;
+  if (hasFinalAnswerMarker(event)) return true;
+  if (
+    event.eventKind === "assistant" &&
+    (rawType === "gemini" || rawType === "model" || rawType === "cursor jsonl assistant" || rawType === "cursor assistant") &&
+    event.textBlocks.length > 0
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function findLatestTerminalDoneEvent(events: NormalizedEvent[]): NormalizedEvent | undefined {
+  for (let idx = events.length - 1; idx >= 0; idx -= 1) {
+    const event = events[idx];
+    if (!event) continue;
+    if (isPassiveActivityEvent(event)) continue;
+    if (isTerminalDoneEvent(event)) return event;
+    return undefined;
   }
   return undefined;
 }
@@ -398,16 +485,6 @@ function applyFreshnessTtl(
 }
 
 function deriveActivityStatus(options: ActivityStatusOptions): ActivityStatus {
-  const pendingWaitSignalEvent = findPendingWaitSignalEvent(options.events);
-  if (pendingWaitSignalEvent) {
-    return applyFreshnessTtl(
-      { status: "waiting_input", reason: "explicit_wait_marker_fresh" },
-      options.updatedMs,
-      options.nowMs,
-      options.scanConfig,
-    );
-  }
-
   if (options.unmatchedToolUses > 0) {
     return applyFreshnessTtl(
       { status: "running", reason: "pending_tool_use_fresh" },
@@ -418,16 +495,25 @@ function deriveActivityStatus(options: ActivityStatusOptions): ActivityStatus {
     );
   }
 
+  const pendingWaitSignalEvent = findPendingWaitSignalEvent(options.events);
+  if (pendingWaitSignalEvent) {
+    return applyFreshnessTtl(
+      { status: "waiting_input", reason: "explicit_wait_marker_fresh" },
+      options.updatedMs,
+      options.nowMs,
+      options.scanConfig,
+    );
+  }
+
+  if (findLatestTerminalDoneEvent(options.events)) {
+    return { status: "idle", reason: "terminal_done" };
+  }
+
   if (options.updatedMs > 0) {
     const runningAgeMs = Math.max(0, options.nowMs - options.updatedMs);
     const runningTtlMs = Math.max(0, options.scanConfig.statusRunningTtlMs);
     if (runningAgeMs <= runningTtlMs) {
       return { status: "running", reason: "recent_activity_fresh" };
-    }
-
-    const waitingTtlMs = Math.max(0, options.scanConfig.statusWaitingTtlMs);
-    if (runningAgeMs > runningTtlMs && runningAgeMs <= waitingTtlMs) {
-      return { status: "waiting_input", reason: "recent_activity_cooling" };
     }
   }
 
@@ -494,9 +580,8 @@ function withAgedActivityStatus(summary: TraceSummary, fileMtimeMs: number, scan
     if (summary.activityStatus === "running" && summary.activityReason === "pending_tool_use_fresh") return summary;
     return { ...summary, activityStatus: "running", activityReason: "pending_tool_use_fresh" };
   }
-  if (summary.activityStatus === "running" && ageMs > runningTtlMs && ageMs <= waitingTtlMs) {
-    if (summary.activityReason === "recent_activity_cooling") return summary;
-    return { ...summary, activityStatus: "waiting_input", activityReason: "recent_activity_cooling" };
+  if (summary.activityStatus === "running" && ageMs > runningTtlMs) {
+    return { ...summary, activityStatus: "idle", activityReason: "stale_timeout" };
   }
   return summary;
 }
