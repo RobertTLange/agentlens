@@ -573,14 +573,27 @@ function makeEvent(eventId: string, raw: Record<string, unknown>): NormalizedEve
 }
 
 function traceIdFromTraceUrl(url: string): string {
-  const match = url.match(/\/api\/trace\/([^?]+)/);
+  const match = url.match(/\/api\/trace\/([^/?]+)/);
   return decodeURIComponent(match?.[1] ?? "");
+}
+
+function traceEventPartsFromUrl(url: string): { traceId: string; eventId: string } {
+  const match = url.match(/\/api\/trace\/([^/]+)\/event\/([^?]+)/);
+  return {
+    traceId: decodeURIComponent(match?.[1] ?? ""),
+    eventId: decodeURIComponent(match?.[2] ?? ""),
+  };
 }
 
 function encodedPathFromTraceFileUrl(url: string): string {
   const parsed = new URL(url, "http://localhost");
   if (!parsed.pathname.includes("/api/tracefile")) return "";
   return parsed.searchParams.get("path") ?? "";
+}
+
+function eventIdFromTraceFileEventUrl(url: string): string {
+  const parsed = new URL(url, "http://localhost");
+  return parsed.searchParams.get("event_id") ?? "";
 }
 
 function traceIdFromStopUrl(url: string): string {
@@ -612,6 +625,7 @@ function getTraceDetailRequests(traceId: string): string[] {
     if (!url.includes(detailUrlFragment)) return false;
     if (url.includes("/stop")) return false;
     if (url.includes("/open")) return false;
+    if (url.includes("/event/")) return false;
     return true;
   });
 }
@@ -745,6 +759,34 @@ function flushRafQueue(): void {
       callback(0);
     }
   });
+}
+
+function visibleLiveItemCounts(): { toc: number; strip: number; cards: number } {
+  return {
+    toc: document.querySelectorAll(".toc-row").length,
+    strip: document.querySelectorAll(".timeline-segment").length,
+    cards: document.querySelectorAll(".event-card").length,
+  };
+}
+
+function visibleTraceRowIds(): string[] {
+  return Array.from(document.querySelectorAll<HTMLElement>(".trace-row")).map((row) => row.dataset.traceId ?? "");
+}
+
+function stubReducedMotion(matches: boolean): void {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)" ? matches : false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia,
+  );
 }
 
 function installTimelineStripScrollTo(scroller: HTMLDivElement) {
@@ -936,6 +978,17 @@ beforeEach(() => {
         const body = custom?.body ?? { ok: true, status: "sent_tmux", message: "sent input to tmux pane" };
         return new Response(JSON.stringify(body), { status });
       }
+      if (url.includes("/api/tracefile/event")) {
+        const encodedPath = encodedPathFromTraceFileUrl(url);
+        const eventId = eventIdFromTraceFileEventUrl(url);
+        const tracePage =
+          Object.values(tracePagesById).find((candidate) => encodeBase64UrlUtf8(candidate.summary.path) === encodedPath) ??
+          Object.values(tracePagesById)[0];
+        const event = tracePage?.events.find((candidate) => candidate.eventId === eventId);
+        return event
+          ? new Response(JSON.stringify({ event }), { status: 200 })
+          : new Response(JSON.stringify({ error: "unknown trace event" }), { status: 404 });
+      }
       if (url.includes("/api/tracefile")) {
         const encodedPath = encodedPathFromTraceFileUrl(url);
         if (missingAdHocEncodedPaths.has(encodedPath)) {
@@ -948,6 +1001,14 @@ beforeEach(() => {
           return new Response("{}", { status: 404 });
         }
         return new Response(JSON.stringify(tracePage), { status: 200 });
+      }
+      if (url.includes("/api/trace/") && url.includes("/event/")) {
+        const { traceId, eventId } = traceEventPartsFromUrl(url);
+        const tracePage = tracePagesById[traceId] ?? Object.values(tracePagesById)[0];
+        const event = tracePage?.events.find((candidate) => candidate.eventId === eventId);
+        return event
+          ? new Response(JSON.stringify({ event }), { status: 200 })
+          : new Response(JSON.stringify({ error: "unknown trace event" }), { status: 404 });
       }
       if (url.includes("/api/trace/")) {
         const traceId = traceIdFromTraceUrl(url);
@@ -985,6 +1046,17 @@ describe("App sessions list live motion", () => {
       "https://github.com/RobertTLange/agentlens",
     );
     expect(document.querySelector("footer")).toBeNull();
+  });
+
+  it("requests compact trace pages for the inspector", async () => {
+    render(<App />);
+    await waitFor(() => expect(getTraceDetailRequests("trace-c").length).toBeGreaterThan(0));
+
+    const detailRequest = getTraceDetailRequests("trace-c")[0];
+    if (!detailRequest) throw new Error("missing trace detail request");
+    const url = new URL(detailRequest, "http://localhost");
+    expect(url.searchParams.get("payload")).toBe("compact");
+    expect(url.searchParams.get("limit")).toBe("1200");
   });
 
   it("shows warming state in the inspector while history hydration is still partial", async () => {
@@ -2530,7 +2602,9 @@ describe("App sessions list live motion", () => {
       expect(nextMeta?.textContent).toContain("session-trace-c");
       expect(nextMeta?.textContent).toContain("7 events");
     });
-    expect(document.querySelector(".detail-head-title-block.pulse")).not.toBeNull();
+    flushRafQueue();
+    flushRafQueue();
+    await waitFor(() => expect(document.querySelector(".detail-head-title-block.pulse")).not.toBeNull());
   });
 
   it("shows running and waiting indicators from backend activity status", async () => {
@@ -2610,7 +2684,10 @@ describe("App sessions list live motion", () => {
       source.emit("trace_updated", { summary: resumedTrace });
     });
 
-    await waitFor(() => expect(getTraceRow("trace-c").querySelector(".trace-status-chip")?.textContent).toBe("Running"));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(getTraceRow("trace-c").querySelector(".trace-status-chip")?.textContent).toBe("Running");
+    });
   });
 
   it("shows stop failure error in the session row when terminate endpoint rejects", async () => {
@@ -3351,9 +3428,10 @@ describe("App sessions list live motion", () => {
     });
     flushRafQueue();
 
-    await waitFor(() =>
-      expect(getTraceRow("trace-b").querySelector(".trace-row-inner.pulse")).not.toBeNull(),
-    );
+    await waitFor(() => {
+      flushRafQueue();
+      expect(getTraceRow("trace-b").querySelector(".trace-row-inner.pulse")).not.toBeNull();
+    });
     expect(getTraceRow("trace-a").querySelector(".trace-row-inner.pulse")).toBeNull();
 
     const addedD = makeTrace("trace-d", 5_000);
@@ -3363,7 +3441,48 @@ describe("App sessions list live motion", () => {
     });
     flushRafQueue();
 
-    await waitFor(() => expect(getTraceRow("trace-d").querySelector(".trace-row-inner.pulse")).not.toBeNull());
+    await waitFor(() => {
+      flushRafQueue();
+      expect(getTraceRow("trace-d").querySelector(".trace-row-inner.pulse")).not.toBeNull();
+    });
+  });
+
+  it("keeps live counters immediate while session row reorder and pulse work is scheduled once per batch", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    expect(visibleTraceRowIds()).toEqual(["trace-c", "trace-b", "trace-a"]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    const staleB = {
+      ...makeTrace("trace-b", 4_000, "waiting_input"),
+      eventCount: 4,
+    };
+    const finalB = {
+      ...makeTrace("trace-b", 6_000, "running"),
+      eventCount: 8,
+    };
+
+    act(() => {
+      source.emit("batch", {
+        events: [
+          { id: "b-stale", type: "trace_updated", version: 1, payload: { summary: staleB } },
+          { id: "b-final", type: "trace_updated", version: 2, payload: { summary: finalB } },
+        ],
+      });
+    });
+
+    expect(document.querySelector(".session-head-counter.status-running")?.textContent).toBe("running 1");
+    expect(visibleTraceRowIds()).toEqual(["trace-c", "trace-b", "trace-a"]);
+    expect(getTraceRow("trace-b").querySelector(".trace-row-inner.pulse")).toBeNull();
+
+    flushRafQueue();
+    await waitFor(() => expect(visibleTraceRowIds()).toEqual(["trace-b", "trace-c", "trace-a"]));
+    flushRafQueue();
+    await waitFor(() => expect(getTraceRow("trace-b").querySelector(".trace-row-inner.pulse")).not.toBeNull());
+    expect(getTraceRow("trace-b").querySelector(".trace-status-chip")?.textContent).toBe("Running");
   });
 
   it("animates only cards whose list position changed", async () => {
@@ -3409,6 +3528,7 @@ describe("App sessions list live motion", () => {
     act(() => {
       source.emit("trace_updated", { summary: updatedB });
     });
+    flushRafQueue();
 
     await waitFor(() => expect(getTraceRow("trace-b").style.transform).toBe("translateY(100px)"));
     expect(getTraceRow("trace-c").style.transform).toBe("translateY(-100px)");
@@ -3453,6 +3573,7 @@ describe("App sessions list live motion", () => {
     const rawBlock = document.querySelector(".event-raw-json");
     expect(rawBlock).toBeTruthy();
     expect(rawBlock?.textContent).toContain(longToken);
+    expect(requestedUrls.some((url) => url.includes("/api/trace/trace-c/event/event-expand-1"))).toBe(true);
   });
 
   it("keeps expanded event JSON open when selected trace refreshes live", async () => {
@@ -3767,6 +3888,136 @@ describe("App sessions list live motion", () => {
       const resumeButton = document.querySelector(".inspector-resume-follow-button");
       expect(eventCardCount >= 1 || resumeButton !== null).toBe(true);
     });
+  });
+
+  it("keeps counters current while large streamed event bursts reveal in frame chunks", async () => {
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-paced-first", { signature: "first payload" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+    flushRafQueue();
+
+    const appendedEvents: NormalizedEvent[] = Array.from({ length: 24 }, (_, idx) => ({
+      ...makeEvent(`event-paced-${idx}`, { signature: `paced payload ${idx}` }),
+      index: 5 + idx,
+      offset: 5 + idx,
+      timestampMs: 2_000 + idx,
+      preview: `paced payload ${idx}`,
+      textBlocks: [`paced payload ${idx}`],
+      tocLabel: `paced payload ${idx}`,
+      searchText: `paced payload ${idx}`,
+    }));
+    const updatedSummary = {
+      ...selectedTrace,
+      eventCount: selectedTrace.eventCount + appendedEvents.length,
+      mtimeMs: selectedTrace.mtimeMs + 2_000,
+      lastEventTs: appendedEvents.at(-1)?.timestampMs ?? selectedTrace.lastEventTs,
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(updatedSummary, [firstEvent, ...appendedEvents]);
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("batch", {
+        events: [
+          { id: "summary", type: "trace_updated", version: 1, payload: { summary: updatedSummary } },
+          {
+            id: "append",
+            type: "events_appended",
+            version: 2,
+            payload: { id: "trace-c", appended: appendedEvents.length, latestEvents: appendedEvents },
+          },
+          {
+            id: "overview",
+            type: "overview_updated",
+            version: 3,
+            payload: { overview: { ...overview, eventCount: overview.eventCount + appendedEvents.length } },
+          },
+        ],
+      });
+    });
+
+    await waitFor(() => expect(document.querySelector(".detail-head-meta")?.textContent).toContain("26 events"));
+    expect(document.querySelector(".hero-metrics")?.textContent).toContain("events 30");
+    expect(visibleLiveItemCounts()).toEqual({ toc: 1, strip: 1, cards: 1 });
+    expect(getInspectorResumeFollowButton().textContent).toContain("24 new");
+
+    flushRafQueue();
+    await waitFor(() => {
+      const counts = visibleLiveItemCounts();
+      expect(counts.toc).toBeGreaterThan(1);
+      expect(counts.toc).toBeLessThan(25);
+      expect(counts.strip).toBe(counts.toc);
+      expect(counts.cards).toBe(counts.toc);
+    });
+
+    const firstFrameCount = visibleLiveItemCounts().cards;
+    flushRafQueue();
+    await waitFor(() => {
+      const counts = visibleLiveItemCounts();
+      expect(counts.cards).toBeGreaterThan(firstFrameCount);
+      expect(counts.cards).toBeLessThan(25);
+      expect(counts.strip).toBe(counts.cards);
+      expect(counts.toc).toBe(counts.cards);
+    });
+
+    await waitFor(() => {
+      flushRafQueue();
+      expect(visibleLiveItemCounts()).toEqual({ toc: 25, strip: 25, cards: 25 });
+    });
+    expect(document.querySelector(".inspector-resume-follow-button")).toBeNull();
+    expect(countTraceDetailRequests("trace-c")).toBe(1);
+  });
+
+  it("paces reduced-motion appends without enter animation classes", async () => {
+    stubReducedMotion(true);
+    const selectedTrace = tracesById["trace-c"];
+    if (!selectedTrace) throw new Error("missing trace-c test fixture");
+
+    const firstEvent = makeEvent("event-reduced-first", { signature: "first payload" });
+    const appendedEvents: NormalizedEvent[] = Array.from({ length: 12 }, (_, idx) => ({
+      ...makeEvent(`event-reduced-${idx}`, { signature: `reduced payload ${idx}` }),
+      index: 5 + idx,
+      offset: 5 + idx,
+      timestampMs: 2_000 + idx,
+      preview: `reduced payload ${idx}`,
+      textBlocks: [`reduced payload ${idx}`],
+      tocLabel: `reduced payload ${idx}`,
+      searchText: `reduced payload ${idx}`,
+    }));
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [firstEvent]);
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
+
+    const source = MockEventSource.instances[0];
+    expect(source).toBeTruthy();
+    if (!source) return;
+
+    act(() => {
+      source.emit("events_appended", {
+        id: "trace-c",
+        appended: appendedEvents.length,
+        latestEvents: appendedEvents,
+      });
+    });
+
+    expect(visibleLiveItemCounts()).toEqual({ toc: 1, strip: 1, cards: 1 });
+    flushRafQueue();
+    await waitFor(() => {
+      const counts = visibleLiveItemCounts();
+      expect(counts.cards).toBeGreaterThan(1);
+      expect(counts.cards).toBeLessThan(13);
+    });
+    expect(document.querySelector(".toc-row-enter")).toBeNull();
+    expect(document.querySelector(".timeline-segment-enter")).toBeNull();
+    expect(document.querySelector(".event-card-enter")).toBeNull();
   });
 
   it("applies burst batches without refetching selected trace detail when latest events are included", async () => {

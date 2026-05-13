@@ -2123,7 +2123,7 @@ describe("server api", () => {
     expect(traceById.statusCode).toBe(200);
     const detail = traceById.json() as {
       summary: { sessionId: string; path: string };
-      events: Array<{ toolCallId?: string; toolArgsText?: string; toolResultText?: string }>;
+      events: Array<{ eventId?: string; toolCallId?: string; toolArgsText?: string; toolResultText?: string }>;
       toc?: Array<{ label: string; eventKind: string }>;
     };
     expect(detail.summary.sessionId).toBe(fixture.sessionId);
@@ -2134,6 +2134,28 @@ describe("server api", () => {
     expect(detail.toc?.length).toBeGreaterThan(0);
     expect(detail.toc?.[0]?.label).toBe("Tool: run_command");
     expect(detail.toc?.[0]?.eventKind).toBe("tool_use");
+
+    const compactTraceById = await server.inject({ method: "GET", url: `/api/trace/${traceId}?payload=compact` });
+    expect(compactTraceById.statusCode).toBe(200);
+    const compactDetail = compactTraceById.json() as {
+      events: Array<{ raw: Record<string, unknown>; searchText: string; textBlocks: unknown[] }>;
+      eventPayload: string;
+    };
+    expect(compactDetail.eventPayload).toBe("compact");
+    expect(compactDetail.events[0]?.raw).toEqual({ type: "response_item" });
+    expect(compactDetail.events[0]?.searchText).toBe("");
+    expect(compactDetail.events[0]?.textBlocks).toEqual([]);
+
+    const eventId = detail.events[0]?.eventId;
+    if (!eventId) throw new Error("missing event id");
+    const traceEvent = await server.inject({
+      method: "GET",
+      url: `/api/trace/${traceId}/event/${encodeURIComponent(eventId)}`,
+    });
+    expect(traceEvent.statusCode).toBe(200);
+    expect((traceEvent.json() as { event: { raw: { payload?: { arguments?: string } } } }).event.raw.payload?.arguments).toContain(
+      "echo hi",
+    );
 
     const traceBySession = await server.inject({ method: "GET", url: `/api/trace/${fixture.sessionId}` });
     expect(traceBySession.statusCode).toBe(200);

@@ -5,6 +5,7 @@ import type {
   IndexStartupStatus,
   LiveBatchEnvelope,
   LiveDeltaEnvelope,
+  NormalizedEvent,
   OverviewStats,
   TracePage,
   TraceSummary,
@@ -38,14 +39,15 @@ const CLOCK_TICK_MS = 10_000;
 const TIMELINE_EVENT_INITIAL_RENDER_LIMIT = 240;
 const TIMELINE_EVENT_RENDER_STEP = 240;
 const TIMELINE_EVENT_RENDER_PREFETCH_PX = 320;
+const TRACE_DETAIL_EVENT_LIMIT = 1200;
+const TRACE_DETAIL_PAYLOAD = "compact";
 const TOOL_CALL_TYPES_PER_SUMMARY_ROW = 3;
 const TOOL_CALL_SUMMARY_ROW_LIMIT = 2;
 const RECENT_TRACE_LIMIT = 500;
 const TRACE_PAGE_CACHE_ENTRY_LIMIT = RECENT_TRACE_LIMIT * 2;
 const PRIMARY_RECENT_SESSION_COUNT = 20;
 const OLDER_TRACE_PAGE_SIZE = 40;
-const EVENT_APPEND_REVEAL_CHUNK_SIZE = 8;
-const EVENT_APPEND_REVEAL_INTERVAL_MS = 16;
+const LIVE_EVENT_REVEAL_FRAME_BUDGET = 8;
 const EVENT_KIND_OPTIONS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"];
 const EVENT_KIND_LABEL_BY_KIND: Record<EventKind, string> = {
   system: "system",
@@ -62,6 +64,10 @@ const DEFAULT_VISIBLE_EVENT_KINDS: EventKind[] = EVENT_KIND_OPTIONS.filter((kind
 interface OverviewResponse {
   overview: OverviewStats;
   startup: IndexStartupStatus;
+}
+
+interface TraceEventResponse {
+  event: NormalizedEvent;
 }
 
 interface StopTraceResponse {
@@ -330,6 +336,12 @@ function clearAnimationTimers(timerById: Map<string, number>): void {
   timerById.clear();
 }
 
+function reducedMotionPreferred(): boolean {
+  return typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 function readTimelineStripViewport(scroller: HTMLElement): { hasOverflow: boolean; atLatest: boolean } {
   const hasOverflow = scroller.scrollWidth > scroller.clientWidth + 1;
   if (!hasOverflow) return { hasOverflow: false, atLatest: true };
@@ -382,6 +394,7 @@ export function App(): JSX.Element {
   const [overview, setOverview] = useState<OverviewStats | null>(null);
   const [startup, setStartup] = useState<IndexStartupStatus | null>(null);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
+  const [sessionRenderTraces, setSessionRenderTraces] = useState<TraceSummary[]>([]);
   const [activeAdHocEncodedPath, setActiveAdHocEncodedPath] = useState(() =>
     typeof window === "undefined" ? "" : adHocEncodedPathFromLocationPathname(window.location.pathname),
   );
@@ -403,6 +416,9 @@ export function App(): JSX.Element {
   const [tocQuery, setTocQuery] = useState("");
   const [selectedEventId, setSelectedEventId] = useState("");
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
+  const [expandedEventById, setExpandedEventById] = useState<Record<string, NormalizedEvent>>({});
+  const [loadingExpandedEventIds, setLoadingExpandedEventIds] = useState<Set<string>>(new Set());
+  const [expandedEventErrorById, setExpandedEventErrorById] = useState<Record<string, string>>({});
   const [expandedPathTraceIds, setExpandedPathTraceIds] = useState<Set<string>>(new Set());
   const [autoFollow, setAutoFollow] = useState(true);
   const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("latest-first");
@@ -427,6 +443,7 @@ export function App(): JSX.Element {
   const [inspectorPendingAppendCount, setInspectorPendingAppendCount] = useState(0);
   const selectedIdRef = useRef("");
   const tracesRef = useRef<TraceSummary[]>([]);
+  const sessionRenderTracesRef = useRef<TraceSummary[]>([]);
   const pageRef = useRef<TracePage | null>(null);
   const pendingLatestEventsByTraceIdRef = useRef<Map<string, TracePage["events"]>>(new Map());
   const eventTypeFilterRef = useRef<HTMLDivElement | null>(null);
@@ -447,8 +464,11 @@ export function App(): JSX.Element {
   const previousAnimatedEventFilterKeyRef = useRef("");
   const previousPageEventIdsRef = useRef<Set<string>>(new Set());
   const queuedEventIdsRef = useRef<string[]>([]);
+  const queuedEventIdSetRef = useRef<Set<string>>(new Set());
   const queuedEventFlushRafRef = useRef<number | null>(null);
-  const queuedEventFlushTimerRef = useRef<number | null>(null);
+  const pendingSessionRenderTracesRef = useRef<TraceSummary[] | null>(null);
+  const pendingSessionPulseTraceIdsRef = useRef<Set<string>>(new Set());
+  const sessionRenderRafRef = useRef<number | null>(null);
   const enterAnimationTimerByTraceIdRef = useRef<Map<string, number>>(new Map());
   const enterAnimationTimerByEventIdRef = useRef<Map<string, number>>(new Map());
   const flashStatusFadeTimerRef = useRef<number | null>(null);
@@ -489,13 +509,22 @@ export function App(): JSX.Element {
       return search.includes(q);
     });
   }, [traces, query]);
+  const filteredSessionRenderTraces = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const base = sortTraces(sessionRenderTraces);
+    if (!q) return base;
+    return base.filter((trace) => {
+      const search = `${trace.path}\n${trace.agent}\n${trace.sessionId}\n${trace.id}`.toLowerCase();
+      return search.includes(q);
+    });
+  }, [query, sessionRenderTraces]);
   const primaryTraces = useMemo(
-    () => filteredTraces.slice(0, PRIMARY_RECENT_SESSION_COUNT),
-    [filteredTraces],
+    () => filteredSessionRenderTraces.slice(0, PRIMARY_RECENT_SESSION_COUNT),
+    [filteredSessionRenderTraces],
   );
   const olderTraces = useMemo(
-    () => filteredTraces.slice(PRIMARY_RECENT_SESSION_COUNT),
-    [filteredTraces],
+    () => filteredSessionRenderTraces.slice(PRIMARY_RECENT_SESSION_COUNT),
+    [filteredSessionRenderTraces],
   );
   const visibleOlderTraces = useMemo(
     () => olderTraces.slice(0, olderTraceRenderLimit),
@@ -739,11 +768,8 @@ export function App(): JSX.Element {
       window.cancelAnimationFrame(queuedEventFlushRafRef.current);
       queuedEventFlushRafRef.current = null;
     }
-    if (queuedEventFlushTimerRef.current !== null) {
-      window.clearTimeout(queuedEventFlushTimerRef.current);
-      queuedEventFlushTimerRef.current = null;
-    }
     queuedEventIdsRef.current = [];
+    queuedEventIdSetRef.current.clear();
     setInspectorPendingAppendCount((value) => (value === 0 ? value : 0));
   }, []);
 
@@ -770,12 +796,11 @@ export function App(): JSX.Element {
       window.cancelAnimationFrame(queuedEventFlushRafRef.current);
       queuedEventFlushRafRef.current = null;
     }
-    if (queuedEventFlushTimerRef.current !== null) {
-      window.clearTimeout(queuedEventFlushTimerRef.current);
-      queuedEventFlushTimerRef.current = null;
-    }
     if (queuedEventIdsRef.current.length === 0) return;
-    const queued = queuedEventIdsRef.current.splice(0, EVENT_APPEND_REVEAL_CHUNK_SIZE);
+    const queued = queuedEventIdsRef.current.splice(0, LIVE_EVENT_REVEAL_FRAME_BUDGET);
+    for (const eventId of queued) {
+      queuedEventIdSetRef.current.delete(eventId);
+    }
     const remainingCount = queuedEventIdsRef.current.length;
     setInspectorPendingAppendCount((value) => (value === remainingCount ? value : remainingCount));
     setVisibleEventIds((prev) => {
@@ -783,35 +808,38 @@ export function App(): JSX.Element {
       for (const eventId of queued) next.add(eventId);
       return next;
     });
-    setEnteringEventIds((prev) => {
-      const next = new Set(prev);
-      for (const eventId of queued) next.add(eventId);
-      return next;
-    });
-    for (const eventId of queued) {
-      scheduleEventEnterAnimationCleanup(eventId);
+    if (!reducedMotionPreferred()) {
+      setEnteringEventIds((prev) => {
+        const next = new Set(prev);
+        for (const eventId of queued) next.add(eventId);
+        return next;
+      });
+      for (const eventId of queued) {
+        scheduleEventEnterAnimationCleanup(eventId);
+      }
     }
     if (queuedEventIdsRef.current.length > 0) {
-      queuedEventFlushTimerRef.current = window.setTimeout(() => {
-        queuedEventFlushTimerRef.current = null;
-        queuedEventFlushRafRef.current = window.requestAnimationFrame(() => {
-          queuedEventFlushRafRef.current = null;
-          flushQueuedEvents();
-        });
-      }, EVENT_APPEND_REVEAL_INTERVAL_MS);
+      queuedEventFlushRafRef.current = window.requestAnimationFrame(() => {
+        queuedEventFlushRafRef.current = null;
+        flushQueuedEvents();
+      });
     }
   }, [scheduleEventEnterAnimationCleanup]);
 
   const enqueueEventsForAppendReveal = useCallback(
     (eventIds: string[]): void => {
       if (eventIds.length === 0) return;
-      const queuedEventIdSet = new Set(queuedEventIdsRef.current);
+      let queuedChanged = false;
       for (const eventId of eventIds) {
-        if (queuedEventIdSet.has(eventId)) continue;
-        queuedEventIdSet.add(eventId);
+        if (queuedEventIdSetRef.current.has(eventId)) continue;
+        queuedEventIdSetRef.current.add(eventId);
         queuedEventIdsRef.current.push(eventId);
+        queuedChanged = true;
       }
-      if (queuedEventFlushRafRef.current !== null || queuedEventFlushTimerRef.current !== null) return;
+      if (!queuedChanged) return;
+      const queuedCount = queuedEventIdsRef.current.length;
+      setInspectorPendingAppendCount((value) => (value === queuedCount ? value : queuedCount));
+      if (queuedEventFlushRafRef.current !== null) return;
       queuedEventFlushRafRef.current = window.requestAnimationFrame(() => {
         queuedEventFlushRafRef.current = null;
         flushQueuedEvents();
@@ -822,11 +850,10 @@ export function App(): JSX.Element {
 
   const queueEventsWithoutReveal = useCallback((eventIds: string[]): void => {
     if (eventIds.length === 0) return;
-    const queuedEventIdSet = new Set(queuedEventIdsRef.current);
     let queuedChanged = false;
     for (const eventId of eventIds) {
-      if (queuedEventIdSet.has(eventId)) continue;
-      queuedEventIdSet.add(eventId);
+      if (queuedEventIdSetRef.current.has(eventId)) continue;
+      queuedEventIdSetRef.current.add(eventId);
       queuedEventIdsRef.current.push(eventId);
       queuedChanged = true;
     }
@@ -874,7 +901,6 @@ export function App(): JSX.Element {
     scrollEventsToLatest("smooth");
     eventsPinnedToLatestRef.current = true;
     setEventsPinnedToLatest((value) => (value ? value : true));
-    setInspectorPendingAppendCount(0);
   }, [flushQueuedEvents, scrollEventsToLatest, timelineStripEvents]);
 
   const handleTimelineStripScroll = useCallback((): void => {
@@ -912,6 +938,10 @@ export function App(): JSX.Element {
   useEffect(() => {
     tracesRef.current = traces;
   }, [traces]);
+
+  useEffect(() => {
+    sessionRenderTracesRef.current = sessionRenderTraces;
+  }, [sessionRenderTraces]);
 
   useEffect(() => {
     pageRef.current = page;
@@ -968,6 +998,10 @@ export function App(): JSX.Element {
   useEffect(
     () => () => {
       clearEventAppendQueue();
+      if (sessionRenderRafRef.current !== null) {
+        window.cancelAnimationFrame(sessionRenderRafRef.current);
+        sessionRenderRafRef.current = null;
+      }
       clearFlashStatusTimers();
       clearAnimationTimers(enterAnimationTimerByTraceIdRef.current);
       clearAnimationTimers(enterAnimationTimerByEventIdRef.current);
@@ -999,6 +1033,35 @@ export function App(): JSX.Element {
     };
   }, [applyTimelineStripViewport]);
 
+  const scheduleSessionRender = useCallback((nextTraces: TraceSummary[], pulseTraceIds: Set<string> = new Set()): void => {
+    pendingSessionRenderTracesRef.current = nextTraces;
+    for (const traceId of pulseTraceIds) {
+      if (traceId) pendingSessionPulseTraceIdsRef.current.add(traceId);
+    }
+    if (sessionRenderRafRef.current !== null) return;
+
+    sessionRenderRafRef.current = window.requestAnimationFrame(() => {
+      sessionRenderRafRef.current = null;
+      const pendingTraces = pendingSessionRenderTracesRef.current;
+      pendingSessionRenderTracesRef.current = null;
+      if (pendingTraces) {
+        sessionRenderTracesRef.current = pendingTraces;
+        setSessionRenderTraces(pendingTraces);
+      }
+
+      const pulseTraceIdsToApply = Array.from(pendingSessionPulseTraceIdsRef.current);
+      pendingSessionPulseTraceIdsRef.current.clear();
+      if (pulseTraceIdsToApply.length === 0) return;
+      setPulseSeqByTraceId((prev) => {
+        const next = { ...prev };
+        for (const traceId of pulseTraceIdsToApply) {
+          next[traceId] = (next[traceId] ?? 0) + 1;
+        }
+        return next;
+      });
+    });
+  }, []);
+
   useEffect(() => {
     const traceRenderKey = `${query.trim().toLowerCase()}|${showOlderTraces ? "open" : "closed"}|${olderTraceRenderLimit}`;
     const filterChanged = previousTraceFilterRef.current !== traceRenderKey;
@@ -1016,6 +1079,11 @@ export function App(): JSX.Element {
     const appendedTraceIds = renderedTraceIds.filter((traceId) => !previousVisibleTraceIdsRef.current.has(traceId));
     previousVisibleTraceIdsRef.current = currentTraceIds;
     if (appendedTraceIds.length === 0) return;
+    if (reducedMotionPreferred()) {
+      setEnteringTraceIds(new Set());
+      clearAnimationTimers(enterAnimationTimerByTraceIdRef.current);
+      return;
+    }
 
     setEnteringTraceIds((prev) => {
       const next = new Set(prev);
@@ -1043,14 +1111,6 @@ export function App(): JSX.Element {
   }, [olderTraceRenderLimit, query, renderedTraceIds, showOlderTraces]);
 
   useEffect(() => {
-    const bumpPulse = (traceId: string): void => {
-      if (!traceId) return;
-      setPulseSeqByTraceId((prev) => ({
-        ...prev,
-        [traceId]: (prev[traceId] ?? 0) + 1,
-      }));
-    };
-
     const loadBoot = async (): Promise<void> => {
       try {
         const [overviewResp, tracesResp] = await Promise.all([
@@ -1059,9 +1119,11 @@ export function App(): JSX.Element {
         ]);
         const sorted = limitRecentTraces(tracesResp.traces.map(applyManualStopOverride));
         tracesRef.current = sorted;
+        sessionRenderTracesRef.current = sorted;
         setOverview(overviewResp.overview);
         setStartup(overviewResp.startup);
         setTraces(sorted);
+        setSessionRenderTraces(sorted);
         setSelectedId((prev) => {
           if (prev) return prev;
           if (activeAdHocEncodedPath) return `${AD_HOC_TRACE_ID_PREFIX}${activeAdHocEncodedPath}`;
@@ -1078,6 +1140,7 @@ export function App(): JSX.Element {
       delete manualStopAtByTraceIdRef.current[id];
       removeTracePageCacheEntries(tracePageCacheRef.current, id);
       pendingLatestEventsByTraceIdRef.current.delete(id);
+      pendingSessionPulseTraceIdsRef.current.delete(id);
       removeTraceRow(id);
       setEnteringTraceIds((prev) => {
         if (!prev.has(id)) return prev;
@@ -1204,6 +1267,7 @@ export function App(): JSX.Element {
 
       if (tracesChanged) {
         setTraces(nextTraces);
+        scheduleSessionRender(nextTraces, pulseTraceIds);
         setSelectedId((prev) => {
           if (prev && removedIds.has(prev)) return "";
           if (prev) return prev;
@@ -1266,10 +1330,6 @@ export function App(): JSX.Element {
       }
       setStatus(`Live: ${nextTraces.length} traces`);
       setLastLiveUpdateMs(Date.now());
-
-      for (const traceId of pulseTraceIds) {
-        bumpPulse(traceId);
-      }
     };
 
     const enqueueLiveDeltas = (deltas: LiveDeltaEnvelope[]): void => {
@@ -1288,8 +1348,10 @@ export function App(): JSX.Element {
         };
         const nextTraces = limitRecentTraces((data.payload?.traces ?? []).map(applyManualStopOverride));
         tracesRef.current = nextTraces;
+        sessionRenderTracesRef.current = nextTraces;
         if (nextTraces.length > 0) {
           setTraces(nextTraces);
+          setSessionRenderTraces(nextTraces);
           setSelectedId((prev) => prev || nextTraces[0]?.id || "");
         }
         if (data.payload?.overview) setOverview(data.payload.overview);
@@ -1340,7 +1402,7 @@ export function App(): JSX.Element {
     return () => {
       source.close();
     };
-  }, [activeAdHocEncodedPath, applyManualStopOverride, removeTraceRow]);
+  }, [activeAdHocEncodedPath, applyManualStopOverride, removeTraceRow, scheduleSessionRender]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1399,6 +1461,31 @@ export function App(): JSX.Element {
         }
         return next;
       });
+      setExpandedEventById((prev) => {
+        if (isTraceChanged) return {};
+        const next: Record<string, NormalizedEvent> = {};
+        for (const [eventId, event] of Object.entries(prev)) {
+          if (eventIds.has(eventId)) next[eventId] = event;
+        }
+        return next;
+      });
+      setExpandedEventErrorById((prev) => {
+        if (isTraceChanged) return {};
+        const next: Record<string, string> = {};
+        for (const [eventId, message] of Object.entries(prev)) {
+          if (eventIds.has(eventId)) next[eventId] = message;
+        }
+        return next;
+      });
+      setLoadingExpandedEventIds((prev) => {
+        if (prev.size === 0) return prev;
+        if (isTraceChanged) return new Set();
+        const next = new Set<string>();
+        for (const eventId of prev) {
+          if (eventIds.has(eventId)) next.add(eventId);
+        }
+        return next;
+      });
       setSelectedEventId((prev) => {
         if (prev && detail.events.some((event) => event.eventId === prev)) {
           return prev;
@@ -1431,8 +1518,8 @@ export function App(): JSX.Element {
       try {
         const detail = await fetchJson<TracePage>(
           isAdHocSelection
-            ? `${API}/api/tracefile?path=${encodeURIComponent(selectedAdHocEncodedPath)}&limit=1200&include_meta=${includeMeta ? "1" : "0"}`
-            : `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=1200&include_meta=${includeMeta ? "1" : "0"}`,
+            ? `${API}/api/tracefile?path=${encodeURIComponent(selectedAdHocEncodedPath)}&limit=${TRACE_DETAIL_EVENT_LIMIT}&include_meta=${includeMeta ? "1" : "0"}&payload=${TRACE_DETAIL_PAYLOAD}`
+            : `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=${TRACE_DETAIL_EVENT_LIMIT}&include_meta=${includeMeta ? "1" : "0"}&payload=${TRACE_DETAIL_PAYLOAD}`,
           { signal: abortController.signal },
         );
         if (abortController.signal.aborted) return;
@@ -1650,6 +1737,7 @@ export function App(): JSX.Element {
 
     const nextQueuedEventIds = queuedEventIdsRef.current.filter((eventId) => currentEventIdSet.has(eventId));
     queuedEventIdsRef.current = nextQueuedEventIds;
+    queuedEventIdSetRef.current = new Set(nextQueuedEventIds);
     const queuedCount = nextQueuedEventIds.length;
     setInspectorPendingAppendCount((value) => (value === queuedCount ? value : queuedCount));
     if (appendedEventIds.length > 0) {
@@ -1704,13 +1792,57 @@ export function App(): JSX.Element {
     }, 0);
   };
 
+  const loadExpandedEvent = useCallback(
+    async (eventId: string): Promise<void> => {
+      if (!selectedId || expandedEventById[eventId] || loadingExpandedEventIds.has(eventId)) return;
+      setLoadingExpandedEventIds((prev) => {
+        if (prev.has(eventId)) return prev;
+        const next = new Set(prev);
+        next.add(eventId);
+        return next;
+      });
+      setExpandedEventErrorById((prev) => {
+        if (!(eventId in prev)) return prev;
+        const next = { ...prev };
+        delete next[eventId];
+        return next;
+      });
+
+      try {
+        const detail = await fetchJson<TraceEventResponse>(
+          isAdHocTraceSelection(selectedId)
+            ? `${API}/api/tracefile/event?path=${encodeURIComponent(selectedId.slice(AD_HOC_TRACE_ID_PREFIX.length))}&event_id=${encodeURIComponent(eventId)}&include_meta=${includeMeta ? "1" : "0"}`
+            : `${API}/api/trace/${encodeURIComponent(selectedId)}/event/${encodeURIComponent(eventId)}?include_meta=${includeMeta ? "1" : "0"}`,
+        );
+        setExpandedEventById((prev) => ({ ...prev, [eventId]: detail.event }));
+      } catch (error) {
+        setExpandedEventErrorById((prev) => ({
+          ...prev,
+          [eventId]: error instanceof Error ? error.message : String(error),
+        }));
+      } finally {
+        setLoadingExpandedEventIds((prev) => {
+          if (!prev.has(eventId)) return prev;
+          const next = new Set(prev);
+          next.delete(eventId);
+          return next;
+        });
+      }
+    },
+    [expandedEventById, includeMeta, loadingExpandedEventIds, selectedId],
+  );
+
   const toggleExpanded = (eventId: string): void => {
+    const willExpand = !expandedEventIds.has(eventId);
     setExpandedEventIds((prev) => {
       const next = new Set(prev);
       if (next.has(eventId)) next.delete(eventId);
       else next.add(eventId);
       return next;
     });
+    if (willExpand) {
+      void loadExpandedEvent(eventId);
+    }
   };
 
   const toggleTracePathExpanded = (traceId: string): void => {
@@ -1812,7 +1944,7 @@ export function App(): JSX.Element {
       }
       const stoppedAtMs = Date.now();
       manualStopAtByTraceIdRef.current[traceId] = stoppedAtMs;
-      setTraces((prev) => {
+      const markTraceStopped = (prev: TraceSummary[]): TraceSummary[] => {
         const index = prev.findIndex((trace) => trace.id === traceId);
         if (index < 0) return prev;
         const current = prev[index];
@@ -1824,7 +1956,9 @@ export function App(): JSX.Element {
           activityReason: "manually_stopped",
         };
         return sortTraces(next);
-      });
+      };
+      setTraces(markTraceStopped);
+      setSessionRenderTraces(markTraceStopped);
       const signalLabel = payload.signal?.trim() ? payload.signal : "signal";
       flashHeaderStatus(`Stop requested (${signalLabel}) for ${traceId}`);
       setLastLiveUpdateMs(stoppedAtMs);
@@ -2299,6 +2433,9 @@ export function App(): JSX.Element {
                 >
                   {renderedTimelineEvents.map((event) => {
                     const agentBadges = buildAgentBadges(event);
+                    const expandedEvent = expandedEventById[event.eventId] ?? event;
+                    const expandedEventLoading = loadingExpandedEventIds.has(event.eventId);
+                    const expandedEventError = expandedEventErrorById[event.eventId] ?? "";
                     return (
                       <article
                         key={event.eventId}
@@ -2331,7 +2468,14 @@ export function App(): JSX.Element {
                           </div>
                         )}
                         {expandedEventIds.has(event.eventId) && (
-                          <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
+                          expandedEventLoading && !expandedEventById[event.eventId] ? (
+                            <div className="event-raw-status mono">Loading raw event...</div>
+                          ) : (
+                            <>
+                              {expandedEventError && <div className="event-raw-status mono">{expandedEventError}</div>}
+                              <pre className="event-raw-json">{JSON.stringify(expandedEvent.raw, null, 2)}</pre>
+                            </>
+                          )
                         )}
                       </article>
                     );

@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { TraceSummary } from "@agentlens/contracts";
 import { describe, expect, it } from "vitest";
 import { mergeConfig } from "../config.js";
 import { TraceIndex } from "../traceIndex.js";
@@ -18,7 +19,7 @@ interface StatusFixtureOptions {
 async function loadSummaryForCodexLines(
   lines: string[],
   options: StatusFixtureOptions = {},
-): Promise<import("@agentlens/contracts").TraceSummary> {
+): Promise<TraceSummary> {
   const root = await createTempRoot();
   const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "12");
   await mkdir(codexDir, { recursive: true });
@@ -328,7 +329,7 @@ describe("trace activity status", () => {
     expect(summary.activityReason).toBe("no_active_signal");
   });
 
-  it("marks waiting_input in cooldown band between running and idle", async () => {
+  it("marks non-terminal recent activity idle after the running window expires", async () => {
     const summary = await loadSummaryForCodexLines(
       [
         JSON.stringify({
@@ -353,8 +354,8 @@ describe("trace activity status", () => {
       },
     );
 
-    expect(summary.activityStatus).toBe("waiting_input");
-    expect(summary.activityReason).toBe("recent_activity_cooling");
+    expect(summary.activityStatus).toBe("idle");
+    expect(summary.activityReason).toBe("no_active_signal");
   });
 
   it("recomputes stale status on refresh even without file changes", async () => {

@@ -10,13 +10,15 @@ Base URL (default): `http://127.0.0.1:8787`
 | `GET /api/overview` | Aggregate counters and distributions |
 | `GET /api/perf` | Index refresh timings, watcher stats, retention stats |
 | `GET /api/traces?agent=<name>&limit=<n>` | Trace summaries |
-| `GET /api/trace/:id` | Trace detail by trace id or session id (`limit`, `before`, `include_meta`) |
+| `GET /api/trace/:id` | Trace detail by trace id or session id (`limit`, `before`, `include_meta`, `payload`) |
+| `GET /api/trace/:id/event/:eventId` | Full trace event by trace id/session id and event id |
 | `GET /api/activity/day` | Daily activity bins + session/event aggregates |
 | `GET /api/activity/week` | Multi-day heatmap activity bins |
 | `POST /api/trace/:id/stop` | Stop session process (`force=true` optional) |
 | `POST /api/trace/:id/open` | Focus/open terminal target for trace |
 | `POST /api/trace/:id/input` | Send text input to session process |
 | `GET /api/tracefile?path=<base64url>` | Ad-hoc trace detail from absolute file path token |
+| `GET /api/tracefile/event?path=<base64url>&event_id=<id>` | Full ad-hoc trace event from absolute file path token |
 | `GET /api/config` | Current merged runtime config |
 | `POST /api/config` | Merge + persist config and refresh index |
 | `GET /api/stream` | SSE stream (`snapshot`, `trace_*`, `events_appended`, `overview_updated`, `heartbeat`) |
@@ -27,6 +29,11 @@ Base URL (default): `http://127.0.0.1:8787`
 
 - `limit` (int, max 5000)
 - `before` (cursor)
+- `include_meta` (`0|1|true|false`)
+- `payload` (`full|compact`, default `full`; `compact` omits full raw provider JSON from list events)
+
+### `GET /api/trace/:id/event/:eventId`
+
 - `include_meta` (`0|1|true|false`)
 
 ### `GET /api/traces`
@@ -55,11 +62,18 @@ Daily window is a 24-hour cycle anchored at `7:00` local time (`date 07:00` to n
 ### `GET /api/tracefile`
 
 - `path` required, base64url-encoded absolute path
-- optional: `limit`, `before`, `include_meta`
+- optional: `limit`, `before`, `include_meta`, `payload`
+
+### `GET /api/tracefile/event`
+
+- `path` required, base64url-encoded absolute path
+- `event_id` required
+- optional: `include_meta`
 
 ## Response Notes
 
-- successful trace endpoints return `TracePage` shape: `summary`, `events`, `toc`, `nextBefore`, `liveCursor`
+- successful trace page endpoints return `TracePage` shape: `summary`, `events`, `toc`, `nextBefore`, `liveCursor`, `eventPayload`
+- successful trace event endpoints return `{ event }`
 - successful activity endpoints return `AgentActivityDay` / `AgentActivityWeek`
 - unknown trace/session id: `404`
 - invalid ad-hoc token/path: `400`
