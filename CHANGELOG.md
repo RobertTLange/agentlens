@@ -8,9 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Added `agentlens --version` to print the published CLI package version.
 
+### Changed
+- Paced live session, Timeline TOC, timeline strip, and Trace Inspector rendering so large live bursts reveal over animation-frame chunks while counts and status stay current.
+- Trace Inspector now requests compact event payloads for collapsed cards and lazy-loads full raw JSON only when an event is expanded.
+
 ### Fixed
 - Improved narrow browser resizing so Sessions and Trace Inspector remain usable while the Timeline TOC is hidden.
 - Wrapped long Trace Inspector event text inside event cards instead of overflowing at narrow widths.
+- Reduced browser main-thread and memory pressure for large trace sessions that previously triggered Chrome tab slowdown warnings.
+
+### Performance
+- Lowered large trace detail payloads by omitting full raw provider JSON from the initial inspector render path.
 
 ## [0.3.0] - 2026-03-25
 ### Added
