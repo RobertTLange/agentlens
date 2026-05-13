@@ -573,14 +573,27 @@ function makeEvent(eventId: string, raw: Record<string, unknown>): NormalizedEve
 }
 
 function traceIdFromTraceUrl(url: string): string {
-  const match = url.match(/\/api\/trace\/([^?]+)/);
+  const match = url.match(/\/api\/trace\/([^/?]+)/);
   return decodeURIComponent(match?.[1] ?? "");
+}
+
+function traceEventPartsFromUrl(url: string): { traceId: string; eventId: string } {
+  const match = url.match(/\/api\/trace\/([^/]+)\/event\/([^?]+)/);
+  return {
+    traceId: decodeURIComponent(match?.[1] ?? ""),
+    eventId: decodeURIComponent(match?.[2] ?? ""),
+  };
 }
 
 function encodedPathFromTraceFileUrl(url: string): string {
   const parsed = new URL(url, "http://localhost");
   if (!parsed.pathname.includes("/api/tracefile")) return "";
   return parsed.searchParams.get("path") ?? "";
+}
+
+function eventIdFromTraceFileEventUrl(url: string): string {
+  const parsed = new URL(url, "http://localhost");
+  return parsed.searchParams.get("event_id") ?? "";
 }
 
 function traceIdFromStopUrl(url: string): string {
@@ -612,6 +625,7 @@ function getTraceDetailRequests(traceId: string): string[] {
     if (!url.includes(detailUrlFragment)) return false;
     if (url.includes("/stop")) return false;
     if (url.includes("/open")) return false;
+    if (url.includes("/event/")) return false;
     return true;
   });
 }
@@ -964,6 +978,17 @@ beforeEach(() => {
         const body = custom?.body ?? { ok: true, status: "sent_tmux", message: "sent input to tmux pane" };
         return new Response(JSON.stringify(body), { status });
       }
+      if (url.includes("/api/tracefile/event")) {
+        const encodedPath = encodedPathFromTraceFileUrl(url);
+        const eventId = eventIdFromTraceFileEventUrl(url);
+        const tracePage =
+          Object.values(tracePagesById).find((candidate) => encodeBase64UrlUtf8(candidate.summary.path) === encodedPath) ??
+          Object.values(tracePagesById)[0];
+        const event = tracePage?.events.find((candidate) => candidate.eventId === eventId);
+        return event
+          ? new Response(JSON.stringify({ event }), { status: 200 })
+          : new Response(JSON.stringify({ error: "unknown trace event" }), { status: 404 });
+      }
       if (url.includes("/api/tracefile")) {
         const encodedPath = encodedPathFromTraceFileUrl(url);
         if (missingAdHocEncodedPaths.has(encodedPath)) {
@@ -976,6 +1001,14 @@ beforeEach(() => {
           return new Response("{}", { status: 404 });
         }
         return new Response(JSON.stringify(tracePage), { status: 200 });
+      }
+      if (url.includes("/api/trace/") && url.includes("/event/")) {
+        const { traceId, eventId } = traceEventPartsFromUrl(url);
+        const tracePage = tracePagesById[traceId] ?? Object.values(tracePagesById)[0];
+        const event = tracePage?.events.find((candidate) => candidate.eventId === eventId);
+        return event
+          ? new Response(JSON.stringify({ event }), { status: 200 })
+          : new Response(JSON.stringify({ error: "unknown trace event" }), { status: 404 });
       }
       if (url.includes("/api/trace/")) {
         const traceId = traceIdFromTraceUrl(url);
@@ -1013,6 +1046,17 @@ describe("App sessions list live motion", () => {
       "https://github.com/RobertTLange/agentlens",
     );
     expect(document.querySelector("footer")).toBeNull();
+  });
+
+  it("requests compact trace pages for the inspector", async () => {
+    render(<App />);
+    await waitFor(() => expect(getTraceDetailRequests("trace-c").length).toBeGreaterThan(0));
+
+    const detailRequest = getTraceDetailRequests("trace-c")[0];
+    if (!detailRequest) throw new Error("missing trace detail request");
+    const url = new URL(detailRequest, "http://localhost");
+    expect(url.searchParams.get("payload")).toBe("compact");
+    expect(url.searchParams.get("limit")).toBe("1200");
   });
 
   it("shows warming state in the inspector while history hydration is still partial", async () => {
@@ -3529,6 +3573,7 @@ describe("App sessions list live motion", () => {
     const rawBlock = document.querySelector(".event-raw-json");
     expect(rawBlock).toBeTruthy();
     expect(rawBlock?.textContent).toContain(longToken);
+    expect(requestedUrls.some((url) => url.includes("/api/trace/trace-c/event/event-expand-1"))).toBe(true);
   });
 
   it("keeps expanded event JSON open when selected trace refreshes live", async () => {

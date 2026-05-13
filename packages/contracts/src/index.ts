@@ -232,12 +232,15 @@ export interface TraceTocItem {
   toolType: string;
 }
 
+export type TraceEventPayloadMode = "full" | "compact";
+
 export interface TracePage {
   summary: TraceSummary;
   events: NormalizedEvent[];
   toc: TraceTocItem[];
   nextBefore: string;
   liveCursor: string;
+  eventPayload?: TraceEventPayloadMode;
 }
 
 export type IndexStartupPhase = "cold" | "bootstrapping" | "hydrating" | "ready" | "failed";

@@ -18,6 +18,7 @@ import type {
   SessionActivityStatus,
   SessionDetail,
   StreamEnvelope,
+  TraceEventPayloadMode,
   TracePage,
   TraceTocItem,
   TraceSummary,
@@ -71,6 +72,7 @@ export interface TracePageOptions {
   limit?: number;
   before?: string;
   includeMeta?: boolean;
+  eventPayload?: TraceEventPayloadMode;
 }
 
 export interface TraceIndexEvent {
@@ -716,6 +718,53 @@ function buildToc(events: NormalizedEvent[]): TraceTocItem[] {
     colorKey: event.eventKind,
     toolType: event.toolType,
   }));
+}
+
+function compactTextField(value: string, maxLength = 240): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function copyStringField(source: Record<string, unknown>, key: string, target: Record<string, unknown>): void {
+  const value = source[key];
+  if (typeof value === "string" && value) {
+    target[key] = value;
+  }
+}
+
+function buildCompactRaw(raw: Record<string, unknown>): Record<string, unknown> {
+  const compact: Record<string, unknown> = {};
+  copyStringField(raw, "type", compact);
+  copyStringField(raw, "subtype", compact);
+  copyStringField(raw, "model", compact);
+
+  const payload = asRecord(raw.payload);
+  const compactPayload: Record<string, unknown> = {};
+  copyStringField(payload, "model", compactPayload);
+  copyStringField(payload, "approval_policy", compactPayload);
+  if (Object.keys(compactPayload).length > 0) {
+    compact.payload = compactPayload;
+  }
+
+  const data = asRecord(raw.data);
+  const compactData: Record<string, unknown> = {};
+  copyStringField(data, "hookEvent", compactData);
+  if (Object.keys(compactData).length > 0) {
+    compact.data = compactData;
+  }
+
+  return compact;
+}
+
+function compactEventForList(event: NormalizedEvent): NormalizedEvent {
+  return {
+    ...event,
+    textBlocks: [],
+    toolArgsText: compactTextField(event.toolArgsText),
+    toolResultText: compactTextField(event.toolResultText),
+    searchText: "",
+    raw: buildCompactRaw(event.raw),
+  };
 }
 
 function byteLengthUtf8(value: string): number {
@@ -1950,19 +1999,32 @@ export class TraceIndex extends EventEmitter {
     const detail = this.getSessionDetail(id);
     const includeMeta = options.includeMeta ?? this.config.scan.includeMetaDefault;
     const filtered = includeMeta ? detail.events : detail.events.filter((event) => event.eventKind !== "meta");
+    const eventPayload = options.eventPayload ?? "full";
 
     const limit = Math.max(1, Math.min(5000, options.limit ?? this.config.scan.recentEventWindow));
     const end = options.before ? Math.max(0, Math.min(filtered.length, Number(options.before))) : filtered.length;
     const start = Math.max(0, end - limit);
     const pageEvents = filtered.slice(start, end);
+    const events = eventPayload === "compact" ? pageEvents.map(compactEventForList) : pageEvents;
 
     return {
       summary: detail.summary,
-      events: pageEvents,
+      events,
       toc: buildToc(pageEvents),
       nextBefore: start > 0 ? String(start) : "",
       liveCursor: String(filtered.length),
+      eventPayload,
     };
+  }
+
+  getTraceEvent(id: string, eventId: string, options: Pick<TracePageOptions, "includeMeta"> = {}): NormalizedEvent {
+    const detail = this.getSessionDetail(id);
+    const includeMeta = options.includeMeta ?? this.config.scan.includeMetaDefault;
+    const found = detail.events.find((event) => event.eventId === eventId);
+    if (!found || (!includeMeta && found.eventKind === "meta")) {
+      throw new Error(`unknown trace event: ${eventId}`);
+    }
+    return found;
   }
 
   resolveId(candidate: string): string {

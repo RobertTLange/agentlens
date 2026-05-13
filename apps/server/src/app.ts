@@ -19,6 +19,7 @@ import type {
   NormalizedEvent,
   OverviewUpdatedLiveEnvelope,
   SessionDetail,
+  TraceEventPayloadMode,
   TraceSummary,
   TraceRemovedLiveEnvelope,
   TraceUpsertLiveEnvelope,
@@ -355,14 +356,31 @@ function resolveTraceFilePathFromToken(encodedPath: string): string {
   return normalizedPath;
 }
 
-function parseTracePageOptions(query: { limit?: string; before?: string; include_meta?: string }): {
+function parseTracePayloadMode(value: string | undefined): TraceEventPayloadMode | undefined {
+  if (value === "compact") return "compact";
+  if (value === "full") return "full";
+  return undefined;
+}
+
+function parseTraceIncludeMeta(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value === "1" || value === "true";
+}
+
+function parseTracePageOptions(query: { limit?: string; before?: string; include_meta?: string; payload?: string }): {
   limit?: number;
   before?: string;
   includeMeta?: boolean;
+  eventPayload?: TraceEventPayloadMode;
 } {
-  const pageOptions: { limit?: number; before?: string; includeMeta?: boolean } = {};
-  if (query.include_meta !== undefined) {
-    pageOptions.includeMeta = query.include_meta === "1" || query.include_meta === "true";
+  const pageOptions: { limit?: number; before?: string; includeMeta?: boolean; eventPayload?: TraceEventPayloadMode } = {};
+  const includeMeta = parseTraceIncludeMeta(query.include_meta);
+  if (includeMeta !== undefined) {
+    pageOptions.includeMeta = includeMeta;
+  }
+  const eventPayload = parseTracePayloadMode(query.payload);
+  if (eventPayload !== undefined) {
+    pageOptions.eventPayload = eventPayload;
   }
   if (query.limit) {
     pageOptions.limit = Number(query.limit);
@@ -400,7 +418,7 @@ function buildAdHocTraceConfig(baseConfig: AppConfig, traceFilePath: string): Ap
 async function loadAdHocTracePage(
   traceIndex: TraceIndex,
   traceFilePath: string,
-  pageOptions: { limit?: number; before?: string; includeMeta?: boolean },
+  pageOptions: { limit?: number; before?: string; includeMeta?: boolean; eventPayload?: TraceEventPayloadMode },
 ) {
   const adHocConfig = buildAdHocTraceConfig(traceIndex.getConfig(), traceFilePath);
   const adHocIndex = new TraceIndex(adHocConfig);
@@ -410,6 +428,22 @@ async function loadAdHocTracePage(
     throw new Error("trace file not parseable");
   }
   return adHocIndex.getTracePage(matchingSummary.id, pageOptions);
+}
+
+async function loadAdHocTraceEvent(
+  traceIndex: TraceIndex,
+  traceFilePath: string,
+  eventId: string,
+  options: { includeMeta?: boolean },
+) {
+  const adHocConfig = buildAdHocTraceConfig(traceIndex.getConfig(), traceFilePath);
+  const adHocIndex = new TraceIndex(adHocConfig);
+  await adHocIndex.refresh();
+  const matchingSummary = adHocIndex.getSummaries().find((summary) => path.resolve(summary.path) === traceFilePath);
+  if (!matchingSummary) {
+    throw new Error("trace file not parseable");
+  }
+  return adHocIndex.getTraceEvent(matchingSummary.id, eventId, options);
 }
 
 function listRecentTraceSummaries(
@@ -2344,7 +2378,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 
   server.get("/api/trace/:id", async (request, reply) => {
     const params = request.params as { id: string };
-    const query = request.query as { limit?: string; before?: string; include_meta?: string };
+    const query = request.query as { limit?: string; before?: string; include_meta?: string; payload?: string };
 
     try {
       const resolvedId = traceIndex.resolveId(params.id);
@@ -2357,8 +2391,23 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     }
   });
 
+  server.get("/api/trace/:id/event/:eventId", async (request, reply) => {
+    const params = request.params as { id: string; eventId: string };
+    const query = request.query as { include_meta?: string };
+    const includeMeta = parseTraceIncludeMeta(query.include_meta);
+
+    try {
+      const resolvedId = traceIndex.resolveId(params.id);
+      const event = traceIndex.getTraceEvent(resolvedId, params.eventId, includeMeta === undefined ? {} : { includeMeta });
+      return { event };
+    } catch (error) {
+      reply.code(404);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   server.get("/api/tracefile", async (request, reply) => {
-    const query = request.query as { path?: string; limit?: string; before?: string; include_meta?: string };
+    const query = request.query as { path?: string; limit?: string; before?: string; include_meta?: string; payload?: string };
 
     try {
       const encodedPath = typeof query.path === "string" ? query.path : "";
@@ -2375,6 +2424,46 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       ) {
         reply.code(400);
       } else if (message === "trace file not found" || message === "trace file path is not a file") {
+        reply.code(404);
+      } else {
+        reply.code(500);
+      }
+      return { error: message };
+    }
+  });
+
+  server.get("/api/tracefile/event", async (request, reply) => {
+    const query = request.query as { path?: string; event_id?: string; include_meta?: string };
+
+    try {
+      const encodedPath = typeof query.path === "string" ? query.path : "";
+      const eventId = typeof query.event_id === "string" ? query.event_id : "";
+      if (!eventId) {
+        reply.code(400);
+        return { error: "event_id is required" };
+      }
+      const traceFilePath = resolveTraceFilePathFromToken(encodedPath);
+      const includeMeta = parseTraceIncludeMeta(query.include_meta);
+      const event = await loadAdHocTraceEvent(
+        traceIndex,
+        traceFilePath,
+        eventId,
+        includeMeta === undefined ? {} : { includeMeta },
+      );
+      return { event };
+    } catch (error) {
+      const message = asErrorMessage(error);
+      if (
+        message === "invalid trace file token" ||
+        message === "invalid trace file path" ||
+        message === "trace file path must be absolute"
+      ) {
+        reply.code(400);
+      } else if (
+        message === "trace file not found" ||
+        message === "trace file path is not a file" ||
+        message.startsWith("unknown trace event:")
+      ) {
         reply.code(404);
       } else {
         reply.code(500);

@@ -5,6 +5,7 @@ import type {
   IndexStartupStatus,
   LiveBatchEnvelope,
   LiveDeltaEnvelope,
+  NormalizedEvent,
   OverviewStats,
   TracePage,
   TraceSummary,
@@ -38,6 +39,8 @@ const CLOCK_TICK_MS = 10_000;
 const TIMELINE_EVENT_INITIAL_RENDER_LIMIT = 240;
 const TIMELINE_EVENT_RENDER_STEP = 240;
 const TIMELINE_EVENT_RENDER_PREFETCH_PX = 320;
+const TRACE_DETAIL_EVENT_LIMIT = 1200;
+const TRACE_DETAIL_PAYLOAD = "compact";
 const TOOL_CALL_TYPES_PER_SUMMARY_ROW = 3;
 const TOOL_CALL_SUMMARY_ROW_LIMIT = 2;
 const RECENT_TRACE_LIMIT = 500;
@@ -61,6 +64,10 @@ const DEFAULT_VISIBLE_EVENT_KINDS: EventKind[] = EVENT_KIND_OPTIONS.filter((kind
 interface OverviewResponse {
   overview: OverviewStats;
   startup: IndexStartupStatus;
+}
+
+interface TraceEventResponse {
+  event: NormalizedEvent;
 }
 
 interface StopTraceResponse {
@@ -409,6 +416,9 @@ export function App(): JSX.Element {
   const [tocQuery, setTocQuery] = useState("");
   const [selectedEventId, setSelectedEventId] = useState("");
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
+  const [expandedEventById, setExpandedEventById] = useState<Record<string, NormalizedEvent>>({});
+  const [loadingExpandedEventIds, setLoadingExpandedEventIds] = useState<Set<string>>(new Set());
+  const [expandedEventErrorById, setExpandedEventErrorById] = useState<Record<string, string>>({});
   const [expandedPathTraceIds, setExpandedPathTraceIds] = useState<Set<string>>(new Set());
   const [autoFollow, setAutoFollow] = useState(true);
   const [timelineSortDirection, setTimelineSortDirection] = useState<TimelineSortDirection>("latest-first");
@@ -1451,6 +1461,31 @@ export function App(): JSX.Element {
         }
         return next;
       });
+      setExpandedEventById((prev) => {
+        if (isTraceChanged) return {};
+        const next: Record<string, NormalizedEvent> = {};
+        for (const [eventId, event] of Object.entries(prev)) {
+          if (eventIds.has(eventId)) next[eventId] = event;
+        }
+        return next;
+      });
+      setExpandedEventErrorById((prev) => {
+        if (isTraceChanged) return {};
+        const next: Record<string, string> = {};
+        for (const [eventId, message] of Object.entries(prev)) {
+          if (eventIds.has(eventId)) next[eventId] = message;
+        }
+        return next;
+      });
+      setLoadingExpandedEventIds((prev) => {
+        if (prev.size === 0) return prev;
+        if (isTraceChanged) return new Set();
+        const next = new Set<string>();
+        for (const eventId of prev) {
+          if (eventIds.has(eventId)) next.add(eventId);
+        }
+        return next;
+      });
       setSelectedEventId((prev) => {
         if (prev && detail.events.some((event) => event.eventId === prev)) {
           return prev;
@@ -1483,8 +1518,8 @@ export function App(): JSX.Element {
       try {
         const detail = await fetchJson<TracePage>(
           isAdHocSelection
-            ? `${API}/api/tracefile?path=${encodeURIComponent(selectedAdHocEncodedPath)}&limit=1200&include_meta=${includeMeta ? "1" : "0"}`
-            : `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=1200&include_meta=${includeMeta ? "1" : "0"}`,
+            ? `${API}/api/tracefile?path=${encodeURIComponent(selectedAdHocEncodedPath)}&limit=${TRACE_DETAIL_EVENT_LIMIT}&include_meta=${includeMeta ? "1" : "0"}&payload=${TRACE_DETAIL_PAYLOAD}`
+            : `${API}/api/trace/${encodeURIComponent(selectedId)}?limit=${TRACE_DETAIL_EVENT_LIMIT}&include_meta=${includeMeta ? "1" : "0"}&payload=${TRACE_DETAIL_PAYLOAD}`,
           { signal: abortController.signal },
         );
         if (abortController.signal.aborted) return;
@@ -1757,13 +1792,57 @@ export function App(): JSX.Element {
     }, 0);
   };
 
+  const loadExpandedEvent = useCallback(
+    async (eventId: string): Promise<void> => {
+      if (!selectedId || expandedEventById[eventId] || loadingExpandedEventIds.has(eventId)) return;
+      setLoadingExpandedEventIds((prev) => {
+        if (prev.has(eventId)) return prev;
+        const next = new Set(prev);
+        next.add(eventId);
+        return next;
+      });
+      setExpandedEventErrorById((prev) => {
+        if (!(eventId in prev)) return prev;
+        const next = { ...prev };
+        delete next[eventId];
+        return next;
+      });
+
+      try {
+        const detail = await fetchJson<TraceEventResponse>(
+          isAdHocTraceSelection(selectedId)
+            ? `${API}/api/tracefile/event?path=${encodeURIComponent(selectedId.slice(AD_HOC_TRACE_ID_PREFIX.length))}&event_id=${encodeURIComponent(eventId)}&include_meta=${includeMeta ? "1" : "0"}`
+            : `${API}/api/trace/${encodeURIComponent(selectedId)}/event/${encodeURIComponent(eventId)}?include_meta=${includeMeta ? "1" : "0"}`,
+        );
+        setExpandedEventById((prev) => ({ ...prev, [eventId]: detail.event }));
+      } catch (error) {
+        setExpandedEventErrorById((prev) => ({
+          ...prev,
+          [eventId]: error instanceof Error ? error.message : String(error),
+        }));
+      } finally {
+        setLoadingExpandedEventIds((prev) => {
+          if (!prev.has(eventId)) return prev;
+          const next = new Set(prev);
+          next.delete(eventId);
+          return next;
+        });
+      }
+    },
+    [expandedEventById, includeMeta, loadingExpandedEventIds, selectedId],
+  );
+
   const toggleExpanded = (eventId: string): void => {
+    const willExpand = !expandedEventIds.has(eventId);
     setExpandedEventIds((prev) => {
       const next = new Set(prev);
       if (next.has(eventId)) next.delete(eventId);
       else next.add(eventId);
       return next;
     });
+    if (willExpand) {
+      void loadExpandedEvent(eventId);
+    }
   };
 
   const toggleTracePathExpanded = (traceId: string): void => {
@@ -2354,6 +2433,9 @@ export function App(): JSX.Element {
                 >
                   {renderedTimelineEvents.map((event) => {
                     const agentBadges = buildAgentBadges(event);
+                    const expandedEvent = expandedEventById[event.eventId] ?? event;
+                    const expandedEventLoading = loadingExpandedEventIds.has(event.eventId);
+                    const expandedEventError = expandedEventErrorById[event.eventId] ?? "";
                     return (
                       <article
                         key={event.eventId}
@@ -2386,7 +2468,14 @@ export function App(): JSX.Element {
                           </div>
                         )}
                         {expandedEventIds.has(event.eventId) && (
-                          <pre className="event-raw-json">{JSON.stringify(event.raw, null, 2)}</pre>
+                          expandedEventLoading && !expandedEventById[event.eventId] ? (
+                            <div className="event-raw-status mono">Loading raw event...</div>
+                          ) : (
+                            <>
+                              {expandedEventError && <div className="event-raw-status mono">{expandedEventError}</div>}
+                              <pre className="event-raw-json">{JSON.stringify(expandedEvent.raw, null, 2)}</pre>
+                            </>
+                          )
                         )}
                       </article>
                     );

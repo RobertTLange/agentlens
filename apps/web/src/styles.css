@@ -2879,6 +2879,12 @@ body {
   max-width: 100%;
 }
 
+.event-raw-status {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .subtle {
   color: var(--muted);
   min-width: 0;
