@@ -24,6 +24,7 @@ import {
 } from "./view-model.js";
 import { SessionTraceRow } from "./SessionTraceRow.js";
 import { ActivityView } from "./ActivityView.js";
+import { SummariesView } from "./SummariesView.js";
 import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
@@ -405,7 +406,7 @@ export function App(): JSX.Element {
   const [flashStatus, setFlashStatus] = useState("");
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
-  const [activeView, setActiveView] = useState<"inspector" | "activity">("inspector");
+  const [activeView, setActiveView] = useState<"inspector" | "activity" | "summaries">("inspector");
   const [selectedHeatmapMetric, setSelectedHeatmapMetric] = useState<ActivityHeatmapMetric | null>(null);
   const [selectedHeatmapColor, setSelectedHeatmapColor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -2140,6 +2141,15 @@ export function App(): JSX.Element {
               >
                 Activity
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeView === "summaries"}
+                className={`mono hero-view-button ${activeView === "summaries" ? "active" : ""}`}
+                onClick={() => setActiveView("summaries")}
+              >
+                Summaries
+              </button>
             </div>
             <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
               <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -2493,7 +2503,7 @@ export function App(): JSX.Element {
         </section>
       </div>
     </>
-      ) : (
+      ) : activeView === "activity" ? (
         <ActivityView
           startup={startup}
           traceAgentById={traceAgentById}
@@ -2502,6 +2512,13 @@ export function App(): JSX.Element {
           selectedHeatmapColor={selectedHeatmapColor}
           onSelectHeatmapMetric={setSelectedHeatmapMetric}
           onSelectHeatmapColor={setSelectedHeatmapColor}
+          onInspectTrace={(traceId) => {
+            setSelectedId(traceId);
+            setActiveView("inspector");
+          }}
+        />
+      ) : (
+        <SummariesView
           onInspectTrace={(traceId) => {
             setSelectedId(traceId);
             setActiveView("inspector");

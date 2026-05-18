@@ -10,6 +10,8 @@ import type {
   EventKind,
   NormalizedEvent,
   OverviewStats,
+  RagIndexStatus,
+  RagSummaryRecord,
   TraceIndexStartupState,
   TracePage,
   TraceSummary,
@@ -134,6 +136,57 @@ function makeTrace(
       compaction: 0,
       meta: 0,
     },
+  };
+}
+
+function makeRagStatus(): RagIndexStatus {
+  return {
+    enabled: true,
+    dbPath: "/tmp/rag.db",
+    daemon: { running: true, pid: 123, pidPath: "/tmp/rag.pid", logPath: "/tmp/rag.log" },
+    sessions: { total: 1, complete: 1, pending: 0, stale: 0, failed: 0, skipped: 0 },
+    documents: 2,
+    embeddings: { status: "unavailable", model: "sentence-transformers/all-MiniLM-L6-v2", dimension: null, count: 0 },
+    lastRunAtMs: 1_700_000_000_000,
+    lastRunError: "",
+  };
+}
+
+function makeRagSummary(traceId = "trace-a"): RagSummaryRecord {
+  return {
+    traceId,
+    sessionId: `session-${traceId}`,
+    agent: "codex",
+    parser: "codex",
+    sourceProfile: "session_log",
+    path: `/tmp/${traceId}.jsonl`,
+    firstEventTs: 1_000,
+    lastEventTs: 2_000,
+    mtimeMs: 2_000,
+    sizeBytes: 100,
+    eventCount: 2,
+    fingerprint: "fingerprint",
+    status: "complete",
+    skipReason: "",
+    error: "",
+    summary: {
+      title: "Parser regression",
+      userGoal: "Find prior failed tests",
+      outcome: "Parser behavior fixed",
+      keySteps: ["Opened trace", "Ran tests"],
+      filesOrProjects: ["packages/core"],
+      toolsUsed: ["vitest"],
+      errorsOrBlockers: ["failed test"],
+      decisions: ["Keep lexical fallback"],
+      workflowObservations: ["Search found prior work"],
+      followups: ["Watch CI"],
+      searchKeywords: ["parser", "failed test"],
+    },
+    summaryText: "Parser regression failed test packages/core",
+    summaryModel: "fake",
+    summaryGeneratedAtMs: 3_000,
+    createdAtMs: 3_000,
+    updatedAtMs: 3_000,
   };
 }
 
@@ -944,6 +997,39 @@ beforeEach(() => {
         const resolvedColor = color || activityWeek.presentation.color;
         return new Response(JSON.stringify({ activity: weekForMetricAndColor(activityWeek, resolvedMetric, resolvedColor) }), { status: 200 });
       }
+      if (url.includes("/api/rag/status")) {
+        return new Response(JSON.stringify(makeRagStatus()), { status: 200 });
+      }
+      if (url.includes("/api/rag/search")) {
+        const summary = makeRagSummary("trace-a");
+        return new Response(
+          JSON.stringify({
+            query: "parser",
+            mode: "lexical",
+            embeddings: makeRagStatus().embeddings,
+            results: [
+              {
+                traceId: summary.traceId,
+                sessionId: summary.sessionId,
+                agent: summary.agent,
+                path: summary.path,
+                title: summary.summary?.title,
+                userGoal: summary.summary?.userGoal,
+                outcome: summary.summary?.outcome,
+                updatedAtMs: summary.updatedAtMs,
+                summaryGeneratedAtMs: summary.summaryGeneratedAtMs,
+                score: 0.5,
+                matchedKinds: ["summary"],
+                snippets: ["failed test parser"],
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/api/rag/summaries")) {
+        return new Response(JSON.stringify({ summaries: [makeRagSummary("trace-a")] }), { status: 200 });
+      }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
         const custom = stopResponsesByTraceId[traceId];
@@ -1046,6 +1132,26 @@ describe("App sessions list live motion", () => {
       "https://github.com/RobertTLange/agentlens",
     );
     expect(document.querySelector("footer")).toBeNull();
+  });
+
+  it("opens the Summaries tab, searches, renders detail, and navigates to Inspector", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelector(".rag-view")).toBeTruthy());
+    await waitFor(() => expect(document.body.textContent).toContain("Parser regression"));
+
+    const searchInput = document.querySelector(".rag-search") as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "parser" } });
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/search"))).toBe(true));
+    expect(document.body.textContent).toContain("Parser behavior fixed");
+
+    fireEvent.click(document.querySelector(".rag-detail-head button") as HTMLButtonElement);
+    await waitFor(() => expect(document.body.textContent).toContain("Trace Inspector"));
   });
 
   it("requests compact trace pages for the inspector", async () => {

@@ -4,10 +4,17 @@ import { Command } from "commander";
 import type { AppConfig, NamedCount, TraceSummary } from "@agentlens/contracts";
 import {
   DEFAULT_CONFIG_PATH,
+  getRagStatus,
+  getRagSummary,
   loadConfig,
   loadSnapshot,
   mergeConfig,
+  runRagIndexOnce,
+  runRagWorker,
+  searchRag,
   saveConfig,
+  startRagDaemon,
+  stopRagDaemon,
   toMsWindow,
   TraceIndex,
 } from "@agentlens/core";
@@ -19,6 +26,8 @@ const cliPackageJson = require("../package.json") as { version: string };
 const LATEST_KEYWORD = "latest";
 const DEFAULT_HISTORY_LIMIT = 50;
 const STATUS_ORDER: TraceSummary["activityStatus"][] = ["running", "waiting_input", "idle"];
+const AGENT_KINDS = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"] as const;
+const SEARCH_MODES = ["hybrid", "lexical", "semantic"] as const;
 
 function printTable(rows: string[][]): void {
   if (rows.length === 0) return;
@@ -65,6 +74,35 @@ function pathTail(inputPath: string): string {
 
 function normalizeInlineText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function parseLimitOption(value: string | undefined, fallback: number, max = 5000): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(1, Math.min(max, parsed));
+}
+
+function parseAgentOption(value: string | undefined): (typeof AGENT_KINDS)[number] | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  const found = AGENT_KINDS.find((agent) => agent === normalized);
+  if (!found) throw new Error(`unsupported agent: ${value}`);
+  return found;
+}
+
+function parseSearchMode(value: string | undefined): (typeof SEARCH_MODES)[number] {
+  if (!value) return "hybrid";
+  const normalized = value.trim().toLowerCase();
+  const found = SEARCH_MODES.find((mode) => mode === normalized);
+  if (!found) throw new Error(`unsupported search mode: ${value}`);
+  return found;
+}
+
+function assertValidSince(value: string | undefined): void {
+  if (!value) return;
+  if (toMsWindow(value) <= 0) {
+    throw new Error(`unsupported window: ${value}`);
+  }
 }
 
 function fmtPct(count: number, total: number): string {
@@ -708,6 +746,200 @@ configCmd.command("set <key> <value>").action(async (key: string, value: string)
   await saveConfig(merged, configPath);
   console.log(`updated ${key}`);
 });
+
+const rag = program.command("rag").description("Persistent RAG summaries and search");
+
+rag
+  .command("index")
+  .option("--once", "Run one indexing pass")
+  .option("--limit <n>", "Maximum traces to summarize")
+  .option("--force", "Refresh even when fingerprints match")
+  .option("--force-large", "Allow prompts over rag.summaryMaxPromptBytes")
+  .option("--lexical-only", "Skip embedding refresh")
+  .option("--json", "JSON output")
+  .action(
+    async (opts: { once?: boolean; limit?: string; force?: boolean; forceLarge?: boolean; lexicalOnly?: boolean; json?: boolean }) => {
+      if (!opts.once) {
+        throw new Error("rag index currently requires --once");
+      }
+      const config = await loadConfig(program.opts<{ config: string }>().config);
+      const result = await runRagIndexOnce(config, {
+        once: true,
+        ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+        ...(opts.force !== undefined ? { force: opts.force } : {}),
+        ...(opts.forceLarge !== undefined ? { forceLarge: opts.forceLarge } : {}),
+        ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      printTable([
+        ["db", "discovered", "eligible", "summarized", "skipped", "failed", "documents", "embeddings"],
+        [
+          result.dbPath,
+          String(result.discoveredTraces),
+          String(result.quietEligibleTraces),
+          String(result.summarized),
+          String(result.skipped),
+          String(result.failed),
+          String(result.lexicalDocumentCount),
+          result.embeddingStatus.status,
+        ],
+      ]);
+      if (result.lastError) console.log(`last_error: ${result.lastError}`);
+    },
+  );
+
+rag
+  .command("watch")
+  .option("--interval <window>", "Foreground interval override")
+  .option("--limit <n>", "Maximum traces per pass")
+  .option("--foreground", "Run inline")
+  .option("--json", "JSON output")
+  .action(async (opts: { interval?: string; limit?: string; foreground?: boolean; json?: boolean }) => {
+    const configPath = program.opts<{ config: string }>().config;
+    const config = await loadConfig(configPath);
+    if (opts.foreground) {
+      const intervalMs = opts.interval ? toMsWindow(opts.interval) : config.rag.workerIntervalMs;
+      if (opts.interval && intervalMs <= 0) throw new Error(`unsupported interval: ${opts.interval}`);
+      do {
+        const result = await runRagIndexOnce(config, {
+          ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+        });
+        if (opts.json) console.log(JSON.stringify(result));
+        else console.log(`rag pass: summarized=${result.summarized} skipped=${result.skipped} failed=${result.failed}`);
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      } while (true);
+    }
+    const daemon = startRagDaemon(configPath, config);
+    if (opts.json) {
+      console.log(JSON.stringify(daemon, null, 2));
+      return;
+    }
+    console.log(daemon.reused ? `RAG worker already running: ${daemon.pid}` : `RAG worker started: ${daemon.pid}`);
+    console.log(`PID file: ${daemon.pidPath}`);
+    console.log(`Log file: ${daemon.logPath}`);
+  });
+
+rag
+  .command("worker")
+  .option("--foreground", "Run worker loop in foreground")
+  .option("--limit <n>", "Maximum traces per pass")
+  .option("--lexical-only", "Skip embedding refresh")
+  .action(async (opts: { foreground?: boolean; limit?: string; lexicalOnly?: boolean }) => {
+    if (!opts.foreground) throw new Error("rag worker is internal; use rag watch");
+    await runRagWorker(program.opts<{ config: string }>().config, {
+      ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+      ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
+    });
+  });
+
+rag.command("status").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const status = await getRagStatus(config);
+  if (opts.json) {
+    console.log(JSON.stringify(status, null, 2));
+    return;
+  }
+  printTable([
+    ["enabled", "db", "daemon", "complete", "stale", "failed", "skipped", "docs", "embeddings", "last_run"],
+    [
+      String(status.enabled),
+      status.dbPath,
+      status.daemon.running ? `running:${status.daemon.pid ?? "-"}` : "stopped",
+      String(status.sessions.complete),
+      String(status.sessions.stale),
+      String(status.sessions.failed),
+      String(status.sessions.skipped),
+      String(status.documents),
+      status.embeddings.status,
+      fmtTimeCompact(status.lastRunAtMs),
+    ],
+  ]);
+  if (status.lastRunError) console.log(`last_error: ${status.lastRunError}`);
+});
+
+rag.command("stop").action(async () => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const result = stopRagDaemon(config);
+  if (result.stopped) console.log(`stopped RAG worker: ${result.pid}`);
+  else if (result.stale) console.log(`removed stale RAG worker PID: ${result.pid}`);
+  else console.log("RAG worker is not running");
+});
+
+rag.command("summary <trace_id>").option("--json", "JSON output").action(async (traceId: string, opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const summary = await getRagSummary(config, traceId);
+  if (!summary) throw new Error(`unknown RAG summary: ${traceId}`);
+  if (opts.json) {
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+  printTable([
+    ["trace", "agent", "status", "title", "outcome"],
+    [summary.traceId, summary.agent, summary.status, summary.summary?.title ?? "-", summary.summary?.outcome ?? "-"],
+  ]);
+});
+
+program
+  .command("search <query>")
+  .option("--mode <mode>", "Search mode: hybrid, lexical, semantic", "hybrid")
+  .option("--limit <n>", "Rows to show", "20")
+  .option("--agent <name>", "Filter by agent")
+  .option("--since <window>", "Filter by recency window")
+  .option("--json", "JSON output")
+  .option("--llm", "Deterministic output for LLM agents")
+  .action(async (query: string, opts: { mode?: string; limit?: string; agent?: string; since?: string; json?: boolean; llm?: boolean }) => {
+    assertValidSince(opts.since);
+    const config = await loadConfig(program.opts<{ config: string }>().config);
+    const agent = parseAgentOption(opts.agent);
+    const response = await searchRag(config, {
+      query,
+      mode: parseSearchMode(opts.mode),
+      limit: parseLimitOption(opts.limit, 20, 100),
+      ...(agent ? { agent } : {}),
+      ...(opts.since ? { since: opts.since } : {}),
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(response, null, 2));
+      return;
+    }
+    if (opts.llm) {
+      printNamedTable(
+        "results",
+        [
+          ["rank", "score", "agent", "trace_id", "title", "outcome", "next_calls"],
+          ...response.results.map((result, index) => [
+            String(index + 1),
+            result.score.toFixed(6),
+            result.agent,
+            result.traceId,
+            normalizeInlineText(result.title),
+            normalizeInlineText(result.outcome),
+            [
+              `agentlens session ${result.traceId} --llm`,
+              `agentlens sessions events ${result.traceId} --llm --limit 200`,
+              `agentlens rag summary ${result.traceId} --json`,
+            ].join(" ; "),
+          ]),
+        ],
+        { llm: true },
+      );
+      return;
+    }
+    printTable([
+      ["rank", "score", "agent", "trace", "title", "outcome"],
+      ...response.results.map((result, index) => [
+        String(index + 1),
+        result.score.toFixed(4),
+        result.agent,
+        result.traceId,
+        normalizeInlineText(result.title),
+        normalizeInlineText(result.outcome),
+      ]),
+    ]);
+  });
 
 program.action(async () => {
   const opts = program.opts<{ browser?: boolean; config: string; host: string; port: string }>();

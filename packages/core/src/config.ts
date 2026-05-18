@@ -45,7 +45,10 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
   return merged;
 }
 
-export type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
+export type PartialAppConfigInput = Omit<Partial<AppConfig>, "rag"> & {
+  rag?: Partial<RagConfig>;
+  sessionJsonlDirectories?: string[];
+};
 
 function isAgentKind(value: string): value is AgentKind {
   return (

@@ -2,8 +2,14 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
-import type { ActivityHydrationProgress, AgentActivityWeek, AgentActivityYear, IndexStartupStatus } from "@agentlens/contracts";
+import { buildRagCorpus, mergeConfig, RagStore, saveConfig, TraceIndex } from "@agentlens/core";
+import type {
+  ActivityHydrationProgress,
+  AgentActivityWeek,
+  AgentActivityYear,
+  IndexStartupStatus,
+  RagTraceSummaryContent,
+} from "@agentlens/contracts";
 import {
   buildLiveBatchEnvelope,
   createServer,
@@ -102,6 +108,12 @@ async function buildFixtureWithTraceCount(
       statusWaitingTtlMs: 300_000,
     },
     sessionLogDirectories: [],
+    rag: {
+      dbPath: path.join(root, "rag.db"),
+      daemonPidPath: path.join(root, "rag.pid"),
+      daemonLogPath: path.join(root, "rag.log"),
+      embeddingBackend: "disabled",
+    },
     cost: {
       enabled: true,
       currency: "USD",
@@ -168,6 +180,42 @@ async function buildFixture(): Promise<{ configPath: string; index: TraceIndex; 
     index: fixture.index,
     sessionId,
   };
+}
+
+function ragSummaryContent(): RagTraceSummaryContent {
+  return {
+    title: "Parser regression",
+    userGoal: "Find failed test history",
+    outcome: "Fixed parser behavior",
+    keySteps: ["Indexed trace", "Searched summary"],
+    filesOrProjects: ["packages/core"],
+    toolsUsed: ["vitest"],
+    errorsOrBlockers: ["failed test"],
+    decisions: [],
+    workflowObservations: [],
+    followups: [],
+    searchKeywords: ["parser", "failed test"],
+  };
+}
+
+function seedRagSummary(index: TraceIndex): string {
+  const detail = index.getSessionDetail(index.getSummaries()[0]?.id ?? "");
+  const content = ragSummaryContent();
+  const corpus = buildRagCorpus(detail, content);
+  const store = new RagStore(index.getConfig());
+  store.upsertSession({
+    summary: detail.summary,
+    fingerprint: corpus.fingerprint,
+    status: "complete",
+    content,
+    summaryText: corpus.summaryText,
+    summaryModel: "fake",
+    summaryGeneratedAtMs: 1,
+    nowMs: 2,
+  });
+  store.replaceDocuments(detail.summary.id, corpus.documents, 3);
+  store.close();
+  return detail.summary.id;
 }
 
 async function buildFixtureWithCustomTrace(
@@ -1899,6 +1947,36 @@ describe("server api", () => {
       startSpy.mockRestore();
       startupSpy.mockRestore();
     }
+  });
+
+  it("serves RAG status, summaries, search, and 404 summary lookups", async () => {
+    const fixture = await buildFixture();
+    const traceId = seedRagSummary(fixture.index);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const status = await server.inject({ method: "GET", url: "/api/rag/status" });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({ enabled: true, sessions: { complete: 1 } });
+
+    const summaries = await server.inject({ method: "GET", url: "/api/rag/summaries?status=complete&agent=codex" });
+    expect(summaries.statusCode).toBe(200);
+    expect(summaries.json().summaries[0]).toMatchObject({ traceId, status: "complete" });
+
+    const search = await server.inject({ method: "GET", url: "/api/rag/search?q=parser&mode=lexical&limit=5" });
+    expect(search.statusCode).toBe(200);
+    expect(search.json().results[0]).toMatchObject({ traceId, title: "Parser regression" });
+
+    const invalid = await server.inject({ method: "GET", url: "/api/rag/search?q=parser&mode=bad" });
+    expect(invalid.statusCode).toBe(400);
+
+    const missing = await server.inject({ method: "GET", url: "/api/rag/summaries/missing" });
+    expect(missing.statusCode).toBe(404);
+
+    await server.close();
   });
 
   it("serves partial overview and warming activity while background hydration continues", async () => {
