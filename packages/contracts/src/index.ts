@@ -17,6 +17,10 @@ export type CostUnknownModelPolicy = "n_a" | "zero";
 export type ScanMode = "adaptive" | "fixed";
 export type RetentionStrategy = "aggressive_recency" | "full_memory";
 export type ResidentTier = "hot" | "warm" | "cold";
+export type RagSearchMode = "hybrid" | "lexical" | "semantic";
+export type RagDocumentKind = "summary" | "trace";
+export type RagRefreshStatus = "pending" | "running" | "complete" | "stale" | "failed" | "skipped";
+export type RagEmbeddingStatus = "ready" | "missing" | "dirty" | "unavailable" | "disabled";
 
 export interface ScanConfig {
   mode: ScanMode;
@@ -108,6 +112,28 @@ export interface ModelsConfig {
   contextWindows: ModelContextWindow[];
 }
 
+export interface RagConfig {
+  enabled: boolean;
+  dbPath: string;
+  quietPeriodMs: number;
+  workerIntervalMs: number;
+  daemonPidPath: string;
+  daemonLogPath: string;
+  headlessExecutable: string;
+  summaryAgent: string;
+  summaryModel: string;
+  summaryReasoningEffort: string;
+  summaryPermissionMode: string;
+  summaryTimeoutMs: number;
+  summaryMaxPromptBytes: number;
+  embeddingBackend: "local" | "disabled";
+  embeddingModel: string;
+  modelCacheDir: string;
+  embeddingBatchSize: number;
+  searchCandidateMultiplier: number;
+  rrfK: number;
+}
+
 export interface TokenTotals {
   inputTokens: number;
   cachedReadTokens: number;
@@ -149,6 +175,7 @@ export interface AppConfig {
   pricingSync: PricingSyncConfig;
   cost: CostConfig;
   models: ModelsConfig;
+  rag: RagConfig;
 }
 
 export interface NormalizedEvent {
@@ -220,6 +247,89 @@ export interface TraceSummary {
 export interface SessionDetail {
   summary: TraceSummary;
   events: NormalizedEvent[];
+}
+
+export interface RagTraceSummaryContent {
+  title: string;
+  userGoal: string;
+  outcome: string;
+  keySteps: string[];
+  filesOrProjects: string[];
+  toolsUsed: string[];
+  errorsOrBlockers: string[];
+  decisions: string[];
+  workflowObservations: string[];
+  followups: string[];
+  searchKeywords: string[];
+}
+
+export interface RagSummaryRecord {
+  traceId: string;
+  sessionId: string;
+  agent: AgentKind;
+  parser: string;
+  sourceProfile: string;
+  path: string;
+  firstEventTs: number | null;
+  lastEventTs: number | null;
+  mtimeMs: number;
+  sizeBytes: number;
+  eventCount: number;
+  fingerprint: string;
+  status: RagRefreshStatus;
+  skipReason: string;
+  error: string;
+  summary: RagTraceSummaryContent | null;
+  summaryText: string;
+  summaryModel: string;
+  summaryGeneratedAtMs: number | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface RagSearchResult {
+  traceId: string;
+  sessionId: string;
+  agent: AgentKind;
+  path: string;
+  title: string;
+  userGoal: string;
+  outcome: string;
+  updatedAtMs: number;
+  summaryGeneratedAtMs: number | null;
+  score: number;
+  lexicalRank?: number;
+  semanticRank?: number;
+  matchedKinds: RagDocumentKind[];
+  snippets: string[];
+}
+
+export interface RagIndexStatus {
+  enabled: boolean;
+  dbPath: string;
+  daemon: { running: boolean; pid: number | null; pidPath: string; logPath: string };
+  sessions: { total: number; complete: number; pending: number; stale: number; failed: number; skipped: number };
+  documents: number;
+  embeddings: {
+    status: RagEmbeddingStatus;
+    model: string;
+    dimension: number | null;
+    count: number;
+    error?: string;
+  };
+  lastRunAtMs: number | null;
+  lastRunError: string;
+}
+
+export interface RagSearchResponse {
+  query: string;
+  mode: RagSearchMode;
+  results: RagSearchResult[];
+  embeddings: RagIndexStatus["embeddings"];
+}
+
+export interface RagSummaryListResponse {
+  summaries: RagSummaryRecord[];
 }
 
 export interface TraceTocItem {

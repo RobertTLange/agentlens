@@ -28,6 +28,7 @@ agentlens config set scan.includeMetaDefault true
 - `[traceInspector]`: UI defaults for trace inspector behavior
 - `[redaction]`: key/value redaction rules
 - `[pricingSync]`: live pricing refresh behavior for `agentlens --browser`
+- `[rag]`: local quiet-trace summaries, SQLite storage, Headless summarization, and hybrid search
 - `[cost]`: model pricing tables + estimation policy
 - `[models]`: context window defaults/overrides
 
@@ -59,6 +60,31 @@ timeoutMs = 5000
 - `enabled`: turn launch-time pricing refresh on or off
 - `ttlMs`: how long a fetched pricing cache stays fresh
 - `timeoutMs`: maximum time to wait for `models.dev` before falling back to cached or bundled defaults
+
+## RAG Summaries
+
+AgentLens can derive a persistent local RAG index from redacted normalized traces. The worker only summarizes traces that have been quiet for at least `quietPeriodMs`; active traces remain available through the live Inspector APIs until they age out.
+
+```toml
+[rag]
+enabled = true
+dbPath = "~/.agentlens/rag.db"
+quietPeriodMs = 14400000
+workerIntervalMs = 300000
+daemonPidPath = "~/.agentlens/rag-worker.pid"
+daemonLogPath = "~/.agentlens/logs/rag-worker.log"
+headlessExecutable = "headless"
+summaryAgent = "codex"
+summaryReasoningEffort = "medium"
+summaryPermissionMode = "read-only"
+summaryTimeoutMs = 600000
+summaryMaxPromptBytes = 1500000
+embeddingBackend = "local"
+embeddingModel = "sentence-transformers/all-MiniLM-L6-v2"
+modelCacheDir = "~/.agentlens/models"
+```
+
+Summaries, trace chunks, and embeddings are stored locally. They are built from AgentLens-redacted normalized events, but may still contain sensitive workflow context such as filenames, decisions, errors, and followups. Lexical search works without the local embedding model; semantic and hybrid ranking become available when the model can be loaded from cache or downloaded by the Hugging Face runtime.
 
 ## Practical Scan Settings
 
