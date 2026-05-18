@@ -812,7 +812,12 @@ rag
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       } while (true);
     }
-    const daemon = startRagDaemon(configPath, config);
+    const intervalMs = opts.interval ? toMsWindow(opts.interval) : undefined;
+    if (opts.interval && (!intervalMs || intervalMs <= 0)) throw new Error(`unsupported interval: ${opts.interval}`);
+    const daemon = startRagDaemon(configPath, config, {
+      ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+      ...(intervalMs !== undefined ? { intervalMs } : {}),
+    });
     if (opts.json) {
       console.log(JSON.stringify(daemon, null, 2));
       return;
@@ -826,11 +831,14 @@ rag
   .command("worker")
   .option("--foreground", "Run worker loop in foreground")
   .option("--limit <n>", "Maximum traces per pass")
+  .option("--interval-ms <n>", "Internal worker interval override in milliseconds")
   .option("--lexical-only", "Skip embedding refresh")
-  .action(async (opts: { foreground?: boolean; limit?: string; lexicalOnly?: boolean }) => {
+  .action(async (opts: { foreground?: boolean; limit?: string; intervalMs?: string; lexicalOnly?: boolean }) => {
     if (!opts.foreground) throw new Error("rag worker is internal; use rag watch");
+    const intervalMs = opts.intervalMs ? parseLimitOption(opts.intervalMs, 0, Number.MAX_SAFE_INTEGER) : undefined;
     await runRagWorker(program.opts<{ config: string }>().config, {
       ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+      ...(intervalMs !== undefined ? { intervalMs } : {}),
       ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
     });
   });

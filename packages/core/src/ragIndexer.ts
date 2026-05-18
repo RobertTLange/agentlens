@@ -295,7 +295,10 @@ export async function getRagSummary(config: AppConfig, traceId: string): Promise
   }
 }
 
-export async function runRagWorker(configPath: string, options: { once?: boolean; limit?: number; lexicalOnly?: boolean } = {}): Promise<void> {
+export async function runRagWorker(
+  configPath: string,
+  options: { once?: boolean; limit?: number; lexicalOnly?: boolean; intervalMs?: number } = {},
+): Promise<void> {
   do {
     const config = await loadConfig(configPath);
     await runRagIndexOnce(config, {
@@ -303,11 +306,15 @@ export async function runRagWorker(configPath: string, options: { once?: boolean
       ...(options.lexicalOnly !== undefined ? { lexicalOnly: options.lexicalOnly } : {}),
     });
     if (options.once) break;
-    await new Promise((resolve) => setTimeout(resolve, config.rag.workerIntervalMs));
+    await new Promise((resolve) => setTimeout(resolve, options.intervalMs ?? config.rag.workerIntervalMs));
   } while (true);
 }
 
-export function startRagDaemon(configPath: string, config: AppConfig): { reused: boolean; pid: number; pidPath: string; logPath: string } {
+export function startRagDaemon(
+  configPath: string,
+  config: AppConfig,
+  options: { limit?: number; intervalMs?: number } = {},
+): { reused: boolean; pid: number; pidPath: string; logPath: string } {
   const pidPath = path.resolve(expandHome(config.rag.daemonPidPath));
   const logPath = path.resolve(expandHome(config.rag.daemonLogPath));
   mkdirSync(path.dirname(pidPath), { recursive: true });
@@ -317,7 +324,10 @@ export function startRagDaemon(configPath: string, config: AppConfig): { reused:
     return { reused: true, pid: existingPid, pidPath, logPath };
   }
   const out = openSync(logPath, "a");
-  const child = spawn(process.execPath, [process.argv[1] ?? "", "--config", configPath, "rag", "worker", "--foreground"], {
+  const workerArgs = [process.argv[1] ?? "", "--config", configPath, "rag", "worker", "--foreground"];
+  if (options.limit !== undefined) workerArgs.push("--limit", String(options.limit));
+  if (options.intervalMs !== undefined) workerArgs.push("--interval-ms", String(options.intervalMs));
+  const child = spawn(process.execPath, workerArgs, {
     detached: true,
     stdio: ["ignore", out, out],
     shell: false,
