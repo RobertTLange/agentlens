@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, openSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import type {
@@ -20,6 +20,13 @@ import { buildPromptInput, buildRagCorpus } from "./ragCorpus.js";
 import { createEmbeddingProvider, unavailableEmbeddingStatus, type EmbeddingProvider } from "./ragEmbeddings.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
 import { missingRagStatus, RagStore } from "./ragStore.js";
+import {
+  isLiveRagDaemon,
+  RAG_DAEMON_COMMAND,
+  readPidValue,
+  readRagDaemonPidFile,
+  type RagDaemonPidFile,
+} from "./ragStoreHelpers.js";
 
 export interface RagIndexOptions {
   once?: boolean;
@@ -118,24 +125,9 @@ function internalSummarySessionIdsFromError(error: unknown): string[] {
   return typeof single === "string" && single.trim() ? [single.trim()] : [];
 }
 
-function pidIsRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function ragWorkerNodeOptions(current = process.env.NODE_OPTIONS ?? ""): string {
   if (/--max[-_]old[-_]space[-_]size(?:=|\s|$)/.test(current)) return current;
   return [current.trim(), `--max-old-space-size=${DEFAULT_RAG_WORKER_HEAP_MB}`].filter(Boolean).join(" ");
-}
-
-function readPid(pidPath: string): number | null {
-  if (!existsSync(pidPath)) return null;
-  const pid = Number.parseInt(readFileSync(pidPath, "utf8").trim(), 10);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 async function embedChangedDocuments(
@@ -447,9 +439,9 @@ export function startRagDaemon(
   const logPath = path.resolve(expandHome(config.rag.daemonLogPath));
   mkdirSync(path.dirname(pidPath), { recursive: true });
   mkdirSync(path.dirname(logPath), { recursive: true });
-  const existingPid = readPid(pidPath);
-  if (existingPid && pidIsRunning(existingPid)) {
-    return { reused: true, pid: existingPid, pidPath, logPath };
+  const existing = readRagDaemonPidFile(pidPath);
+  if (existing && isLiveRagDaemon(existing)) {
+    return { reused: true, pid: existing.pid, pidPath, logPath };
   }
   const out = openSync(logPath, "a");
   const workerArgs = [process.argv[1] ?? "", "--config", configPath, "rag", "worker", "--foreground"];
@@ -468,17 +460,25 @@ export function startRagDaemon(
   });
   child.unref();
   closeSync(out);
-  writeFileSync(pidPath, String(child.pid ?? 0), "utf8");
+  const metadata: RagDaemonPidFile = {
+    command: RAG_DAEMON_COMMAND,
+    pid: child.pid ?? 0,
+    argv: [process.execPath, ...workerArgs],
+    configPath,
+    startedAtMs: Date.now(),
+  };
+  writeFileSync(pidPath, JSON.stringify(metadata, null, 2) + "\n", "utf8");
   return { reused: false, pid: child.pid ?? 0, pidPath, logPath };
 }
 
 export function stopRagDaemon(config: AppConfig): { stopped: boolean; stale: boolean; pid: number | null } {
   const pidPath = path.resolve(expandHome(config.rag.daemonPidPath));
-  const pid = readPid(pidPath);
+  const pid = readPidValue(pidPath);
   if (!pid) {
     return { stopped: false, stale: false, pid: null };
   }
-  if (!pidIsRunning(pid)) {
+  const metadata = readRagDaemonPidFile(pidPath);
+  if (!metadata || !isLiveRagDaemon(metadata)) {
     unlinkSync(pidPath);
     return { stopped: false, stale: true, pid };
   }

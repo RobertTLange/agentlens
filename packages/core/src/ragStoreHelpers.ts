@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import type {
   AgentKind,
@@ -34,6 +35,16 @@ export interface RagSessionRow {
   updated_at_ms: number;
 }
 
+export interface RagDaemonPidFile {
+  command: "agentlens-rag-worker";
+  pid: number;
+  argv: string[];
+  configPath: string;
+  startedAtMs: number;
+}
+
+export const RAG_DAEMON_COMMAND = "agentlens-rag-worker";
+
 export function dbPathFromConfig(config: AppConfig): string {
   return path.resolve(expandHome(config.rag.dbPath));
 }
@@ -49,10 +60,59 @@ export function pidIsRunning(pid: number): boolean {
 }
 
 export function readDaemonPid(pidPath: string): number | null {
+  const metadata = readRagDaemonPidFile(pidPath);
+  return metadata && isLiveRagDaemon(metadata) ? metadata.pid : null;
+}
+
+export function readPidValue(pidPath: string): number | null {
   const resolved = path.resolve(expandHome(pidPath));
   if (!existsSync(resolved)) return null;
-  const pid = Number.parseInt(readFileSync(resolved, "utf8").trim(), 10);
+  const raw = readFileSync(resolved, "utf8").trim();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const pid = (parsed as { pid?: unknown }).pid;
+      return typeof pid === "number" && Number.isInteger(pid) && pid > 0 ? pid : null;
+    }
+  } catch {
+    // Fall through to the legacy numeric PID format.
+  }
+  const pid = Number.parseInt(raw, 10);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+export function readRagDaemonPidFile(pidPath: string): RagDaemonPidFile | null {
+  const resolved = path.resolve(expandHome(pidPath));
+  if (!existsSync(resolved)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(resolved, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const record = parsed as Partial<RagDaemonPidFile>;
+    if (record.command !== RAG_DAEMON_COMMAND) return null;
+    if (!Number.isInteger(record.pid) || (record.pid ?? 0) <= 0) return null;
+    if (!Array.isArray(record.argv) || !record.argv.every((value) => typeof value === "string")) return null;
+    if (typeof record.configPath !== "string" || !record.configPath.trim()) return null;
+    if (!Number.isFinite(record.startedAtMs)) return null;
+    return record as RagDaemonPidFile;
+  } catch {
+    return null;
+  }
+}
+
+export function isLiveRagDaemon(metadata: RagDaemonPidFile): boolean {
+  return pidIsRunning(metadata.pid) && processLooksLikeRagWorker(metadata.pid);
+}
+
+function processLooksLikeRagWorker(pid: number): boolean {
+  try {
+    const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return /\brag\b/.test(command) && /\bworker\b/.test(command) && command.includes("--foreground");
+  } catch {
+    return false;
+  }
 }
 
 function deserializeSummary(value: string | null): RagTraceSummaryContent | null {

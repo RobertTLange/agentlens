@@ -6,9 +6,10 @@ import type { NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@age
 import { mergeConfig, saveConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
-import { ragWorkerNodeOptions, runRagIndexOnce, runRagWorker } from "./ragIndexer.js";
+import { ragWorkerNodeOptions, runRagIndexOnce, runRagWorker, stopRagDaemon } from "./ragIndexer.js";
 import { assignAdaptiveClusters, getRagProjection } from "./ragProjection.js";
 import { RagStore } from "./ragStore.js";
+import { readDaemonPid } from "./ragStoreHelpers.js";
 import { stableId } from "./utils.js";
 
 const tmpDirs: string[] = [];
@@ -970,6 +971,28 @@ if (count === 1) {
     expect(ragWorkerNodeOptions("--trace-warnings")).toBe("--trace-warnings --max-old-space-size=8192");
     expect(ragWorkerNodeOptions("--max-old-space-size=4096")).toBe("--max-old-space-size=4096");
     expect(ragWorkerNodeOptions("--max_old_space_size=6144")).toBe("--max_old_space_size=6144");
+  });
+
+  it("does not treat legacy or foreign live PIDs as RAG workers", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"));
+    const pidPath = config.rag.daemonPidPath;
+
+    await writeFile(pidPath, String(process.pid), "utf8");
+    expect(readDaemonPid(pidPath)).toBeNull();
+    expect(stopRagDaemon(config)).toEqual({ stopped: false, stale: true, pid: process.pid });
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
+
+    await writeFile(
+      pidPath,
+      JSON.stringify({ command: "other-worker", pid: process.pid, argv: [], configPath: "test", startedAtMs: Date.now() }),
+      "utf8",
+    );
+    const store = new RagStore(config);
+    expect(store.getStatus(config).daemon.running).toBe(false);
+    store.close();
+    expect(stopRagDaemon(config)).toEqual({ stopped: false, stale: true, pid: process.pid });
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
   });
 });
 
