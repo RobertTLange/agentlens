@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentKind,
   RagIndexStatus,
@@ -165,6 +165,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
   const [summaryStatus, setSummaryStatus] = useState<(typeof STATUS_OPTIONS)[number]>("complete");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const userSelectedTraceRef = useRef(false);
 
   const selectedSummary = useMemo(
     () => summaries.find((summary) => summary.traceId === selectedTraceId) ?? null,
@@ -178,6 +179,11 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
   const isSearching = query.trim().length > 0;
   const listTitle = isSearching ? "Search Results" : "Summaries";
   const listCount = isSearching ? `${results.length} results` : `${tocSummaries.length} rows`;
+
+  function selectTraceFromUser(traceId: string): void {
+    userSelectedTraceRef.current = true;
+    setSelectedTraceId(traceId);
+  }
 
   async function refreshBaseData(options: { showLoading?: boolean } = {}): Promise<void> {
     const showLoading = options.showLoading ?? true;
@@ -226,6 +232,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
 
   useEffect(() => {
     if (!selectedTraceIdProp) return;
+    userSelectedTraceRef.current = false;
     setSelectedTraceId(selectedTraceIdProp);
   }, [selectedTraceIdProp]);
 
@@ -233,11 +240,10 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     const trimmed = query.trim();
     if (!trimmed) {
       setResults([]);
-      if (selectedTraceIdProp) {
-        setSelectedTraceId(selectedTraceIdProp);
-        return;
-      }
       setSelectedTraceId((current) => {
+        if (selectedTraceIdProp && !userSelectedTraceRef.current && summaries.some((summary) => summary.traceId === selectedTraceIdProp)) {
+          return selectedTraceIdProp;
+        }
         if (current && summaries.some((summary) => summary.traceId === current)) return current;
         return summaries[0]?.traceId || "";
       });
@@ -328,7 +334,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
                   key={result.traceId}
                   type="button"
                   className={`rag-result-row ${selectedTraceId === result.traceId ? "active" : ""}`}
-                  onClick={() => setSelectedTraceId(result.traceId)}
+                  onClick={() => selectTraceFromUser(result.traceId)}
                 >
                   <span className="rag-result-main">
                     <strong>{result.title || result.traceId}</strong>
@@ -343,7 +349,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
                   key={summary.traceId}
                   type="button"
                   className={`rag-result-row ${selectedTraceId === summary.traceId ? "active" : ""}`}
-                  onClick={() => setSelectedTraceId(summary.traceId)}
+                  onClick={() => selectTraceFromUser(summary.traceId)}
                 >
                   <span className="rag-result-main">
                     <strong>{summary.summary?.title || summary.traceId}</strong>
@@ -355,7 +361,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             {isSearching && results.length === 0 && <div className="empty">No search results</div>}
             {!isSearching && tocSummaries.length === 0 && <div className="empty">No summaries</div>}
           </div>
-          <SummaryProjectionPlot projection={projection} selectedTraceId={selectedTraceId} onSelectTrace={setSelectedTraceId} />
+          <SummaryProjectionPlot projection={projection} selectedTraceId={selectedTraceId} onSelectTrace={selectTraceFromUser} />
         </section>
 
         <section className="panel rag-detail-panel">
