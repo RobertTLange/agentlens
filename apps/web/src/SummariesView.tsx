@@ -9,6 +9,7 @@ import type {
 } from "@agentlens/contracts";
 
 const SEARCH_DEBOUNCE_MS = 250;
+const SUMMARY_REFRESH_MS = 30_000;
 const AGENT_OPTIONS: Array<AgentKind | ""> = ["", "codex", "claude", "cursor", "gemini", "opencode", "pi", "unknown"];
 const STATUS_OPTIONS = ["complete", "stale", "failed", "skipped", "pending"] as const;
 const CLUSTER_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0f766e", "#be123c", "#4b5563"];
@@ -82,11 +83,16 @@ function SummaryProjectionPlot({
   const previewRawTop = previewItem ? 8 + (1 - previewItem.y) * 84 : 50;
   const previewBelow = previewRawTop < 24;
   const previewTop = previewBelow ? Math.min(92, previewRawTop + 4) : Math.max(8, previewRawTop - 4);
+  const pointLabel = projection && projection.sourceCount > items.length
+    ? `${items.length}/${projection.sourceCount} points`
+    : items.length
+      ? `${items.length} points`
+      : "empty";
   return (
     <section className="rag-projection" aria-label="Summary embedding map">
       <div className="rag-projection-head">
         <h3>Embedding Map</h3>
-        <span className="mono">{items.length ? `${items.length} points` : "empty"}</span>
+        <span className="mono">{pointLabel}</span>
       </div>
       <div className="rag-projection-plot" role="group" aria-label="Projected summary embeddings">
         {items.length > 0 ? (
@@ -154,8 +160,9 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
   );
   const tocSummaries = useMemo(() => sortSummariesByOriginalTraceTime(summaries), [summaries]);
 
-  async function refreshBaseData(): Promise<void> {
-    setLoading(true);
+  async function refreshBaseData(options: { showLoading?: boolean } = {}): Promise<void> {
+    const showLoading = options.showLoading ?? true;
+    if (showLoading) setLoading(true);
     setError("");
     try {
       const statusResponse = await fetch("/api/rag/status");
@@ -183,12 +190,19 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }
 
   useEffect(() => {
     void refreshBaseData();
+  }, [agent, summaryStatus]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshBaseData({ showLoading: false });
+    }, SUMMARY_REFRESH_MS);
+    return () => window.clearInterval(timer);
   }, [agent, summaryStatus]);
 
   useEffect(() => {

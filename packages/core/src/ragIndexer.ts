@@ -4,6 +4,7 @@ import path from "node:path";
 import type {
   AgentKind,
   AppConfig,
+  RagDocumentKind,
   RagIndexStatus,
   RagRefreshStatus,
   RagSearchMode,
@@ -142,6 +143,7 @@ async function embedChangedDocuments(
   provider: EmbeddingProvider | null,
   config: AppConfig,
   maxDocuments?: number,
+  options: { kind?: RagDocumentKind } = {},
 ): Promise<{ status: RagIndexStatus["embeddings"]; embeddedDocuments: number }> {
   if (!provider) {
     return {
@@ -157,7 +159,7 @@ async function embedChangedDocuments(
       const remaining = budget - embeddedDocuments;
       const batchLimit = Math.min(config.rag.embeddingBatchSize, remaining);
       if (batchLimit <= 0) break;
-      const batch = store.listDocumentsWithoutEmbeddings(provider.model, batchLimit);
+      const batch = store.listDocumentsWithoutEmbeddings(provider.model, batchLimit, options);
       if (batch.length === 0) break;
       const vectors = await provider.embed(batch.map((document) => document.content));
       const nowMs = Date.now();
@@ -184,7 +186,22 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
   let skipped = 0;
   let failed = 0;
   let lexicalDocumentCount = 0;
+  let embeddedDocuments = 0;
+  let embeddingStatus: RagIndexStatus["embeddings"] = options.lexicalOnly
+    ? { status: "disabled", model: config.rag.embeddingModel, dimension: null, count: 0 }
+    : store.getStatus(config).embeddings;
+  const embeddingProvider = options.lexicalOnly ? null : createEmbeddingProvider(config);
+  const embeddingBudget = options.embeddingLimit ?? options.limit;
+  const embedWithinBudget = async (documentOptions: { kind?: RagDocumentKind } = {}): Promise<void> => {
+    if (options.lexicalOnly) return;
+    const remainingBudget = embeddingBudget === undefined ? undefined : Math.max(0, embeddingBudget - embeddedDocuments);
+    if (remainingBudget !== undefined && remainingBudget <= 0) return;
+    const result = await embedChangedDocuments(store, embeddingProvider, config, remainingBudget, documentOptions);
+    embeddedDocuments += result.embeddedDocuments;
+    embeddingStatus = result.status;
+  };
   try {
+    await embedWithinBudget({ kind: "summary" });
     await traceIndex.refresh();
     const nowMs = Date.now();
     const summaries = traceIndex.getSummaries();
@@ -299,12 +316,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
       }
     }
 
-    const embeddingResult = options.lexicalOnly
-      ? {
-          status: { status: "disabled" as const, model: config.rag.embeddingModel, dimension: null, count: 0 },
-          embeddedDocuments: 0,
-        }
-      : await embedChangedDocuments(store, createEmbeddingProvider(config), config, options.embeddingLimit ?? options.limit);
+    await embedWithinBudget();
     store.setMeta("last_run_at_ms", String(Date.now()));
     store.setMeta("last_run_error", lastError);
     return {
@@ -315,8 +327,8 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
       skipped,
       failed,
       lexicalDocumentCount,
-      embeddedDocuments: embeddingResult.embeddedDocuments,
-      embeddingStatus: embeddingResult.status,
+      embeddedDocuments,
+      embeddingStatus,
       lastError,
     };
   } finally {
@@ -417,7 +429,7 @@ export async function runRagWorker(
     const config = await loadConfig(configPath);
     await runRagIndexOnce(config, {
       ...(options.limit !== undefined ? { limit: options.limit } : {}),
-      embeddingLimit: options.embeddingLimit ?? options.limit ?? config.rag.embeddingBatchSize,
+      embeddingLimit: options.embeddingLimit ?? config.rag.embeddingBatchSize,
       ...(options.lexicalOnly !== undefined ? { lexicalOnly: options.lexicalOnly } : {}),
     });
     if (options.once) break;

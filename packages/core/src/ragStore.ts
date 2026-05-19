@@ -301,14 +301,19 @@ export class RagStore {
     tx();
   }
 
-  listDocumentsWithoutEmbeddings(model: string, limit: number): RagDocumentRecord[] {
+  listDocumentsWithoutEmbeddings(model: string, limit: number, options: { kind?: RagDocumentKind } = {}): RagDocumentRecord[] {
+    const kindFilter = options.kind ? "AND d.kind = ?" : "";
     const rows = this.db.prepare(`
       SELECT d.* FROM rag_documents d
       LEFT JOIN rag_embeddings e ON e.document_id = d.document_id AND e.model = ?
       WHERE e.document_id IS NULL
-      ORDER BY d.updated_at_ms DESC, d.document_id
+        ${kindFilter}
+      ORDER BY
+        CASE d.kind WHEN 'summary' THEN 0 ELSE 1 END,
+        d.updated_at_ms DESC,
+        d.document_id
       LIMIT ?
-    `).all(model, Math.max(1, limit)) as DocumentRow[];
+    `).all(...(options.kind ? [model, options.kind, Math.max(1, limit)] : [model, Math.max(1, limit)])) as DocumentRow[];
     return rows.map((row) => ({
       documentId: row.document_id,
       traceId: row.trace_id,

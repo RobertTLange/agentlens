@@ -815,7 +815,7 @@ rag
       do {
         const result = await runRagIndexOnce(config, {
           ...(limit !== undefined ? { limit } : {}),
-          embeddingLimit: embeddingLimit ?? limit ?? config.rag.embeddingBatchSize,
+          embeddingLimit: embeddingLimit ?? config.rag.embeddingBatchSize,
           ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
         });
         if (opts.json) console.log(JSON.stringify(result));

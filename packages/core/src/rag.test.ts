@@ -677,6 +677,47 @@ describe("rag indexer", () => {
     }
   });
 
+  it("prioritizes summary embeddings before trace chunk embeddings", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local" });
+    const store = new RagStore(config);
+    for (const traceId of ["new-trace", "old-summary"]) {
+      store.upsertSession({
+        summary: summary({ id: traceId, sessionId: `session-${traceId}` }),
+        fingerprint: traceId,
+        status: "complete",
+        content: content(),
+        summaryText: "summary",
+        summaryModel: "fake",
+        summaryGeneratedAtMs: 1,
+        nowMs: 1,
+      });
+    }
+    store.replaceDocuments("new-trace", [
+      {
+        documentId: "new-trace:trace:0",
+        traceId: "new-trace",
+        kind: "trace",
+        chunkIndex: 0,
+        content: "new trace chunk",
+      },
+    ], 3);
+    store.replaceDocuments("old-summary", [
+      {
+        documentId: "old-summary:summary:0",
+        traceId: "old-summary",
+        kind: "summary",
+        chunkIndex: 0,
+        content: "older summary",
+      },
+    ], 2);
+
+    const [first] = store.listDocumentsWithoutEmbeddings("test-model", 1);
+
+    expect(first?.documentId).toBe("old-summary:summary:0");
+    store.close();
+  });
+
   it("uses a bounded embedding pass by default in the worker loop", async () => {
     const dir = await tempDir();
     const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local", embeddingBatchSize: 3 });
@@ -713,6 +754,122 @@ describe("rag indexer", () => {
       const updated = new RagStore(config);
 
       expect(updated.getStatus(config).embeddings).toMatchObject({ status: "dirty", count: 3 });
+      updated.close();
+    } finally {
+      if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+      else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
+    }
+  });
+
+  it("does not let the worker summary limit shrink the default embedding batch", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local", embeddingBatchSize: 3 });
+    const configPath = path.join(dir, "config.toml");
+    await saveConfig(config, configPath);
+    const store = new RagStore(config);
+    store.upsertSession({
+      summary: summary(),
+      fingerprint: "complete",
+      status: "complete",
+      content: content(),
+      summaryText: "summary",
+      summaryModel: "fake",
+      summaryGeneratedAtMs: 1,
+      nowMs: 2,
+    });
+    store.replaceDocuments(
+      "trace-1",
+      Array.from({ length: 8 }, (_, index) => ({
+        documentId: `trace-1:trace_chunk:${index}`,
+        traceId: "trace-1",
+        kind: "trace" as const,
+        chunkIndex: index,
+        content: `document ${index}`,
+      })),
+      3,
+    );
+    store.close();
+
+    const previousFakeEmbeddings = process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+    process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = "1";
+    try {
+      await runRagWorker(configPath, { once: true, limit: 1 });
+      const updated = new RagStore(config);
+
+      expect(updated.getStatus(config).embeddings).toMatchObject({ status: "dirty", count: 3 });
+      updated.close();
+    } finally {
+      if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+      else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
+    }
+  });
+
+  it("embeds newly written summary documents before stale trace chunks consume the pass budget", async () => {
+    const dir = await tempDir();
+    const tracesDir = path.join(dir, "traces");
+    await mkdir(tracesDir, { recursive: true });
+    const tracePath = path.join(tracesDir, "trace.jsonl");
+    await writeQuietTrace(tracePath, buildCodexTraceLog("new-summary-session", 0));
+    const traceStat = await stat(tracePath);
+    const traceId = stableId([tracePath, String(traceStat.dev), String(traceStat.ino)]);
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [tracesDir],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 2,
+          agentHint: "codex",
+        },
+      },
+      rag: {
+        dbPath: path.join(dir, "rag.db"),
+        daemonPidPath: path.join(dir, "rag.pid"),
+        daemonLogPath: path.join(dir, "rag.log"),
+        embeddingBackend: "local",
+        embeddingBatchSize: 3,
+        headlessExecutable: await writeFakeHeadless(dir),
+      },
+    });
+    const store = new RagStore(config);
+    store.upsertSession({
+      summary: summary({ id: "old-trace", sessionId: "old-session" }),
+      fingerprint: "old",
+      status: "complete",
+      content: content(),
+      summaryText: "summary",
+      summaryModel: "fake",
+      summaryGeneratedAtMs: 1,
+      nowMs: 2,
+    });
+    store.replaceDocuments(
+      "old-trace",
+      Array.from({ length: 3 }, (_, index) => ({
+        documentId: `old-trace:trace_chunk:${index}`,
+        traceId: "old-trace",
+        kind: "trace" as const,
+        chunkIndex: index,
+        content: `old trace document ${index}`,
+      })),
+      3,
+    );
+    store.close();
+
+    const previousFakeEmbeddings = process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+    process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = "1";
+    try {
+      const result = await runRagIndexOnce(config, { limit: 1, embeddingLimit: 3 });
+      const updated = new RagStore(config);
+      const missingSummaryIds = updated
+        .listDocumentsWithoutEmbeddings("agentlens-hash-test", 10, { kind: "summary" })
+        .map((document) => document.documentId);
+
+      expect(result.summarized).toBe(1);
+      expect(result.embeddedDocuments).toBe(3);
+      expect(missingSummaryIds).not.toContain(`${traceId}:summary:0`);
       updated.close();
     } finally {
       if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
