@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   AgentKind,
   RagIndexStatus,
+  RagProjectionResponse,
   RagSearchMode,
   RagSearchResult,
   RagSummaryRecord,
@@ -10,6 +11,7 @@ import type {
 const SEARCH_DEBOUNCE_MS = 250;
 const AGENT_OPTIONS: Array<AgentKind | ""> = ["", "codex", "claude", "cursor", "gemini", "opencode", "pi", "unknown"];
 const STATUS_OPTIONS = ["complete", "stale", "failed", "skipped", "pending"] as const;
+const CLUSTER_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0f766e", "#be123c", "#4b5563"];
 
 interface SummariesViewProps {
   onInspectTrace: (traceId: string) => void;
@@ -21,25 +23,27 @@ function fmtTime(ms: number | null): string {
   return new Date(ms).toLocaleString();
 }
 
-function scoreLabel(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(4) : "-";
+function originalTraceAtMs(summary: RagSummaryRecord): number {
+  return summary.lastEventTs ?? summary.mtimeMs;
 }
 
-function asResult(summary: RagSummaryRecord): RagSearchResult {
-  return {
-    traceId: summary.traceId,
-    sessionId: summary.sessionId,
-    agent: summary.agent,
-    path: summary.path,
-    title: summary.summary?.title ?? summary.traceId,
-    userGoal: summary.summary?.userGoal ?? "",
-    outcome: summary.summary?.outcome ?? "",
-    updatedAtMs: summary.updatedAtMs,
-    summaryGeneratedAtMs: summary.summaryGeneratedAtMs,
-    score: 0,
-    matchedKinds: ["summary"],
-    snippets: summary.summaryText ? [summary.summaryText.slice(0, 220)] : [],
-  };
+function summaryAtMs(summary: RagSummaryRecord): number {
+  return summary.summaryGeneratedAtMs ?? summary.updatedAtMs;
+}
+
+function sortSummariesByOriginalTraceTime(summaries: RagSummaryRecord[]): RagSummaryRecord[] {
+  return [...summaries].sort((left, right) => (
+    originalTraceAtMs(right) - originalTraceAtMs(left) ||
+    summaryAtMs(right) - summaryAtMs(left) ||
+    left.traceId.localeCompare(right.traceId)
+  ));
+}
+
+function clusterColor(clusterId: number): string {
+  const fixedColor = CLUSTER_COLORS[clusterId];
+  if (fixedColor) return fixedColor;
+  const hue = (clusterId * 137.508) % 360;
+  return `hsl(${hue.toFixed(1)} 58% 42%)`;
 }
 
 function SectionList({ title, values }: { title: string; values: string[] }): JSX.Element | null {
@@ -56,9 +60,81 @@ function SectionList({ title, values }: { title: string; values: string[] }): JS
   );
 }
 
+function SummaryProjectionPlot({
+  projection,
+  selectedTraceId,
+  onSelectTrace,
+}: {
+  projection: RagProjectionResponse | null;
+  selectedTraceId: string;
+  onSelectTrace: (traceId: string) => void;
+}): JSX.Element {
+  const items = projection?.items ?? [];
+  const [previewTraceId, setPreviewTraceId] = useState("");
+  const previewItem = items.find((item) => item.traceId === previewTraceId);
+  const previewRawLeft = previewItem ? 8 + previewItem.x * 84 : 50;
+  const previewAlign = previewRawLeft < 32 ? "left" : previewRawLeft > 68 ? "right" : "center";
+  const previewLeft = previewAlign === "left"
+    ? Math.min(92, previewRawLeft + 2)
+    : previewAlign === "right"
+      ? Math.max(8, previewRawLeft - 2)
+      : Math.min(72, Math.max(28, previewRawLeft));
+  const previewRawTop = previewItem ? 8 + (1 - previewItem.y) * 84 : 50;
+  const previewBelow = previewRawTop < 24;
+  const previewTop = previewBelow ? Math.min(92, previewRawTop + 4) : Math.max(8, previewRawTop - 4);
+  return (
+    <section className="rag-projection" aria-label="Summary embedding map">
+      <div className="rag-projection-head">
+        <h3>Embedding Map</h3>
+        <span className="mono">{items.length ? `${items.length} points` : "empty"}</span>
+      </div>
+      <div className="rag-projection-plot" role="group" aria-label="Projected summary embeddings">
+        {items.length > 0 ? (
+          items.map((item) => {
+            const color = clusterColor(item.clusterId);
+            return (
+              <button
+                key={item.traceId}
+                type="button"
+                className={`rag-projection-point ${selectedTraceId === item.traceId ? "active" : ""}`}
+                style={{
+                  left: `${8 + item.x * 84}%`,
+                  top: `${8 + (1 - item.y) * 84}%`,
+                  backgroundColor: color,
+                }}
+                aria-label={`${item.title || item.traceId}, ${item.agent}, ${fmtTime(item.originalTraceAtMs)}`}
+                aria-pressed={selectedTraceId === item.traceId}
+                title={item.title || item.traceId}
+                onMouseEnter={() => setPreviewTraceId(item.traceId)}
+                onMouseLeave={() => setPreviewTraceId("")}
+                onFocus={() => setPreviewTraceId(item.traceId)}
+                onBlur={() => setPreviewTraceId("")}
+                onClick={() => onSelectTrace(item.traceId)}
+              />
+            );
+          })
+        ) : (
+          <div className="rag-projection-empty">
+            {projection?.warnings[0] ?? "Need at least two summary embeddings."}
+          </div>
+        )}
+        {previewItem && (
+          <div
+            className={`rag-projection-preview ${previewBelow ? "below" : ""} align-${previewAlign}`}
+            style={{ left: `${previewLeft}%`, top: `${previewTop}%` }}
+          >
+            {previewItem.title || previewItem.traceId}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceIdProp = "" }: SummariesViewProps): JSX.Element {
   const [status, setStatus] = useState<RagIndexStatus | null>(null);
   const [summaries, setSummaries] = useState<RagSummaryRecord[]>([]);
+  const [projection, setProjection] = useState<RagProjectionResponse | null>(null);
   const [results, setResults] = useState<RagSearchResult[]>([]);
   const [selectedTraceId, setSelectedTraceId] = useState("");
   const [query, setQuery] = useState("");
@@ -76,7 +152,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     () => results.find((result) => result.traceId === selectedTraceId) ?? null,
     [selectedTraceId, results],
   );
-  const displayed = query.trim() ? results : summaries.map(asResult);
+  const tocSummaries = useMemo(() => sortSummariesByOriginalTraceTime(summaries), [summaries]);
 
   async function refreshBaseData(): Promise<void> {
     setLoading(true);
@@ -87,11 +163,23 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       setStatus(statusJson);
       const params = new URLSearchParams({ status: summaryStatus, limit: "200" });
       if (agent) params.set("agent", agent);
-      const summariesResponse = await fetch(`/api/rag/summaries?${params.toString()}`);
+      const projectionParams = new URLSearchParams({ status: summaryStatus, limit: "5000" });
+      if (agent) projectionParams.set("agent", agent);
+      const [summariesResponse, projectionResponse] = await Promise.all([
+        fetch(`/api/rag/summaries?${params.toString()}`),
+        fetch(`/api/rag/projection?${projectionParams.toString()}`),
+      ]);
       if (!summariesResponse.ok) throw new Error("failed to load summaries");
+      if (!projectionResponse.ok) throw new Error("failed to load projection");
       const summariesJson = (await summariesResponse.json()) as { summaries: RagSummaryRecord[] };
-      setSummaries(summariesJson.summaries);
-      setSelectedTraceId((current) => current || summariesJson.summaries[0]?.traceId || "");
+      const projectionJson = (await projectionResponse.json()) as RagProjectionResponse;
+      const sortedSummaries = sortSummariesByOriginalTraceTime(summariesJson.summaries);
+      setSummaries(sortedSummaries);
+      setProjection(projectionJson);
+      setSelectedTraceId((current) => {
+        if (current && sortedSummaries.some((summary) => summary.traceId === current)) return current;
+        return sortedSummaries[0]?.traceId || "";
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -127,7 +215,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
         .then((json) => {
           setResults(json.results);
           setStatus((current) => current ? { ...current, embeddings: json.embeddings } : current);
-          setSelectedTraceId((current) => current || json.results[0]?.traceId || "");
+          setSelectedTraceId(json.results[0]?.traceId || "");
         })
         .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
         .finally(() => setLoading(false));
@@ -190,27 +278,25 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
         <section className="panel rag-results-panel">
           <div className="panel-head">
             <h2>Summaries</h2>
-            <span className="mono rag-count">{loading ? "loading" : `${displayed.length} rows`}</span>
+            <span className="mono rag-count">{loading ? "loading" : `${tocSummaries.length} rows`}</span>
           </div>
           <div className="rag-results-list">
-            {displayed.map((result, index) => (
+            {tocSummaries.map((summary) => (
               <button
-                key={`${result.traceId}-${index}`}
+                key={summary.traceId}
                 type="button"
-                className={`rag-result-row ${selectedTraceId === result.traceId ? "active" : ""}`}
-                onClick={() => setSelectedTraceId(result.traceId)}
+                className={`rag-result-row ${selectedTraceId === summary.traceId ? "active" : ""}`}
+                onClick={() => setSelectedTraceId(summary.traceId)}
               >
-                <span className={`agent-badge agent-${result.agent}`}>{result.agent}</span>
                 <span className="rag-result-main">
-                  <strong>{result.title || result.traceId}</strong>
-                  <span>{result.outcome || result.userGoal || result.path}</span>
-                  {result.snippets[0] && <em>{result.snippets[0]}</em>}
+                  <strong>{summary.summary?.title || summary.traceId}</strong>
                 </span>
-                <span className="mono rag-score">{query.trim() ? scoreLabel(result.score) : selectedSummary?.status ?? "complete"}</span>
+                <span className="mono rag-result-time">{fmtTime(originalTraceAtMs(summary))}</span>
               </button>
             ))}
-            {displayed.length === 0 && <div className="empty">No summaries</div>}
+            {tocSummaries.length === 0 && <div className="empty">No summaries</div>}
           </div>
+          <SummaryProjectionPlot projection={projection} selectedTraceId={selectedTraceId} onSelectTrace={setSelectedTraceId} />
         </section>
 
         <section className="panel rag-detail-panel">

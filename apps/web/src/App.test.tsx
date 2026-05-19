@@ -11,6 +11,7 @@ import type {
   NormalizedEvent,
   OverviewStats,
   RagIndexStatus,
+  RagProjectionResponse,
   RagSummaryRecord,
   TraceIndexStartupState,
   TracePage,
@@ -152,7 +153,8 @@ function makeRagStatus(): RagIndexStatus {
   };
 }
 
-function makeRagSummary(traceId = "trace-a"): RagSummaryRecord {
+function makeRagSummary(traceId = "trace-a", overrides: Partial<RagSummaryRecord> = {}): RagSummaryRecord {
+  const summaryOverrides = overrides.summary ?? {};
   return {
     traceId,
     sessionId: `session-${traceId}`,
@@ -169,7 +171,13 @@ function makeRagSummary(traceId = "trace-a"): RagSummaryRecord {
     status: "complete",
     skipReason: "",
     error: "",
-    summary: {
+    summaryText: "Parser regression failed test packages/core",
+    summaryModel: "fake",
+    summaryGeneratedAtMs: 3_000,
+    createdAtMs: 3_000,
+    updatedAtMs: 3_000,
+    ...overrides,
+    summary: overrides.summary === null ? null : {
       title: "Parser regression",
       userGoal: "Find prior failed tests",
       outcome: "Parser behavior fixed",
@@ -181,12 +189,35 @@ function makeRagSummary(traceId = "trace-a"): RagSummaryRecord {
       workflowObservations: ["Search found prior work"],
       followups: ["Watch CI"],
       searchKeywords: ["parser", "failed test"],
+      ...summaryOverrides,
     },
-    summaryText: "Parser regression failed test packages/core",
-    summaryModel: "fake",
-    summaryGeneratedAtMs: 3_000,
-    createdAtMs: 3_000,
-    updatedAtMs: 3_000,
+  };
+}
+
+function makeRagProjection(items: RagSummaryRecord[]): RagProjectionResponse {
+  return {
+    items: items.map((summary, index) => ({
+      traceId: summary.traceId,
+      sessionId: summary.sessionId,
+      agent: summary.agent,
+      path: summary.path,
+      title: summary.summary?.title ?? summary.traceId,
+      summaryGeneratedAtMs: summary.summaryGeneratedAtMs,
+      updatedAtMs: summary.updatedAtMs,
+      lastEventTs: summary.lastEventTs,
+      mtimeMs: summary.mtimeMs,
+      summaryAtMs: summary.summaryGeneratedAtMs ?? summary.updatedAtMs,
+      originalTraceAtMs: summary.lastEventTs ?? summary.mtimeMs,
+      x: items.length <= 1 ? 0.5 : index / (items.length - 1),
+      y: items.length <= 1 ? 0.5 : 1 - index / (items.length - 1),
+      clusterId: index % 3,
+    })),
+    model: "test-model",
+    dimension: 3,
+    sourceCount: items.length,
+    embeddedCount: items.length,
+    missingEmbeddingCount: 0,
+    warnings: [],
   };
 }
 
@@ -1027,6 +1058,19 @@ beforeEach(() => {
           { status: 200 },
         );
       }
+      if (url.includes("/api/rag/projection")) {
+        const summaries = [
+          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
+          makeRagSummary("trace-b", {
+            lastEventTs: 8_000,
+            mtimeMs: 7_900,
+            summaryGeneratedAtMs: 5_000,
+            updatedAtMs: 5_100,
+            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
+          }),
+        ];
+        return new Response(JSON.stringify(makeRagProjection(summaries)), { status: 200 });
+      }
       if (url.includes("/api/rag/summaries/")) {
         const traceId = decodeURIComponent(url.match(/\/api\/rag\/summaries\/([^?]+)/)?.[1] ?? "");
         if (traceId === "trace-a") {
@@ -1035,7 +1079,17 @@ beforeEach(() => {
         return new Response(JSON.stringify({ error: "summary not found" }), { status: 404 });
       }
       if (url.includes("/api/rag/summaries")) {
-        return new Response(JSON.stringify({ summaries: [makeRagSummary("trace-a")] }), { status: 200 });
+        const summaries = [
+          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
+          makeRagSummary("trace-b", {
+            lastEventTs: 8_000,
+            mtimeMs: 7_900,
+            summaryGeneratedAtMs: 5_000,
+            updatedAtMs: 5_100,
+            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
+          }),
+        ];
+        return new Response(JSON.stringify({ summaries }), { status: 200 });
       }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
@@ -1159,6 +1213,44 @@ describe("App sessions list live motion", () => {
 
     fireEvent.click(document.querySelector(".rag-detail-head button") as HTMLButtonElement);
     await waitFor(() => expect(document.body.textContent).toContain("Trace Inspector"));
+  });
+
+  it("renders the summaries ToC by original trace time and syncs plot selection", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row").length).toBe(2));
+    const rows = Array.from(document.querySelectorAll(".rag-result-row"));
+    expect(rows[0]?.textContent).toContain("Newer trace summary");
+    expect(rows[1]?.textContent).toContain("Parser regression");
+    expect(rows[0]?.querySelector(".rag-result-time")?.textContent).toContain("1970");
+    const rowMetaLabels = Array.from(rows[0]?.querySelectorAll(".rag-result-main span") ?? []).map((node) => node.textContent);
+    expect(rowMetaLabels).toEqual([]);
+    expect(rows[0]?.textContent).not.toContain("Second detail");
+    expect(rows[0]?.textContent).not.toContain("/tmp/");
+    expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2);
+
+    const parserPoint = Array.from(document.querySelectorAll(".rag-projection-point")).find(
+      (node) => node.getAttribute("title") === "Parser regression",
+    );
+    if (!(parserPoint instanceof HTMLButtonElement)) throw new Error("missing parser projection point");
+    fireEvent.mouseEnter(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")?.textContent).toBe("Parser regression");
+    fireEvent.mouseLeave(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")).toBeNull();
+    fireEvent.focus(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")?.textContent).toBe("Parser regression");
+    fireEvent.blur(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")).toBeNull();
+    fireEvent.click(parserPoint);
+
+    await waitFor(() => expect(document.querySelector(".rag-result-row.active")?.textContent).toContain("Parser regression"));
+    expect(parserPoint.getAttribute("aria-pressed")).toBe("true");
+    expect(document.body.textContent).toContain("Parser behavior fixed");
   });
 
   it("shows a trace summary shortcut only when the selected inspector trace has a summary", async () => {
