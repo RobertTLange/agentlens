@@ -6,7 +6,7 @@ import type { NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@age
 import { mergeConfig, saveConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
-import { runRagIndexOnce, runRagWorker } from "./ragIndexer.js";
+import { ragWorkerNodeOptions, runRagIndexOnce, runRagWorker } from "./ragIndexer.js";
 import { assignAdaptiveClusters, getRagProjection } from "./ragProjection.js";
 import { RagStore } from "./ragStore.js";
 import { stableId } from "./utils.js";
@@ -718,6 +718,13 @@ describe("rag indexer", () => {
       if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
       else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
     }
+  });
+
+  it("adds a larger default heap to detached RAG workers without overriding explicit Node options", () => {
+    expect(ragWorkerNodeOptions("")).toBe("--max-old-space-size=8192");
+    expect(ragWorkerNodeOptions("--trace-warnings")).toBe("--trace-warnings --max-old-space-size=8192");
+    expect(ragWorkerNodeOptions("--max-old-space-size=4096")).toBe("--max-old-space-size=4096");
+    expect(ragWorkerNodeOptions("--max_old_space_size=6144")).toBe("--max_old_space_size=6144");
   });
 });
 

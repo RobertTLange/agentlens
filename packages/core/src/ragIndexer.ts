@@ -59,6 +59,7 @@ interface RagWorkItem {
 
 const INTERNAL_RAG_MARKER = "agentlens-rag-";
 const INTERNAL_RAG_SKIP_REASON = "internal_rag_summary_trace";
+const DEFAULT_RAG_WORKER_HEAP_MB = 8192;
 
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -123,6 +124,11 @@ function pidIsRunning(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+export function ragWorkerNodeOptions(current = process.env.NODE_OPTIONS ?? ""): string {
+  if (/--max[-_]old[-_]space[-_]size(?:=|\s|$)/.test(current)) return current;
+  return [current.trim(), `--max-old-space-size=${DEFAULT_RAG_WORKER_HEAP_MB}`].filter(Boolean).join(" ");
 }
 
 function readPid(pidPath: string): number | null {
@@ -442,6 +448,10 @@ export function startRagDaemon(
     detached: true,
     stdio: ["ignore", out, out],
     shell: false,
+    env: {
+      ...process.env,
+      NODE_OPTIONS: ragWorkerNodeOptions(),
+    },
   });
   child.unref();
   closeSync(out);

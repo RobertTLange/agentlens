@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Bounded RAG worker embedding refresh per pass and exposed `--embedding-limit` / `--lexical-only` controls so daemon passes are less likely to OOM.
+- Started detached RAG workers with a larger default Node heap unless `NODE_OPTIONS` already sets one.
 - Kept embedding-map hover previews inside the visible plot boundary.
 - Improved narrow browser resizing so Sessions and Trace Inspector remain usable while the Timeline TOC is hidden.
 - Wrapped long Trace Inspector event text inside event cards instead of overflowing at narrow widths.
