@@ -101,19 +101,34 @@ async function bundleInternalPackage({ packageName, sourceDir, requiredBuildOutp
   for (const fileName of optionalPackageFiles) {
     await copyIfExists(path.join(sourceDir, fileName), path.join(targetDir, fileName));
   }
+
+  return await readJson(sourcePackageJson);
 }
 
 const externalDependencySeen = new Set();
 
-async function bundleExternalDependencyTree(packageName) {
+function findPackageDir(packageName, fromDir) {
+  let current = fromDir;
+  for (;;) {
+    const candidate = packageDir(path.join(current, "node_modules"), packageName);
+    if (existsSync(path.join(candidate, "package.json"))) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return packageDir(sourceNodeModulesRoot, packageName);
+}
+
+async function bundleExternalDependencyTree(packageName, fromDir = repoRoot, options = {}) {
   if (externalDependencySeen.has(packageName)) return;
   if (packageName.startsWith("@agentlens/")) return;
   externalDependencySeen.add(packageName);
 
-  const sourceDir = packageDir(sourceNodeModulesRoot, packageName);
+  const sourceDir = findPackageDir(packageName, fromDir);
   const sourcePackageJson = path.join(sourceDir, "package.json");
   const targetDir = packageDir(targetNodeModulesRoot, packageName);
 
+  if (!existsSync(sourcePackageJson) && options.optional) return;
   assertExists(sourcePackageJson, "installed dependency package.json");
 
   await rm(targetDir, { recursive: true, force: true });
@@ -122,20 +137,21 @@ async function bundleExternalDependencyTree(packageName) {
   markCopied(targetDir);
 
   const packageJson = await readJson(sourcePackageJson);
-  const dependencyNames = [
-    ...Object.keys(packageJson.dependencies ?? {}),
-    ...Object.keys(packageJson.optionalDependencies ?? {}),
+  const dependencyEntries = [
+    ...Object.keys(packageJson.dependencies ?? {}).map((name) => ({ name, optional: false })),
+    ...Object.keys(packageJson.optionalDependencies ?? {}).map((name) => ({ name, optional: true })),
   ];
 
-  for (const dependencyName of dependencyNames) {
-    await bundleExternalDependencyTree(dependencyName);
+  for (const dependency of dependencyEntries) {
+    await bundleExternalDependencyTree(dependency.name, sourceDir, { optional: dependency.optional });
   }
 }
 
 await removePreviousBundle();
 
+const internalPackageJsons = [];
 for (const target of internalBundleTargets) {
-  await bundleInternalPackage(target);
+  internalPackageJsons.push(await bundleInternalPackage(target));
 }
 
 const cliPackageJson = await readJson(cliPackageJsonPath);
@@ -145,6 +161,16 @@ const directDependencies = Object.keys(cliPackageJson.dependencies ?? {}).filter
 
 for (const dependencyName of directDependencies) {
   await bundleExternalDependencyTree(dependencyName);
+}
+
+for (const packageJson of internalPackageJsons) {
+  const internalDependencyEntries = [
+    ...Object.keys(packageJson.dependencies ?? {}).map((name) => ({ name, optional: false })),
+    ...Object.keys(packageJson.optionalDependencies ?? {}).map((name) => ({ name, optional: true })),
+  ].filter((dependency) => !dependency.name.startsWith("@agentlens/"));
+  for (const dependency of internalDependencyEntries) {
+    await bundleExternalDependencyTree(dependency.name, repoRoot, { optional: dependency.optional });
+  }
 }
 
 await writeFile(
