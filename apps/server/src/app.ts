@@ -27,6 +27,7 @@ import type {
 import {
   DEFAULT_CONFIG_PATH,
   getRagStatus,
+  getRagProjection,
   getRagSummary,
   listRagSummaries,
   mergeConfig,
@@ -2731,6 +2732,22 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         ...(agent ? { agent } : {}),
         ...(since ? { since } : {}),
         limit: parseBoundedPositiveInt(query.limit, 200, 5000),
+      });
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
+
+  server.get("/api/rag/projection", async (request, reply) => {
+    const query = request.query as { status?: string; agent?: string; limit?: string };
+    try {
+      const status = parseRagStatus(query.status);
+      const agent = parseAgentKind(query.agent);
+      return await getRagProjection(traceIndex.getConfig(), {
+        ...(status ? { status } : {}),
+        ...(agent ? { agent } : {}),
+        limit: parseBoundedPositiveInt(query.limit, 5000, 5000),
       });
     } catch (error) {
       reply.code(400);

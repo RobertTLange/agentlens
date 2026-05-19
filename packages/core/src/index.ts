@@ -5,6 +5,7 @@ export * from "./ragCorpus.js";
 export * from "./ragEmbeddings.js";
 export * from "./ragHeadless.js";
 export * from "./ragIndexer.js";
+export * from "./ragProjection.js";
 export * from "./ragStore.js";
 export * from "./discovery.js";
 export * from "./traceIndex.js";

@@ -80,8 +80,38 @@ interface EmbeddingRow {
   vector: Buffer;
 }
 
+export interface RagSummaryEmbeddingRow {
+  traceId: string;
+  sessionId: string;
+  agent: AgentKind;
+  path: string;
+  title: string;
+  summaryGeneratedAtMs: number | null;
+  updatedAtMs: number;
+  lastEventTs: number | null;
+  mtimeMs: number;
+  model: string;
+  dimension: number;
+  vector: Buffer;
+}
+
+export interface RagSummaryEmbeddingList {
+  total: number;
+  rows: RagSummaryEmbeddingRow[];
+}
+
 const RAG_SCHEMA_VERSION = "1";
 const INTERNAL_SUMMARY_SESSION_IDS_META_KEY = "internal_summary_session_ids";
+
+function titleFromSummaryJson(value: string | null, fallback: string): string {
+  if (!value) return fallback;
+  try {
+    const parsed = JSON.parse(value) as Partial<RagTraceSummaryContent>;
+    return typeof parsed.title === "string" && parsed.title.trim() ? parsed.title : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 export class RagStore {
   readonly dbPath: string;
@@ -317,6 +347,82 @@ export class RagStore {
       limit: Math.max(1, Math.min(5000, options.limit ?? 200)),
     }) as RagSessionRow[];
     return rows.map(toSummaryRecord);
+  }
+
+  listSummaryEmbeddings(options: { status?: RagRefreshStatus; agent?: AgentKind; limit?: number; model?: string } = {}): RagSummaryEmbeddingList {
+    const limit = Math.max(1, Math.min(5000, options.limit ?? 5000));
+    const filters = {
+      status: options.status ?? "complete",
+      agent: options.agent ?? "",
+      model: options.model ?? this.getMeta("embedding_model") ?? "",
+      limit,
+    };
+    const total = (this.db.prepare(`
+      SELECT COUNT(*) AS count FROM (
+        SELECT trace_id FROM rag_sessions
+        WHERE (@status = '' OR status = @status)
+          AND (@agent = '' OR agent = @agent)
+        ORDER BY COALESCE(last_event_ts, mtime_ms) DESC, trace_id
+        LIMIT @limit
+      )
+    `).get(filters) as { count: number }).count;
+    const rows = this.db.prepare(`
+      WITH filtered_sessions AS (
+        SELECT * FROM rag_sessions
+        WHERE (@status = '' OR status = @status)
+          AND (@agent = '' OR agent = @agent)
+        ORDER BY COALESCE(last_event_ts, mtime_ms) DESC, trace_id
+        LIMIT @limit
+      )
+      SELECT
+        s.trace_id,
+        s.session_id,
+        s.agent,
+        s.path,
+        s.summary_json,
+        s.summary_generated_at_ms,
+        s.updated_at_ms,
+        s.last_event_ts,
+        s.mtime_ms,
+        e.model,
+        e.dimension,
+        e.vector
+      FROM filtered_sessions s
+      JOIN rag_documents d ON d.trace_id = s.trace_id AND d.kind = 'summary'
+      JOIN rag_embeddings e ON e.document_id = d.document_id
+      WHERE (@model = '' OR e.model = @model)
+      ORDER BY COALESCE(s.last_event_ts, s.mtime_ms) DESC, s.trace_id
+    `).all(filters) as Array<{
+      trace_id: string;
+      session_id: string;
+      agent: AgentKind;
+      path: string;
+      summary_json: string | null;
+      summary_generated_at_ms: number | null;
+      updated_at_ms: number;
+      last_event_ts: number | null;
+      mtime_ms: number;
+      model: string;
+      dimension: number;
+      vector: Buffer;
+    }>;
+    return {
+      total: Math.min(total, limit),
+      rows: rows.map((row) => ({
+        traceId: row.trace_id,
+        sessionId: row.session_id,
+        agent: row.agent,
+        path: row.path,
+        title: titleFromSummaryJson(row.summary_json, row.trace_id),
+        summaryGeneratedAtMs: row.summary_generated_at_ms,
+        updatedAtMs: row.updated_at_ms,
+        lastEventTs: row.last_event_ts,
+        mtimeMs: row.mtime_ms,
+        model: row.model,
+        dimension: row.dimension,
+        vector: row.vector,
+      })),
+    };
   }
 
   getStatus(config: AppConfig, embeddingStatus?: Partial<RagIndexStatus["embeddings"]>): RagIndexStatus {

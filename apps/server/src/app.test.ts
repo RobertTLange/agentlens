@@ -198,24 +198,42 @@ function ragSummaryContent(): RagTraceSummaryContent {
   };
 }
 
-function seedRagSummary(index: TraceIndex): string {
-  const detail = index.getSessionDetail(index.getSummaries()[0]?.id ?? "");
-  const content = ragSummaryContent();
+function seedRagSummaryForTrace(
+  index: TraceIndex,
+  traceId: string,
+  options: {
+    title?: string;
+    status?: "complete" | "stale" | "failed";
+    vector?: number[];
+    embeddingModel?: string;
+    nowMs?: number;
+  } = {},
+): string {
+  const detail = index.getSessionDetail(traceId);
+  const content = { ...ragSummaryContent(), title: options.title ?? ragSummaryContent().title };
   const corpus = buildRagCorpus(detail, content);
   const store = new RagStore(index.getConfig());
+  if (options.embeddingModel) store.setMeta("embedding_model", options.embeddingModel);
   store.upsertSession({
     summary: detail.summary,
     fingerprint: corpus.fingerprint,
-    status: "complete",
+    status: options.status ?? "complete",
     content,
     summaryText: corpus.summaryText,
     summaryModel: "fake",
     summaryGeneratedAtMs: 1,
-    nowMs: 2,
+    nowMs: options.nowMs ?? 2,
   });
   store.replaceDocuments(detail.summary.id, corpus.documents, 3);
+  if (options.vector) {
+    store.upsertEmbedding(`${detail.summary.id}:summary:0`, options.embeddingModel ?? "test-model", new Float32Array(options.vector), 4);
+  }
   store.close();
   return detail.summary.id;
+}
+
+function seedRagSummary(index: TraceIndex): string {
+  return seedRagSummaryForTrace(index, index.getSummaries()[0]?.id ?? "");
 }
 
 async function buildFixtureWithCustomTrace(
@@ -1975,6 +1993,54 @@ describe("server api", () => {
 
     const missing = await server.inject({ method: "GET", url: "/api/rag/summaries/missing" });
     expect(missing.statusCode).toBe(404);
+
+    await server.close();
+  });
+
+  it("serves filtered RAG summary projections without raw vectors", async () => {
+    const fixture = await buildFixtureWithTraceCount(3);
+    const traces = fixture.index.getSummaries();
+    const first = traces[0]?.id;
+    const second = traces[1]?.id;
+    const third = traces[2]?.id;
+    if (!first || !second || !third) throw new Error("missing projection fixture traces");
+    seedRagSummaryForTrace(fixture.index, first, {
+      title: "Newest projected",
+      vector: [1, 0, 0],
+      embeddingModel: "test-model",
+      nowMs: 10,
+    });
+    seedRagSummaryForTrace(fixture.index, second, {
+      title: "Second projected",
+      vector: [0, 1, 0],
+      embeddingModel: "test-model",
+      nowMs: 20,
+    });
+    seedRagSummaryForTrace(fixture.index, third, {
+      title: "Failed projected",
+      status: "failed",
+      vector: [0, 0, 1],
+      embeddingModel: "test-model",
+      nowMs: 30,
+    });
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const complete = await server.inject({ method: "GET", url: "/api/rag/projection?status=complete&agent=codex&limit=2" });
+    expect(complete.statusCode).toBe(200);
+    expect(complete.json().items).toHaveLength(2);
+    expect(complete.json().items[0]).toMatchObject({ traceId: first, title: "Newest projected" });
+    expect(JSON.stringify(complete.json())).not.toContain("vector");
+
+    const failed = await server.inject({ method: "GET", url: "/api/rag/projection?status=failed&agent=codex&limit=5" });
+    expect(failed.statusCode).toBe(200);
+    expect(failed.json()).toMatchObject({ sourceCount: 1, embeddedCount: 1, items: [] });
+
+    const invalid = await server.inject({ method: "GET", url: "/api/rag/projection?status=complete&limit=bad" });
+    expect(invalid.statusCode).toBe(400);
 
     await server.close();
   });

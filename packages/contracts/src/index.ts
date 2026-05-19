@@ -332,6 +332,33 @@ export interface RagSummaryListResponse {
   summaries: RagSummaryRecord[];
 }
 
+export interface RagProjectionItem {
+  traceId: string;
+  sessionId: string;
+  agent: AgentKind;
+  path: string;
+  title: string;
+  summaryGeneratedAtMs: number | null;
+  updatedAtMs: number;
+  lastEventTs: number | null;
+  mtimeMs: number;
+  summaryAtMs: number;
+  originalTraceAtMs: number;
+  x: number;
+  y: number;
+  clusterId: number;
+}
+
+export interface RagProjectionResponse {
+  items: RagProjectionItem[];
+  model: string;
+  dimension: number | null;
+  sourceCount: number;
+  embeddedCount: number;
+  missingEmbeddingCount: number;
+  warnings: string[];
+}
+
 export interface TraceTocItem {
   eventId: string;
   index: number;

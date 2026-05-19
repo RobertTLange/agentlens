@@ -7,6 +7,7 @@ import { mergeConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
 import { runRagIndexOnce } from "./ragIndexer.js";
+import { assignAdaptiveClusters, getRagProjection } from "./ragProjection.js";
 import { RagStore } from "./ragStore.js";
 import { stableId } from "./utils.js";
 
@@ -240,6 +241,113 @@ describe("rag store", () => {
     expect(record?.summary?.title).toBe("Fixed failing tests");
     expect(record?.summaryText).toBe("old summary");
     store.close();
+  });
+
+  it("projects stored summary embeddings without returning raw vectors", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"));
+    const store = new RagStore(config);
+    store.setMeta("embedding_model", "test-model");
+    const seed = (traceId: string, vector: number[], lastEventTs: number): void => {
+      const traceSummary = summary({ id: traceId, sessionId: `session-${traceId}`, lastEventTs, mtimeMs: lastEventTs - 100 });
+      const corpus = buildRagCorpus({ summary: traceSummary, events: [event(0, `event ${traceId}`, { traceId })] }, {
+        ...content(),
+        title: `Title ${traceId}`,
+      });
+      store.upsertSession({
+        summary: traceSummary,
+        fingerprint: corpus.fingerprint,
+        status: "complete",
+        content: { ...content(), title: `Title ${traceId}` },
+        summaryText: corpus.summaryText,
+        summaryModel: "fake",
+        summaryGeneratedAtMs: lastEventTs + 10,
+        nowMs: lastEventTs + 20,
+      });
+      store.replaceDocuments(traceId, corpus.documents, lastEventTs + 30);
+      store.upsertEmbedding(`${traceId}:summary:0`, "test-model", new Float32Array(vector), lastEventTs + 40);
+    };
+    seed("trace-a", [1, 0, 0], 1_700_000_003_000);
+    seed("trace-b", [0, 1, 0], 1_700_000_002_000);
+    seed("trace-c", [0, 0, 1], 1_700_000_001_000);
+    store.close();
+
+    const projection = await getRagProjection(config, { status: "complete", agent: "codex", limit: 10 });
+
+    expect(projection.items).toHaveLength(3);
+    expect(projection.items.map((item) => item.traceId)).toEqual(["trace-a", "trace-b", "trace-c"]);
+    expect(projection.items[0]).toMatchObject({ title: "Title trace-a" });
+    expect("vector" in (projection.items[0] as unknown as Record<string, unknown>)).toBe(false);
+    expect(JSON.stringify(projection)).not.toContain("vector");
+    expect(projection.model).toBe("test-model");
+    expect(projection.dimension).toBe(3);
+    expect(projection.missingEmbeddingCount).toBe(0);
+  });
+
+  it("returns an empty projection when too few summary embeddings are available", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"));
+    const store = new RagStore(config);
+    store.setMeta("embedding_model", "test-model");
+    const traceSummary = summary({ id: "trace-only", sessionId: "session-only" });
+    const corpus = buildRagCorpus({ summary: traceSummary, events: [event(0, "event trace-only")] }, content());
+    store.upsertSession({
+      summary: traceSummary,
+      fingerprint: corpus.fingerprint,
+      status: "complete",
+      content: content(),
+      summaryText: corpus.summaryText,
+      summaryModel: "fake",
+      summaryGeneratedAtMs: 1,
+      nowMs: 2,
+    });
+    store.replaceDocuments("trace-only", corpus.documents, 3);
+    store.close();
+
+    const projection = await getRagProjection(config, { status: "complete", limit: 10 });
+
+    expect(projection.items).toEqual([]);
+    expect(projection.sourceCount).toBe(1);
+    expect(projection.embeddedCount).toBe(0);
+    expect(projection.missingEmbeddingCount).toBe(1);
+    expect(projection.warnings.some((warning) => warning.includes("at least two"))).toBe(true);
+  });
+
+  it("assigns adaptive projection clusters without an eight-cluster cap", () => {
+    const rows: Array<{ traceId: string }> = [];
+    const points: Array<{ x: number; y: number }> = [];
+    for (let clusterIndex = 0; clusterIndex < 12; clusterIndex += 1) {
+      rows.push({ traceId: `trace-${String(clusterIndex).padStart(2, "0")}-a` });
+      rows.push({ traceId: `trace-${String(clusterIndex).padStart(2, "0")}-b` });
+      points.push({ x: clusterIndex * 10, y: 0 });
+      points.push({ x: clusterIndex * 10 + 0.01, y: 0 });
+    }
+
+    const assignments = assignAdaptiveClusters(rows, points);
+
+    expect(new Set(assignments).size).toBe(12);
+  });
+
+  it("cuts one-way bridge edges between locally dense projection groups", () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 0.01, y: 0 },
+      { x: 0, y: 0.01 },
+      { x: 0.08, y: 0 },
+      { x: 0.16, y: 0 },
+      { x: 0.24, y: 0 },
+      { x: 0.32, y: 0 },
+      { x: 0.33, y: 0 },
+      { x: 0.32, y: 0.01 },
+    ];
+    const rows = points.map((_, index) => ({ traceId: `trace-${index}` }));
+
+    const assignments = assignAdaptiveClusters(rows, points);
+
+    expect(new Set(assignments).size).toBeGreaterThan(1);
+    expect(new Set(assignments.slice(0, 3)).size).toBe(1);
+    expect(new Set(assignments.slice(6)).size).toBe(1);
+    expect(assignments[0]).not.toBe(assignments[6]);
   });
 });
 
