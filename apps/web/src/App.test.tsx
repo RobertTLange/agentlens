@@ -1027,6 +1027,13 @@ beforeEach(() => {
           { status: 200 },
         );
       }
+      if (url.includes("/api/rag/summaries/")) {
+        const traceId = decodeURIComponent(url.match(/\/api\/rag\/summaries\/([^?]+)/)?.[1] ?? "");
+        if (traceId === "trace-a") {
+          return new Response(JSON.stringify({ summary: makeRagSummary(traceId) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "summary not found" }), { status: 404 });
+      }
       if (url.includes("/api/rag/summaries")) {
         return new Response(JSON.stringify({ summaries: [makeRagSummary("trace-a")] }), { status: 200 });
       }
@@ -1152,6 +1159,22 @@ describe("App sessions list live motion", () => {
 
     fireEvent.click(document.querySelector(".rag-detail-head button") as HTMLButtonElement);
     await waitFor(() => expect(document.body.textContent).toContain("Trace Inspector"));
+  });
+
+  it("shows a trace summary shortcut only when the selected inspector trace has a summary", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    expect(document.querySelector(".inspector-summary-button")).toBeNull();
+
+    fireEvent.click(getTraceRow("trace-a"));
+    await waitFor(() => expect(document.querySelector(".inspector-summary-button")).toBeTruthy());
+
+    fireEvent.click(document.querySelector(".inspector-summary-button") as HTMLButtonElement);
+
+    await waitFor(() => expect(document.querySelector(".rag-view")).toBeTruthy());
+    await waitFor(() => expect(document.querySelector(".rag-result-row.active")?.textContent).toContain("Parser regression"));
+    expect(document.querySelector(".rag-detail-head")?.textContent).toContain("trace-a");
   });
 
   it("requests compact trace pages for the inspector", async () => {

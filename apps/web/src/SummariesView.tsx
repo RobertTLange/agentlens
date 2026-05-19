@@ -13,6 +13,7 @@ const STATUS_OPTIONS = ["complete", "stale", "failed", "skipped", "pending"] as 
 
 interface SummariesViewProps {
   onInspectTrace: (traceId: string) => void;
+  selectedTraceId?: string;
 }
 
 function fmtTime(ms: number | null): string {
@@ -55,7 +56,7 @@ function SectionList({ title, values }: { title: string; values: string[] }): JS
   );
 }
 
-export function SummariesView({ onInspectTrace }: SummariesViewProps): JSX.Element {
+export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceIdProp = "" }: SummariesViewProps): JSX.Element {
   const [status, setStatus] = useState<RagIndexStatus | null>(null);
   const [summaries, setSummaries] = useState<RagSummaryRecord[]>([]);
   const [results, setResults] = useState<RagSearchResult[]>([]);
@@ -101,6 +102,11 @@ export function SummariesView({ onInspectTrace }: SummariesViewProps): JSX.Eleme
   useEffect(() => {
     void refreshBaseData();
   }, [agent, summaryStatus]);
+
+  useEffect(() => {
+    if (!selectedTraceIdProp) return;
+    setSelectedTraceId(selectedTraceIdProp);
+  }, [selectedTraceIdProp]);
 
   useEffect(() => {
     const trimmed = query.trim();
