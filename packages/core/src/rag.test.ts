@@ -224,6 +224,29 @@ ${sessionRecord}console.log(JSON.stringify({ type: "result", result: out }));
   return executable;
 }
 
+async function writeFlakyHeadless(dir: string): Promise<string> {
+  const executable = path.join(dir, "flaky-headless.js");
+  const countPath = path.join(dir, "flaky-headless-count.txt");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+const fs = require("fs");
+const countPath = ${JSON.stringify(countPath)};
+const count = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) + 1 : 1;
+fs.writeFileSync(countPath, String(count));
+if (count === 1) {
+  console.error("temporary summary failure");
+  process.exit(1);
+}
+const out = ${JSON.stringify(JSON.stringify(content()))};
+console.log(JSON.stringify({ type: "result", result: out }));
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o755);
+  return executable;
+}
+
 async function writeQuietTrace(filePath: string, text: string, minute = 0): Promise<void> {
   await writeFile(filePath, text, "utf8");
   const mtime = new Date(Date.UTC(2026, 1, 11, 10, minute, 0));
@@ -646,6 +669,43 @@ describe("rag indexer", () => {
     expect(first.summarized).toBe(2);
     expect(second.summarized).toBe(2);
     expect(store.getStatus(config).sessions.complete).toBe(4);
+    store.close();
+  });
+
+  it("retries failed summaries on a later indexing pass", async () => {
+    const dir = await tempDir();
+    const tracesDir = path.join(dir, "traces");
+    await mkdir(tracesDir, { recursive: true });
+    await writeQuietTrace(path.join(tracesDir, "trace.jsonl"), buildCodexTraceLog("retry-session", 0));
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [tracesDir],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 2,
+          agentHint: "codex",
+        },
+      },
+      rag: {
+        dbPath: path.join(dir, "rag.db"),
+        daemonPidPath: path.join(dir, "rag.pid"),
+        daemonLogPath: path.join(dir, "rag.log"),
+        embeddingBackend: "disabled",
+        headlessExecutable: await writeFlakyHeadless(dir),
+      },
+    });
+
+    const failed = await runRagIndexOnce(config, { limit: 1 });
+    const retried = await runRagIndexOnce(config, { limit: 1 });
+    const store = new RagStore(config);
+
+    expect(failed).toMatchObject({ summarized: 0, failed: 1 });
+    expect(retried).toMatchObject({ summarized: 1, failed: 0 });
+    expect(store.getStatus(config).sessions).toMatchObject({ complete: 1, failed: 0 });
     store.close();
   });
 

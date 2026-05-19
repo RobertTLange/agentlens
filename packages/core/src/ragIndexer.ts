@@ -87,7 +87,7 @@ function isEligible(summary: TraceSummary, config: AppConfig, nowMs: number): bo
 
 function isCurrentTerminalRagSession(existing: RagSummaryRecord | null, fingerprint: string): boolean {
   if (!existing || existing.fingerprint !== fingerprint) return false;
-  return existing.status === "complete" || existing.status === "skipped" || existing.status === "failed";
+  return existing.status === "complete" || existing.status === "skipped";
 }
 
 function containsInternalRagMarker(value: string): boolean {
