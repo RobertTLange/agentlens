@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Trace Inspector now requests compact event payloads for collapsed cards and lazy-loads full raw JSON only when an event is expanded.
 
 ### Fixed
+- Bounded RAG worker embedding refresh per pass and exposed `--embedding-limit` / `--lexical-only` controls so daemon passes are less likely to OOM.
 - Kept embedding-map hover previews inside the visible plot boundary.
 - Improved narrow browser resizing so Sessions and Trace Inspector remain usable while the Timeline TOC is hidden.
 - Wrapped long Trace Inspector event text inside event cards instead of overflowing at narrow widths.
