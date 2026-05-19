@@ -9,6 +9,7 @@ export interface HeadlessSummaryResult {
   content: RagTraceSummaryContent;
   model: string;
   rawBytes: number;
+  internalSummarySessionIds: string[];
 }
 
 const ENV_ALLOWLIST = new Set([
@@ -21,6 +22,7 @@ const ENV_ALLOWLIST = new Set([
   "TMP",
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
   "GEMINI_API_KEY",
   "GOOGLE_API_KEY",
   "OPENROUTER_API_KEY",
@@ -41,9 +43,90 @@ function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function addSessionId(value: unknown, sessionIds: Set<string>): void {
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (trimmed) sessionIds.add(trimmed);
+}
+
+function collectHeadlessSessionIds(value: unknown, sessionIds: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectHeadlessSessionIds(item, sessionIds);
+    return;
+  }
+  const record = asRecord(value);
+  if (!record) return;
+  addSessionId(record.session_id, sessionIds);
+  addSessionId(record.sessionId, sessionIds);
+  addSessionId(record.sessionID, sessionIds);
+  if (record.type === "thread.started") addSessionId(record.thread_id, sessionIds);
+  collectHeadlessSessionIds(record["thread.started"], sessionIds);
+  const thread = asRecord(record.thread);
+  collectHeadlessSessionIds(thread?.started, sessionIds);
+  for (const nested of Object.values(record)) {
+    if (nested && typeof nested === "object") collectHeadlessSessionIds(nested, sessionIds);
+  }
+}
+
+function extractHeadlessSessionIds(stdout: string): string[] {
+  const sessionIds = new Set<string>();
+  const trimmed = stdout.trim();
+  try {
+    collectHeadlessSessionIds(JSON.parse(trimmed) as unknown, sessionIds);
+  } catch {
+    // Headless normally emits JSONL, handled below.
+  }
+  for (const line of trimmed.split(/\r?\n/).filter(Boolean)) {
+    try {
+      collectHeadlessSessionIds(JSON.parse(line) as unknown, sessionIds);
+    } catch {
+      // Ignore non-JSON diagnostics.
+    }
+  }
+  return Array.from(sessionIds).sort();
+}
+
+function attachHeadlessSessionIds(error: unknown, sessionIds: string[]): Error {
+  const next = error instanceof Error ? error : new Error(String(error));
+  if (sessionIds.length > 0) {
+    Object.assign(next, {
+      internalSummarySessionId: sessionIds[0],
+      internalSummarySessionIds: sessionIds,
+    });
+  }
+  return next;
+}
+
 function extractJsonStdout(stdout: string): string {
   const trimmed = stdout.trim();
   if (!trimmed) throw new Error("headless produced no output");
+  const lines = trimmed.split(/\r?\n/).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const parsed = JSON.parse(lines[index] ?? "") as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const record = parsed as Record<string, unknown>;
+        if (record.type === "result" && typeof record.result === "string") return record.result;
+        const message = record.message;
+        if (message && typeof message === "object" && !Array.isArray(message)) {
+          const content = (message as Record<string, unknown>).content;
+          if (Array.isArray(content)) {
+            const text = content
+              .map((part) => (part && typeof part === "object" && (part as Record<string, unknown>).type === "text" ? (part as Record<string, unknown>).text : ""))
+              .filter((part): part is string => typeof part === "string" && part.length > 0)
+              .join("\n");
+            if (text) return text;
+          }
+        }
+      }
+    } catch {
+      // Keep compatibility with older Headless outputs below.
+    }
+  }
   try {
     const parsed = JSON.parse(trimmed) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -116,18 +199,26 @@ export async function runHeadlessSummary(config: AppConfig, prompt: string): Pro
           return;
         }
         if (code !== 0) {
-          reject(new Error(`headless exited with code ${code ?? "null"} signal ${signal ?? "null"}: ${stderrText.trim()}`));
+          const sessionIds = extractHeadlessSessionIds(stdoutText);
+          const diagnostic = [stderrText.trim(), stdoutText.trim()].filter(Boolean).join("\n").slice(-4_000);
+          reject(attachHeadlessSessionIds(new Error(`headless exited with code ${code ?? "null"} signal ${signal ?? "null"}: ${diagnostic}`), sessionIds));
           return;
         }
         resolve(stdoutText);
       });
     });
+    const sessionIds = extractHeadlessSessionIds(stdout);
     const raw = extractJsonStdout(stdout);
-    return {
-      content: parseRagTraceSummaryContent(raw),
-      model: config.rag.summaryModel || config.rag.summaryAgent,
-      rawBytes: Buffer.byteLength(stdout, "utf8"),
-    };
+    try {
+      return {
+        content: parseRagTraceSummaryContent(raw),
+        model: config.rag.summaryModel || config.rag.summaryAgent,
+        rawBytes: Buffer.byteLength(stdout, "utf8"),
+        internalSummarySessionIds: sessionIds,
+      };
+    } catch (error) {
+      throw attachHeadlessSessionIds(error, sessionIds);
+    }
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

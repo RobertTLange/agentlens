@@ -48,6 +48,16 @@ export interface RagSearchRequest {
   since?: string;
 }
 
+interface RagWorkItem {
+  summary: TraceSummary;
+  detail: ReturnType<TraceIndex["getSessionDetail"]>;
+  promptInput: ReturnType<typeof buildPromptInput>;
+  existing: RagSummaryRecord | null;
+}
+
+const INTERNAL_RAG_MARKER = "agentlens-rag-";
+const INTERNAL_RAG_SKIP_REASON = "internal_rag_summary_trace";
+
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -62,6 +72,46 @@ function hasNonMetaEvent(summary: TraceSummary): boolean {
 
 function isEligible(summary: TraceSummary, config: AppConfig, nowMs: number): boolean {
   return summary.parseable && hasNonMetaEvent(summary) && isQuiet(summary, config.rag.quietPeriodMs, nowMs);
+}
+
+function isCurrentTerminalRagSession(existing: RagSummaryRecord | null, fingerprint: string): boolean {
+  if (!existing || existing.fingerprint !== fingerprint) return false;
+  return existing.status === "complete" || existing.status === "skipped" || existing.status === "failed";
+}
+
+function containsInternalRagMarker(value: string): boolean {
+  return value.toLowerCase().includes(INTERNAL_RAG_MARKER);
+}
+
+function eventContainsInternalRagMarker(event: ReturnType<TraceIndex["getSessionDetail"]>["events"][number]): boolean {
+  if (event.eventKind !== "meta") return false;
+  if (containsInternalRagMarker(event.preview) || containsInternalRagMarker(event.searchText)) return true;
+  return [...event.textBlocks, event.toolArgsText, event.toolResultText].some(containsInternalRagMarker);
+}
+
+function isInternalRagSummaryTrace(
+  summary: TraceSummary,
+  ignoredSessionIds: ReadonlySet<string>,
+  detail: ReturnType<TraceIndex["getSessionDetail"]> | null,
+): boolean {
+  if (summary.sessionId && ignoredSessionIds.has(summary.sessionId)) return true;
+  if (containsInternalRagMarker(summary.path)) return true;
+  return detail?.events.some(eventContainsInternalRagMarker) ?? false;
+}
+
+function internalRagFingerprint(summary: TraceSummary): string {
+  return `internal-rag:${summary.id}:${summary.mtimeMs}:${summary.sizeBytes}:${summary.eventCount}`;
+}
+
+function internalSummarySessionIdsFromError(error: unknown): string[] {
+  if (!error || typeof error !== "object") return [];
+  const record = error as Record<string, unknown>;
+  const many = record.internalSummarySessionIds;
+  if (Array.isArray(many)) {
+    return many.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  }
+  const single = record.internalSummarySessionId;
+  return typeof single === "string" && single.trim() ? [single.trim()] : [];
 }
 
 function pidIsRunning(pid: number): boolean {
@@ -116,11 +166,43 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
     await traceIndex.refresh();
     const nowMs = Date.now();
     const summaries = traceIndex.getSummaries();
+    const ignoredSessionIds = store.getInternalSummarySessionIds();
+    const internalTraceIds = new Set<string>();
+    const detailByTraceId = new Map<string, ReturnType<TraceIndex["getSessionDetail"]>>();
+    const getDetail = (summary: TraceSummary): ReturnType<TraceIndex["getSessionDetail"]> | null => {
+      if (!summary.parseable) return null;
+      const cached = detailByTraceId.get(summary.id);
+      if (cached) return cached;
+      const detail = traceIndex.getSessionDetail(summary.id);
+      detailByTraceId.set(summary.id, detail);
+      return detail;
+    };
+
     for (const summary of summaries) {
+      const detail = summary.parseable ? getDetail(summary) : null;
+      if (!isInternalRagSummaryTrace(summary, ignoredSessionIds, detail)) continue;
+      internalTraceIds.add(summary.id);
+      const existing = store.getSession(summary.id);
+      const fingerprint = detail ? buildPromptInput(detail).fingerprint : existing?.fingerprint || internalRagFingerprint(summary);
+      const alreadySkipped = existing?.status === "skipped" && existing.skipReason === INTERNAL_RAG_SKIP_REASON && existing.fingerprint === fingerprint;
+      store.upsertSession({
+        summary,
+        fingerprint,
+        status: "skipped",
+        skipReason: INTERNAL_RAG_SKIP_REASON,
+        nowMs,
+      });
+      store.replaceDocuments(summary.id, [], nowMs);
+      if (!alreadySkipped) skipped += 1;
+    }
+
+    for (const summary of summaries) {
+      if (internalTraceIds.has(summary.id)) continue;
       if (!summary.parseable || !hasNonMetaEvent(summary) || isQuiet(summary, config.rag.quietPeriodMs, nowMs)) continue;
       const existing = store.getSession(summary.id);
       if (!existing?.summary || existing.status !== "complete") continue;
-      const detail = traceIndex.getSessionDetail(summary.id);
+      const detail = getDetail(summary);
+      if (!detail) continue;
       const promptInput = buildPromptInput(detail);
       if (promptInput.fingerprint !== existing.fingerprint) {
         store.upsertSession({
@@ -131,17 +213,21 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
         });
       }
     }
-    const eligible = summaries.filter((summary) => isEligible(summary, config, nowMs));
-    const selected = eligible.slice(0, Math.max(1, options.limit ?? (eligible.length || 1)));
+    const eligible = summaries.filter((summary) => !internalTraceIds.has(summary.id) && isEligible(summary, config, nowMs));
+    const limit = Math.max(1, options.limit ?? (eligible.length || 1));
+    const selected: RagWorkItem[] = [];
+    for (const summary of eligible) {
+      const detail = getDetail(summary);
+      if (!detail) continue;
+      const promptInput = buildPromptInput(detail);
+      const existing = store.getSession(summary.id);
+      if (!options.force && isCurrentTerminalRagSession(existing, promptInput.fingerprint)) continue;
+      selected.push({ summary, detail, promptInput, existing });
+      if (selected.length >= limit) break;
+    }
 
-    for (const summary of selected) {
+    for (const { summary, detail, promptInput, existing } of selected) {
       try {
-        const detail = traceIndex.getSessionDetail(summary.id);
-        const promptInput = buildPromptInput(detail);
-        const existing = store.getSession(summary.id);
-        if (!options.force && existing?.fingerprint === promptInput.fingerprint && existing.status === "complete") {
-          continue;
-        }
         if (promptInput.promptBytes > config.rag.summaryMaxPromptBytes && !options.forceLarge) {
           store.upsertSession({
             summary,
@@ -160,6 +246,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
           nowMs,
         });
         const result = await runHeadlessSummary(config, promptInput.prompt);
+        store.addInternalSummarySessionIds(result.internalSummarySessionIds);
         const corpus = buildRagCorpus(detail, result.content);
         store.upsertSession({
           summary,
@@ -175,6 +262,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
         lexicalDocumentCount += corpus.documents.length;
         summarized += 1;
       } catch (error) {
+        store.addInternalSummarySessionIds(internalSummarySessionIdsFromError(error));
         failed += 1;
         lastError = asErrorMessage(error);
         const detailSummary = traceIndex.getSummaries().find((row) => row.id === summary.id) ?? summary;

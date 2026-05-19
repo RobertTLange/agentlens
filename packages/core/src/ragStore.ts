@@ -81,6 +81,7 @@ interface EmbeddingRow {
 }
 
 const RAG_SCHEMA_VERSION = "1";
+const INTERNAL_SUMMARY_SESSION_IDS_META_KEY = "internal_summary_session_ids";
 
 export class RagStore {
   readonly dbPath: string;
@@ -159,6 +160,26 @@ export class RagStore {
 
   getMeta(key: string): string {
     return (this.db.prepare("SELECT value FROM rag_meta WHERE key = ?").get(key) as { value?: string } | undefined)?.value ?? "";
+  }
+
+  getInternalSummarySessionIds(): Set<string> {
+    try {
+      const parsed = JSON.parse(this.getMeta(INTERNAL_SUMMARY_SESSION_IDS_META_KEY)) as unknown;
+      if (!Array.isArray(parsed)) return new Set();
+      return new Set(parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0));
+    } catch {
+      return new Set();
+    }
+  }
+
+  addInternalSummarySessionIds(sessionIds: Iterable<string>): void {
+    const merged = this.getInternalSummarySessionIds();
+    for (const sessionId of sessionIds) {
+      const trimmed = sessionId.trim();
+      if (trimmed) merged.add(trimmed);
+    }
+    if (merged.size === 0) return;
+    this.setMeta(INTERNAL_SUMMARY_SESSION_IDS_META_KEY, JSON.stringify(Array.from(merged).sort()));
   }
 
   getSession(traceId: string): RagSummaryRecord | null {
