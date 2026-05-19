@@ -61,6 +61,22 @@ function SectionList({ title, values }: { title: string; values: string[] }): JS
   );
 }
 
+function SearchResultDetail({ result }: { result: RagSearchResult }): JSX.Element {
+  return (
+    <div className="rag-detail-scroll">
+      <section className="rag-detail-section">
+        <h3>Goal</h3>
+        <p>{result.userGoal || "-"}</p>
+      </section>
+      <section className="rag-detail-section">
+        <h3>Outcome</h3>
+        <p>{result.outcome || "-"}</p>
+      </section>
+      <SectionList title="Matched Text" values={result.snippets} />
+    </div>
+  );
+}
+
 function SummaryProjectionPlot({
   projection,
   selectedTraceId,
@@ -159,6 +175,9 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     [selectedTraceId, results],
   );
   const tocSummaries = useMemo(() => sortSummariesByOriginalTraceTime(summaries), [summaries]);
+  const isSearching = query.trim().length > 0;
+  const listTitle = isSearching ? "Search Results" : "Summaries";
+  const listCount = isSearching ? `${results.length} results` : `${tocSummaries.length} rows`;
 
   async function refreshBaseData(options: { showLoading?: boolean } = {}): Promise<void> {
     const showLoading = options.showLoading ?? true;
@@ -214,6 +233,14 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     const trimmed = query.trim();
     if (!trimmed) {
       setResults([]);
+      if (selectedTraceIdProp) {
+        setSelectedTraceId(selectedTraceIdProp);
+        return;
+      }
+      setSelectedTraceId((current) => {
+        if (current && summaries.some((summary) => summary.traceId === current)) return current;
+        return summaries[0]?.traceId || "";
+      });
       return;
     }
     const timer = window.setTimeout(() => {
@@ -235,7 +262,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
         .finally(() => setLoading(false));
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [agent, mode, query]);
+  }, [agent, mode, query, selectedTraceIdProp, summaries]);
 
   return (
     <div className="rag-view">
@@ -291,24 +318,42 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       <div className="rag-layout">
         <section className="panel rag-results-panel">
           <div className="panel-head">
-            <h2>Summaries</h2>
-            <span className="mono rag-count">{loading ? "loading" : `${tocSummaries.length} rows`}</span>
+            <h2>{listTitle}</h2>
+            <span className="mono rag-count">{loading ? "loading" : listCount}</span>
           </div>
           <div className="rag-results-list">
-            {tocSummaries.map((summary) => (
-              <button
-                key={summary.traceId}
-                type="button"
-                className={`rag-result-row ${selectedTraceId === summary.traceId ? "active" : ""}`}
-                onClick={() => setSelectedTraceId(summary.traceId)}
-              >
-                <span className="rag-result-main">
-                  <strong>{summary.summary?.title || summary.traceId}</strong>
-                </span>
-                <span className="mono rag-result-time">{fmtTime(originalTraceAtMs(summary))}</span>
-              </button>
-            ))}
-            {tocSummaries.length === 0 && <div className="empty">No summaries</div>}
+            {isSearching ? (
+              results.map((result) => (
+                <button
+                  key={result.traceId}
+                  type="button"
+                  className={`rag-result-row ${selectedTraceId === result.traceId ? "active" : ""}`}
+                  onClick={() => setSelectedTraceId(result.traceId)}
+                >
+                  <span className="rag-result-main">
+                    <strong>{result.title || result.traceId}</strong>
+                    <span>{result.outcome}</span>
+                  </span>
+                  <span className="mono rag-result-time">{result.score.toFixed(4)}</span>
+                </button>
+              ))
+            ) : (
+              tocSummaries.map((summary) => (
+                <button
+                  key={summary.traceId}
+                  type="button"
+                  className={`rag-result-row ${selectedTraceId === summary.traceId ? "active" : ""}`}
+                  onClick={() => setSelectedTraceId(summary.traceId)}
+                >
+                  <span className="rag-result-main">
+                    <strong>{summary.summary?.title || summary.traceId}</strong>
+                  </span>
+                  <span className="mono rag-result-time">{fmtTime(originalTraceAtMs(summary))}</span>
+                </button>
+              ))
+            )}
+            {isSearching && results.length === 0 && <div className="empty">No search results</div>}
+            {!isSearching && tocSummaries.length === 0 && <div className="empty">No summaries</div>}
           </div>
           <SummaryProjectionPlot projection={projection} selectedTraceId={selectedTraceId} onSelectTrace={setSelectedTraceId} />
         </section>
@@ -345,6 +390,8 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
               <SectionList title="Workflow Observations" values={selectedSummary.summary.workflowObservations} />
               <SectionList title="Followups" values={selectedSummary.summary.followups} />
             </div>
+          ) : selectedResult ? (
+            <SearchResultDetail result={selectedResult} />
           ) : (
             <div className="empty">Select a complete summary.</div>
           )}

@@ -1032,10 +1032,21 @@ beforeEach(() => {
         return new Response(JSON.stringify(makeRagStatus()), { status: 200 });
       }
       if (url.includes("/api/rag/search")) {
-        const summary = makeRagSummary("trace-a");
+        const parsed = new URL(url, "http://localhost");
+        const query = parsed.searchParams.get("q") ?? "parser";
+        const summary = query === "orphan"
+          ? makeRagSummary("trace-search-only", {
+              summary: {
+                ...makeRagSummary("trace-search-only").summary!,
+                title: "Search-only summary",
+                userGoal: "Find a result outside the summary page",
+                outcome: "Search-only outcome",
+              },
+            })
+          : makeRagSummary("trace-a");
         return new Response(
           JSON.stringify({
-            query: "parser",
+            query,
             mode: "lexical",
             embeddings: makeRagStatus().embeddings,
             results: [
@@ -1049,9 +1060,9 @@ beforeEach(() => {
                 outcome: summary.summary?.outcome,
                 updatedAtMs: summary.updatedAtMs,
                 summaryGeneratedAtMs: summary.summaryGeneratedAtMs,
-                score: 0.5,
+                score: query === "orphan" ? 0.9 : 0.5,
                 matchedKinds: ["summary"],
-                snippets: ["failed test parser"],
+                snippets: [query === "orphan" ? "orphan-only snippet" : "failed test parser"],
               },
             ],
           }),
@@ -1213,6 +1224,26 @@ describe("App sessions list live motion", () => {
 
     fireEvent.click(document.querySelector(".rag-detail-head button") as HTMLButtonElement);
     await waitFor(() => expect(document.body.textContent).toContain("Trace Inspector"));
+  });
+
+  it("renders search results that are not in the loaded summaries page", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row").length).toBe(2));
+
+    const searchInput = document.querySelector(".rag-search") as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "orphan" } });
+
+    await waitFor(() => expect(document.querySelector(".rag-result-row")?.textContent).toContain("Search-only summary"));
+    expect(document.querySelectorAll(".rag-result-row")).toHaveLength(1);
+    expect(document.querySelector(".rag-detail-head")?.textContent).toContain("trace-search-only");
+    expect(document.body.textContent).toContain("Find a result outside the summary page");
+    expect(document.body.textContent).toContain("orphan-only snippet");
   });
 
   it("renders the summaries ToC by original trace time and syncs plot selection", async () => {
