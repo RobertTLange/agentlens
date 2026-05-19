@@ -143,7 +143,7 @@ async function embedChangedDocuments(
   provider: EmbeddingProvider | null,
   config: AppConfig,
   maxDocuments?: number,
-  options: { kind?: RagDocumentKind } = {},
+  options: { kind?: RagDocumentKind; traceId?: string } = {},
 ): Promise<{ status: RagIndexStatus["embeddings"]; embeddedDocuments: number }> {
   if (!provider) {
     return {
@@ -192,7 +192,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
     : store.getStatus(config).embeddings;
   const embeddingProvider = options.lexicalOnly ? null : createEmbeddingProvider(config);
   const embeddingBudget = options.embeddingLimit ?? options.limit;
-  const embedWithinBudget = async (documentOptions: { kind?: RagDocumentKind } = {}): Promise<void> => {
+  const embedWithinBudget = async (documentOptions: { kind?: RagDocumentKind; traceId?: string } = {}): Promise<void> => {
     if (options.lexicalOnly) return;
     const remainingBudget = embeddingBudget === undefined ? undefined : Math.max(0, embeddingBudget - embeddedDocuments);
     if (remainingBudget !== undefined && remainingBudget <= 0) return;
@@ -298,6 +298,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
           nowMs: Date.now(),
         });
         store.replaceDocuments(summary.id, corpus.documents, Date.now());
+        await embedWithinBudget({ kind: "summary", traceId: summary.id });
         lexicalDocumentCount += corpus.documents.length;
         summarized += 1;
       } catch (error) {

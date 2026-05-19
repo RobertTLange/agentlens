@@ -229,6 +229,19 @@ async function writeQuietTrace(filePath: string, text: string, minute = 0): Prom
   await utimes(filePath, mtime, mtime);
 }
 
+async function waitForPath(filePath: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await stat(filePath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new Error(`timed out waiting for ${filePath}`);
+}
+
 describe("rag corpus", () => {
   it("builds path-based prompts without embedding trace events or raw payloads", () => {
     const detail = { summary: summary(), events: [event(0, "token [REDACTED]")] };
@@ -871,6 +884,81 @@ describe("rag indexer", () => {
       expect(result.embeddedDocuments).toBe(3);
       expect(missingSummaryIds).not.toContain(`${traceId}:summary:0`);
       updated.close();
+    } finally {
+      if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+      else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
+    }
+  });
+
+  it("embeds each completed summary before later summary jobs finish", async () => {
+    const dir = await tempDir();
+    const tracesDir = path.join(dir, "traces");
+    await mkdir(tracesDir, { recursive: true });
+    for (let index = 0; index < 2; index += 1) {
+      const tracePath = path.join(tracesDir, `trace-${index}.jsonl`);
+      await writeQuietTrace(tracePath, buildCodexTraceLog(`summary-session-${index}`, index), index);
+    }
+    const countPath = path.join(dir, "headless-count.txt");
+    const secondStartedPath = path.join(dir, "second-started");
+    const executable = path.join(dir, "blocking-headless.js");
+    await writeFile(
+      executable,
+      `#!/usr/bin/env node
+const fs = require("fs");
+const countPath = ${JSON.stringify(countPath)};
+const secondStartedPath = ${JSON.stringify(secondStartedPath)};
+const count = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) + 1 : 1;
+fs.writeFileSync(countPath, String(count));
+const out = ${JSON.stringify(JSON.stringify(content()))};
+if (count === 1) {
+  console.log(JSON.stringify({ type: "result", result: out }));
+} else {
+  fs.writeFileSync(secondStartedPath, "1");
+  setTimeout(() => console.log(JSON.stringify({ type: "result", result: out })), 4000);
+}
+`,
+      "utf8",
+    );
+    await chmod(executable, 0o755);
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [tracesDir],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 2,
+          agentHint: "codex",
+        },
+      },
+      rag: {
+        dbPath: path.join(dir, "rag.db"),
+        daemonPidPath: path.join(dir, "rag.pid"),
+        daemonLogPath: path.join(dir, "rag.log"),
+        embeddingBackend: "local",
+        embeddingBatchSize: 10,
+        headlessExecutable: executable,
+        summaryTimeoutMs: 1_500,
+      },
+    });
+
+    const previousFakeEmbeddings = process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+    process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = "1";
+    try {
+      const run = runRagIndexOnce(config, { limit: 2, embeddingLimit: 10 });
+      await waitForPath(secondStartedPath);
+      const midPassStore = new RagStore(config);
+      const missingSummaryIds = midPassStore
+        .listDocumentsWithoutEmbeddings("agentlens-hash-test", 10, { kind: "summary" })
+        .map((document) => document.documentId);
+      const completeCount = midPassStore.getStatus(config).sessions.complete;
+      midPassStore.close();
+
+      expect(completeCount).toBe(1);
+      expect(missingSummaryIds).toHaveLength(0);
+      await run;
     } finally {
       if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
       else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
