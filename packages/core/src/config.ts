@@ -12,6 +12,7 @@ import type {
   ModelsConfig,
   ModelContextWindow,
   PricingSyncConfig,
+  RagConfig,
   RetentionConfig,
   RedactionConfig,
   ScanConfig,
@@ -44,7 +45,10 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
   return merged;
 }
 
-export type PartialAppConfigInput = Partial<AppConfig> & { sessionJsonlDirectories?: string[] };
+export type PartialAppConfigInput = Omit<Partial<AppConfig>, "rag"> & {
+  rag?: Partial<RagConfig>;
+  sessionJsonlDirectories?: string[];
+};
 
 function isAgentKind(value: string): value is AgentKind {
   return (
@@ -379,6 +383,36 @@ function mergeModels(
   };
 }
 
+function nonEmptyStringOrDefault(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function mergeRag(input?: Partial<RagConfig>): RagConfig {
+  const defaults = DEFAULT_CONFIG.rag;
+  const backend = input?.embeddingBackend === "disabled" ? "disabled" : defaults.embeddingBackend;
+  return {
+    enabled: input?.enabled ?? defaults.enabled,
+    dbPath: nonEmptyStringOrDefault(input?.dbPath, defaults.dbPath),
+    quietPeriodMs: positiveMsOrDefault(input?.quietPeriodMs, defaults.quietPeriodMs),
+    workerIntervalMs: positiveMsOrDefault(input?.workerIntervalMs, defaults.workerIntervalMs),
+    daemonPidPath: nonEmptyStringOrDefault(input?.daemonPidPath, defaults.daemonPidPath),
+    daemonLogPath: nonEmptyStringOrDefault(input?.daemonLogPath, defaults.daemonLogPath),
+    headlessExecutable: nonEmptyStringOrDefault(input?.headlessExecutable, defaults.headlessExecutable),
+    summaryAgent: nonEmptyStringOrDefault(input?.summaryAgent, defaults.summaryAgent),
+    summaryModel: typeof input?.summaryModel === "string" ? input.summaryModel.trim() : defaults.summaryModel,
+    summaryReasoningEffort: nonEmptyStringOrDefault(input?.summaryReasoningEffort, defaults.summaryReasoningEffort),
+    summaryPermissionMode: nonEmptyStringOrDefault(input?.summaryPermissionMode, defaults.summaryPermissionMode),
+    summaryTimeoutMs: positiveMsOrDefault(input?.summaryTimeoutMs, defaults.summaryTimeoutMs),
+    summaryMaxPromptBytes: positiveMsOrDefault(input?.summaryMaxPromptBytes, defaults.summaryMaxPromptBytes),
+    embeddingBackend: backend,
+    embeddingModel: nonEmptyStringOrDefault(input?.embeddingModel, defaults.embeddingModel),
+    modelCacheDir: nonEmptyStringOrDefault(input?.modelCacheDir, defaults.modelCacheDir),
+    embeddingBatchSize: Math.max(1, positiveIntOrDefault(input?.embeddingBatchSize, defaults.embeddingBatchSize)),
+    searchCandidateMultiplier: Math.max(1, positiveIntOrDefault(input?.searchCandidateMultiplier, defaults.searchCandidateMultiplier)),
+    rrfK: Math.max(1, positiveIntOrDefault(input?.rrfK, defaults.rrfK)),
+  };
+}
+
 export function mergeConfigWithPricingDefaults(
   input?: PartialAppConfigInput,
   pricingDefaults?: PricingDefaultsOverride,
@@ -428,6 +462,7 @@ export function mergeConfigWithPricingDefaults(
     pricingSync: mergePricingSync(input?.pricingSync),
     cost: mergeCost(input?.cost, pricingDefaults?.modelRates),
     models: mergeModels(input?.models, pricingDefaults?.contextWindows),
+    rag: mergeRag(input?.rag),
   };
 }
 

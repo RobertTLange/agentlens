@@ -111,6 +111,27 @@ enabled = true
 ttlMs = 86400000
 timeoutMs = 5000
 
+[rag]
+enabled = true
+dbPath = "~/.agentlens/rag.db"
+quietPeriodMs = 14400000
+workerIntervalMs = 300000
+daemonPidPath = "~/.agentlens/rag-worker.pid"
+daemonLogPath = "~/.agentlens/logs/rag-worker.log"
+headlessExecutable = "headless"
+summaryAgent = "codex"
+summaryModel = ""
+summaryReasoningEffort = "medium"
+summaryPermissionMode = "read-only"
+summaryTimeoutMs = 600000
+summaryMaxPromptBytes = 1500000
+embeddingBackend = "local"
+embeddingModel = "sentence-transformers/all-MiniLM-L6-v2"
+modelCacheDir = "~/.agentlens/models"
+embeddingBatchSize = 32
+searchCandidateMultiplier = 8
+rrfK = 60
+
 [cost]
 enabled = true
 currency = "USD"

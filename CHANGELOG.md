@@ -7,12 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [TBD]
 ### Added
 - Added `agentlens --version` to print the published CLI package version.
+- Added a read-only RAG summary projection API that exposes PCA coordinates and adaptive cluster ids without returning raw embedding vectors.
+- Added a clickable Summaries embedding map with hover/focus title previews and synchronized summary selection.
 
 ### Changed
+- Summaries now use a compact table of contents sorted by original trace time, with trace timestamps right-aligned beside each title.
+- Summary embedding clusters now use adaptive local-neighborhood components without a fixed maximum cluster count.
 - Paced live session, Timeline TOC, timeline strip, and Trace Inspector rendering so large live bursts reveal over animation-frame chunks while counts and status stay current.
 - Trace Inspector now requests compact event payloads for collapsed cards and lazy-loads full raw JSON only when an event is expanded.
 
 ### Fixed
+- Prioritized summary-document embeddings, refreshed the Summaries projection periodically, and decoupled `rag watch --limit` from the default embedding batch so the embedding map catches up in the same daemon pass as summaries arrive.
+- Bounded RAG worker embedding refresh per pass and exposed `--embedding-limit` / `--lexical-only` controls so daemon passes are less likely to OOM.
+- Started detached RAG workers with a larger default Node heap unless `NODE_OPTIONS` already sets one.
+- Kept embedding-map hover previews inside the visible plot boundary.
 - Improved narrow browser resizing so Sessions and Trace Inspector remain usable while the Timeline TOC is hidden.
 - Wrapped long Trace Inspector event text inside event cards instead of overflowing at narrow widths.
 - Reduced browser main-thread and memory pressure for large trace sessions that previously triggered Chrome tab slowdown warnings.

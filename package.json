@@ -18,5 +18,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.0"
+  },
+  "overrides": {
+    "@huggingface/transformers": {
+      "onnxruntime-node": "1.22.0"
+    }
   }
 }

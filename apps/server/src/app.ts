@@ -24,7 +24,17 @@ import type {
   TraceRemovedLiveEnvelope,
   TraceUpsertLiveEnvelope,
 } from "@agentlens/contracts";
-import { DEFAULT_CONFIG_PATH, mergeConfig, saveConfig, TraceIndex } from "@agentlens/core";
+import {
+  DEFAULT_CONFIG_PATH,
+  getRagStatus,
+  getRagProjection,
+  getRagSummary,
+  listRagSummaries,
+  mergeConfig,
+  saveConfig,
+  searchRag,
+  TraceIndex,
+} from "@agentlens/core";
 import {
   buildAgentActivityDay,
   buildAgentActivityWeek,
@@ -44,6 +54,9 @@ const MAX_RECENT_TRACE_LIMIT = 5000;
 const MAX_TRACE_INPUT_TEXT_LENGTH = 2000;
 const ACTIVITY_HEATMAP_METRICS: ActivityHeatmapMetric[] = ["sessions", "output_tokens", "total_cost_usd"];
 const LIVE_STREAM_BATCH_FLUSH_MS = 64;
+const RAG_SEARCH_MODES = ["hybrid", "lexical", "semantic"] as const;
+const RAG_STATUSES = ["pending", "running", "complete", "stale", "failed", "skipped"] as const;
+const AGENT_KINDS = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"] as const;
 
 type StopSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
 
@@ -305,6 +318,45 @@ function parsePositiveInt(rawValue: string | undefined, fallback: number): numbe
   const parsed = Number.parseInt(rawValue, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.max(1, Math.min(MAX_RECENT_TRACE_LIMIT, parsed));
+}
+
+function parseBoundedPositiveInt(rawValue: string | undefined, fallback: number, max: number): number {
+  if (!rawValue) return fallback;
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error("limit must be a positive integer");
+  return Math.max(1, Math.min(max, parsed));
+}
+
+function parseRagSearchMode(rawValue: string | undefined): (typeof RAG_SEARCH_MODES)[number] {
+  if (!rawValue) return "hybrid";
+  const normalized = rawValue.trim().toLowerCase();
+  const found = RAG_SEARCH_MODES.find((mode) => mode === normalized);
+  if (!found) throw new Error("invalid search mode");
+  return found;
+}
+
+function parseRagStatus(rawValue: string | undefined): (typeof RAG_STATUSES)[number] | undefined {
+  if (!rawValue) return undefined;
+  const normalized = rawValue.trim().toLowerCase();
+  const found = RAG_STATUSES.find((status) => status === normalized);
+  if (!found) throw new Error("invalid summary status");
+  return found;
+}
+
+function parseAgentKind(rawValue: string | undefined): (typeof AGENT_KINDS)[number] | undefined {
+  if (!rawValue) return undefined;
+  const normalized = rawValue.trim().toLowerCase();
+  const found = AGENT_KINDS.find((agent) => agent === normalized);
+  if (!found) throw new Error("invalid agent");
+  return found;
+}
+
+function parseSinceWindow(rawValue: string | undefined): string | undefined {
+  if (!rawValue) return undefined;
+  if (!/^(\d+)([smhd])$/.test(rawValue.trim().toLowerCase())) {
+    throw new Error("invalid since window");
+  }
+  return rawValue;
 }
 
 function parseActivityHeatmapMetric(rawValue: string | undefined): ActivityHeatmapMetric | undefined {
@@ -2642,6 +2694,80 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       }
       return { ok: false, error: message };
     }
+  });
+
+  server.get("/api/rag/status", async () => getRagStatus(traceIndex.getConfig()));
+
+  server.get("/api/rag/search", async (request, reply) => {
+    const query = request.query as { q?: string; mode?: string; limit?: string; agent?: string; since?: string };
+    try {
+      const q = typeof query.q === "string" ? query.q.trim() : "";
+      if (!q) {
+        reply.code(400);
+        return { error: "q is required" };
+      }
+      const agent = parseAgentKind(query.agent);
+      const since = parseSinceWindow(query.since);
+      return await searchRag(traceIndex.getConfig(), {
+        query: q,
+        mode: parseRagSearchMode(query.mode),
+        limit: parseBoundedPositiveInt(query.limit, 20, 100),
+        ...(agent ? { agent } : {}),
+        ...(since ? { since } : {}),
+      });
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
+
+  server.get("/api/rag/summaries", async (request, reply) => {
+    const query = request.query as { status?: string; agent?: string; since?: string; limit?: string };
+    try {
+      const status = parseRagStatus(query.status);
+      const agent = parseAgentKind(query.agent);
+      const since = parseSinceWindow(query.since);
+      return await listRagSummaries(traceIndex.getConfig(), {
+        ...(status ? { status } : {}),
+        ...(agent ? { agent } : {}),
+        ...(since ? { since } : {}),
+        limit: parseBoundedPositiveInt(query.limit, 200, 5000),
+      });
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
+
+  server.get("/api/rag/projection", async (request, reply) => {
+    const query = request.query as { status?: string; agent?: string; limit?: string };
+    try {
+      const status = parseRagStatus(query.status);
+      const agent = parseAgentKind(query.agent);
+      return await getRagProjection(traceIndex.getConfig(), {
+        ...(status ? { status } : {}),
+        ...(agent ? { agent } : {}),
+        limit: parseBoundedPositiveInt(query.limit, 5000, 5000),
+      });
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
+
+  server.get("/api/rag/summaries/:traceId", async (request, reply) => {
+    const params = request.params as { traceId: string };
+    const traceId = params.traceId.trim();
+    if (!traceId) {
+      reply.code(400);
+      return { error: "traceId is required" };
+    }
+    const summary = await getRagSummary(traceIndex.getConfig(), traceId);
+    if (!summary) {
+      reply.code(404);
+      return { error: "summary not found" };
+    }
+    return { summary };
   });
 
   server.get("/api/config", async () => ({ config: traceIndex.getConfig() }));

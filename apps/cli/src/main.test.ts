@@ -631,6 +631,11 @@ describe("cli", () => {
     expect(helpOutput).toContain("Usage: agentlens");
     expect(helpOutput).toContain("--browser");
 
+    const ragWatchHelp = runCli(["rag", "watch", "--help"]);
+    expect(ragWatchHelp).toContain("--lexical-only");
+    expect(ragWatchHelp).toContain("--embedding-limit");
+    expect(runCli(["rag", "index", "--help"])).toContain("--embedding-limit");
+
     const noArgsOutput = runCli([]);
     expect(noArgsOutput).toContain("Usage: agentlens");
   });

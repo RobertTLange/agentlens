@@ -10,6 +10,9 @@ import type {
   EventKind,
   NormalizedEvent,
   OverviewStats,
+  RagIndexStatus,
+  RagProjectionResponse,
+  RagSummaryRecord,
   TraceIndexStartupState,
   TracePage,
   TraceSummary,
@@ -134,6 +137,87 @@ function makeTrace(
       compaction: 0,
       meta: 0,
     },
+  };
+}
+
+function makeRagStatus(): RagIndexStatus {
+  return {
+    enabled: true,
+    dbPath: "/tmp/rag.db",
+    daemon: { running: true, pid: 123, pidPath: "/tmp/rag.pid", logPath: "/tmp/rag.log" },
+    sessions: { total: 1, complete: 1, pending: 0, stale: 0, failed: 0, skipped: 0 },
+    documents: 2,
+    embeddings: { status: "unavailable", model: "sentence-transformers/all-MiniLM-L6-v2", dimension: null, count: 0 },
+    lastRunAtMs: 1_700_000_000_000,
+    lastRunError: "",
+  };
+}
+
+function makeRagSummary(traceId = "trace-a", overrides: Partial<RagSummaryRecord> = {}): RagSummaryRecord {
+  const summaryOverrides = overrides.summary ?? {};
+  return {
+    traceId,
+    sessionId: `session-${traceId}`,
+    agent: "codex",
+    parser: "codex",
+    sourceProfile: "session_log",
+    path: `/tmp/${traceId}.jsonl`,
+    firstEventTs: 1_000,
+    lastEventTs: 2_000,
+    mtimeMs: 2_000,
+    sizeBytes: 100,
+    eventCount: 2,
+    fingerprint: "fingerprint",
+    status: "complete",
+    skipReason: "",
+    error: "",
+    summaryText: "Parser regression failed test packages/core",
+    summaryModel: "fake",
+    summaryGeneratedAtMs: 3_000,
+    createdAtMs: 3_000,
+    updatedAtMs: 3_000,
+    ...overrides,
+    summary: overrides.summary === null ? null : {
+      title: "Parser regression",
+      userGoal: "Find prior failed tests",
+      outcome: "Parser behavior fixed",
+      keySteps: ["Opened trace", "Ran tests"],
+      filesOrProjects: ["packages/core"],
+      toolsUsed: ["vitest"],
+      errorsOrBlockers: ["failed test"],
+      decisions: ["Keep lexical fallback"],
+      workflowObservations: ["Search found prior work"],
+      followups: ["Watch CI"],
+      searchKeywords: ["parser", "failed test"],
+      ...summaryOverrides,
+    },
+  };
+}
+
+function makeRagProjection(items: RagSummaryRecord[]): RagProjectionResponse {
+  return {
+    items: items.map((summary, index) => ({
+      traceId: summary.traceId,
+      sessionId: summary.sessionId,
+      agent: summary.agent,
+      path: summary.path,
+      title: summary.summary?.title ?? summary.traceId,
+      summaryGeneratedAtMs: summary.summaryGeneratedAtMs,
+      updatedAtMs: summary.updatedAtMs,
+      lastEventTs: summary.lastEventTs,
+      mtimeMs: summary.mtimeMs,
+      summaryAtMs: summary.summaryGeneratedAtMs ?? summary.updatedAtMs,
+      originalTraceAtMs: summary.lastEventTs ?? summary.mtimeMs,
+      x: items.length <= 1 ? 0.5 : index / (items.length - 1),
+      y: items.length <= 1 ? 0.5 : 1 - index / (items.length - 1),
+      clusterId: index % 3,
+    })),
+    model: "test-model",
+    dimension: 3,
+    sourceCount: items.length,
+    embeddedCount: items.length,
+    missingEmbeddingCount: 0,
+    warnings: [],
   };
 }
 
@@ -944,6 +1028,80 @@ beforeEach(() => {
         const resolvedColor = color || activityWeek.presentation.color;
         return new Response(JSON.stringify({ activity: weekForMetricAndColor(activityWeek, resolvedMetric, resolvedColor) }), { status: 200 });
       }
+      if (url.includes("/api/rag/status")) {
+        return new Response(JSON.stringify(makeRagStatus()), { status: 200 });
+      }
+      if (url.includes("/api/rag/search")) {
+        const parsed = new URL(url, "http://localhost");
+        const query = parsed.searchParams.get("q") ?? "parser";
+        const summary = query === "orphan"
+          ? makeRagSummary("trace-search-only", {
+              summary: {
+                ...makeRagSummary("trace-search-only").summary!,
+                title: "Search-only summary",
+                userGoal: "Find a result outside the summary page",
+                outcome: "Search-only outcome",
+              },
+            })
+          : makeRagSummary("trace-a");
+        return new Response(
+          JSON.stringify({
+            query,
+            mode: "lexical",
+            embeddings: makeRagStatus().embeddings,
+            results: [
+              {
+                traceId: summary.traceId,
+                sessionId: summary.sessionId,
+                agent: summary.agent,
+                path: summary.path,
+                title: summary.summary?.title,
+                userGoal: summary.summary?.userGoal,
+                outcome: summary.summary?.outcome,
+                updatedAtMs: summary.updatedAtMs,
+                summaryGeneratedAtMs: summary.summaryGeneratedAtMs,
+                score: query === "orphan" ? 0.9 : 0.5,
+                matchedKinds: ["summary"],
+                snippets: [query === "orphan" ? "orphan-only snippet" : "failed test parser"],
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/api/rag/projection")) {
+        const summaries = [
+          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
+          makeRagSummary("trace-b", {
+            lastEventTs: 8_000,
+            mtimeMs: 7_900,
+            summaryGeneratedAtMs: 5_000,
+            updatedAtMs: 5_100,
+            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
+          }),
+        ];
+        return new Response(JSON.stringify(makeRagProjection(summaries)), { status: 200 });
+      }
+      if (url.includes("/api/rag/summaries/")) {
+        const traceId = decodeURIComponent(url.match(/\/api\/rag\/summaries\/([^?]+)/)?.[1] ?? "");
+        if (traceId === "trace-a") {
+          return new Response(JSON.stringify({ summary: makeRagSummary(traceId) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "summary not found" }), { status: 404 });
+      }
+      if (url.includes("/api/rag/summaries")) {
+        const summaries = [
+          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
+          makeRagSummary("trace-b", {
+            lastEventTs: 8_000,
+            mtimeMs: 7_900,
+            summaryGeneratedAtMs: 5_000,
+            updatedAtMs: 5_100,
+            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
+          }),
+        ];
+        return new Response(JSON.stringify({ summaries }), { status: 200 });
+      }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
         const custom = stopResponsesByTraceId[traceId];
@@ -1046,6 +1204,100 @@ describe("App sessions list live motion", () => {
       "https://github.com/RobertTLange/agentlens",
     );
     expect(document.querySelector("footer")).toBeNull();
+  });
+
+  it("opens the Summaries tab, searches, renders detail, and navigates to Inspector", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelector(".rag-view")).toBeTruthy());
+    await waitFor(() => expect(document.body.textContent).toContain("Parser regression"));
+
+    const searchInput = document.querySelector(".rag-search") as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "parser" } });
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/search"))).toBe(true));
+    expect(document.body.textContent).toContain("Parser behavior fixed");
+
+    fireEvent.click(document.querySelector(".rag-detail-head button") as HTMLButtonElement);
+    await waitFor(() => expect(document.body.textContent).toContain("Trace Inspector"));
+  });
+
+  it("renders search results that are not in the loaded summaries page", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row").length).toBe(2));
+
+    const searchInput = document.querySelector(".rag-search") as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "orphan" } });
+
+    await waitFor(() => expect(document.querySelector(".rag-result-row")?.textContent).toContain("Search-only summary"));
+    expect(document.querySelectorAll(".rag-result-row")).toHaveLength(1);
+    expect(document.querySelector(".rag-detail-head")?.textContent).toContain("trace-search-only");
+    expect(document.body.textContent).toContain("Find a result outside the summary page");
+    expect(document.body.textContent).toContain("orphan-only snippet");
+  });
+
+  it("renders the summaries ToC by original trace time and syncs plot selection", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row").length).toBe(2));
+    const rows = Array.from(document.querySelectorAll(".rag-result-row"));
+    expect(rows[0]?.textContent).toContain("Newer trace summary");
+    expect(rows[1]?.textContent).toContain("Parser regression");
+    expect(rows[0]?.querySelector(".rag-result-time")?.textContent).toContain("1970");
+    const rowMetaLabels = Array.from(rows[0]?.querySelectorAll(".rag-result-main span") ?? []).map((node) => node.textContent);
+    expect(rowMetaLabels).toEqual([]);
+    expect(rows[0]?.textContent).not.toContain("Second detail");
+    expect(rows[0]?.textContent).not.toContain("/tmp/");
+    expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2);
+
+    const parserPoint = Array.from(document.querySelectorAll(".rag-projection-point")).find(
+      (node) => node.getAttribute("title") === "Parser regression",
+    );
+    if (!(parserPoint instanceof HTMLButtonElement)) throw new Error("missing parser projection point");
+    fireEvent.mouseEnter(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")?.textContent).toBe("Parser regression");
+    fireEvent.mouseLeave(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")).toBeNull();
+    fireEvent.focus(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")?.textContent).toBe("Parser regression");
+    fireEvent.blur(parserPoint);
+    expect(document.querySelector(".rag-projection-preview")).toBeNull();
+    fireEvent.click(parserPoint);
+
+    await waitFor(() => expect(document.querySelector(".rag-result-row.active")?.textContent).toContain("Parser regression"));
+    expect(parserPoint.getAttribute("aria-pressed")).toBe("true");
+    expect(document.body.textContent).toContain("Parser behavior fixed");
+  });
+
+  it("shows a trace summary shortcut only when the selected inspector trace has a summary", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    expect(document.querySelector(".inspector-summary-button")).toBeNull();
+
+    fireEvent.click(getTraceRow("trace-a"));
+    await waitFor(() => expect(document.querySelector(".inspector-summary-button")).toBeTruthy());
+
+    fireEvent.click(document.querySelector(".inspector-summary-button") as HTMLButtonElement);
+
+    await waitFor(() => expect(document.querySelector(".rag-view")).toBeTruthy());
+    await waitFor(() => expect(document.querySelector(".rag-result-row.active")?.textContent).toContain("Parser regression"));
+    expect(document.querySelector(".rag-detail-head")?.textContent).toContain("trace-a");
   });
 
   it("requests compact trace pages for the inspector", async () => {

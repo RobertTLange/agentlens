@@ -8,6 +8,7 @@ import type {
   NormalizedEvent,
   OverviewStats,
   TracePage,
+  RagSummaryRecord,
   TraceSummary,
 } from "@agentlens/contracts";
 import {
@@ -24,6 +25,7 @@ import {
 } from "./view-model.js";
 import { SessionTraceRow } from "./SessionTraceRow.js";
 import { ActivityView } from "./ActivityView.js";
+import { SummariesView } from "./SummariesView.js";
 import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
@@ -405,7 +407,9 @@ export function App(): JSX.Element {
   const [flashStatus, setFlashStatus] = useState("");
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
-  const [activeView, setActiveView] = useState<"inspector" | "activity">("inspector");
+  const [activeView, setActiveView] = useState<"inspector" | "activity" | "summaries">("inspector");
+  const [summariesSelectedTraceId, setSummariesSelectedTraceId] = useState("");
+  const [inspectorSummaryTraceId, setInspectorSummaryTraceId] = useState("");
   const [selectedHeatmapMetric, setSelectedHeatmapMetric] = useState<ActivityHeatmapMetric | null>(null);
   const [selectedHeatmapColor, setSelectedHeatmapColor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -618,6 +622,7 @@ export function App(): JSX.Element {
     : selectedAdHocPath
       ? `ad-hoc file · ${selectedAdHocPath}`
     : "Pick a session to inspect.";
+  const hasInspectorSummary = !!selectedTraceSummary && inspectorSummaryTraceId === selectedTraceSummary.id;
   const sessionStatusCounts = useMemo(() => {
     const counts = {
       running: 0,
@@ -1564,6 +1569,37 @@ export function App(): JSX.Element {
   }, [clearEventAppendQueue, includeMeta, liveTick, selectedId, selectedTraceSummaryStamp, traces]);
 
   useEffect(() => {
+    const traceId = selectedTraceSummary?.id ?? "";
+    setInspectorSummaryTraceId("");
+    if (!traceId) return;
+    let cancelled = false;
+    fetch(`${API}/api/rag/summaries/${encodeURIComponent(traceId)}`)
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return response.json() as Promise<{ summary?: RagSummaryRecord | null }>;
+      })
+      .then((json) => {
+        if (cancelled) return;
+        const summary = json?.summary;
+        if (summary?.traceId === traceId && summary.summary) {
+          setInspectorSummaryTraceId(traceId);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setInspectorSummaryTraceId("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTraceSummary?.id]);
+
+  const openSelectedTraceSummary = useCallback(() => {
+    if (!selectedTraceSummary || !hasInspectorSummary) return;
+    setSummariesSelectedTraceId(selectedTraceSummary.id);
+    setActiveView("summaries");
+  }, [hasInspectorSummary, selectedTraceSummary]);
+
+  useEffect(() => {
     if (!autoFollow) return;
     if (expandedEventIds.size > 0) return;
     if (!eventsPinnedToLatest) return;
@@ -2140,6 +2176,15 @@ export function App(): JSX.Element {
               >
                 Activity
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeView === "summaries"}
+                className={`mono hero-view-button ${activeView === "summaries" ? "active" : ""}`}
+                onClick={() => setActiveView("summaries")}
+              >
+                Summaries
+              </button>
             </div>
             <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
               <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -2347,6 +2392,11 @@ export function App(): JSX.Element {
                   <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
                   auto follow
                 </label>
+                {hasInspectorSummary && (
+                  <button type="button" className="mono inspector-summary-button" onClick={openSelectedTraceSummary}>
+                    View summary
+                  </button>
+                )}
                 {inspectorPendingAppendCount > 0 && (
                   <button type="button" className="mono inspector-resume-follow-button" onClick={resumeInspectorFollow}>
                     {`Jump to latest · ${inspectorPendingAppendCount} new`}
@@ -2493,7 +2543,7 @@ export function App(): JSX.Element {
         </section>
       </div>
     </>
-      ) : (
+      ) : activeView === "activity" ? (
         <ActivityView
           startup={startup}
           traceAgentById={traceAgentById}
@@ -2502,6 +2552,14 @@ export function App(): JSX.Element {
           selectedHeatmapColor={selectedHeatmapColor}
           onSelectHeatmapMetric={setSelectedHeatmapMetric}
           onSelectHeatmapColor={setSelectedHeatmapColor}
+          onInspectTrace={(traceId) => {
+            setSelectedId(traceId);
+            setActiveView("inspector");
+          }}
+        />
+      ) : (
+        <SummariesView
+          selectedTraceId={summariesSelectedTraceId}
           onInspectTrace={(traceId) => {
             setSelectedId(traceId);
             setActiveView("inspector");
