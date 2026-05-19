@@ -753,19 +753,23 @@ rag
   .command("index")
   .option("--once", "Run one indexing pass")
   .option("--limit <n>", "Maximum traces to summarize")
+  .option("--embedding-limit <n>", "Maximum documents to embed")
   .option("--force", "Refresh even when fingerprints match")
   .option("--force-large", "Allow prompts over rag.summaryMaxPromptBytes")
   .option("--lexical-only", "Skip embedding refresh")
   .option("--json", "JSON output")
   .action(
-    async (opts: { once?: boolean; limit?: string; force?: boolean; forceLarge?: boolean; lexicalOnly?: boolean; json?: boolean }) => {
+    async (opts: { once?: boolean; limit?: string; embeddingLimit?: string; force?: boolean; forceLarge?: boolean; lexicalOnly?: boolean; json?: boolean }) => {
       if (!opts.once) {
         throw new Error("rag index currently requires --once");
       }
       const config = await loadConfig(program.opts<{ config: string }>().config);
+      const limit = opts.limit ? parseLimitOption(opts.limit, 20) : undefined;
+      const embeddingLimit = opts.embeddingLimit ? parseLimitOption(opts.embeddingLimit, 0) : undefined;
       const result = await runRagIndexOnce(config, {
         once: true,
-        ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(embeddingLimit !== undefined ? { embeddingLimit } : {}),
         ...(opts.force !== undefined ? { force: opts.force } : {}),
         ...(opts.forceLarge !== undefined ? { forceLarge: opts.forceLarge } : {}),
         ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
@@ -775,7 +779,7 @@ rag
         return;
       }
       printTable([
-        ["db", "discovered", "eligible", "summarized", "skipped", "failed", "documents", "embeddings"],
+        ["db", "discovered", "eligible", "summarized", "skipped", "failed", "documents", "embedded", "embeddings"],
         [
           result.dbPath,
           String(result.discoveredTraces),
@@ -784,6 +788,7 @@ rag
           String(result.skipped),
           String(result.failed),
           String(result.lexicalDocumentCount),
+          String(result.embeddedDocuments),
           result.embeddingStatus.status,
         ],
       ]);
@@ -795,28 +800,36 @@ rag
   .command("watch")
   .option("--interval <window>", "Foreground interval override")
   .option("--limit <n>", "Maximum traces per pass")
+  .option("--embedding-limit <n>", "Maximum documents to embed per pass")
+  .option("--lexical-only", "Skip embedding refresh")
   .option("--foreground", "Run inline")
   .option("--json", "JSON output")
-  .action(async (opts: { interval?: string; limit?: string; foreground?: boolean; json?: boolean }) => {
+  .action(async (opts: { interval?: string; limit?: string; embeddingLimit?: string; lexicalOnly?: boolean; foreground?: boolean; json?: boolean }) => {
     const configPath = program.opts<{ config: string }>().config;
     const config = await loadConfig(configPath);
+    const limit = opts.limit ? parseLimitOption(opts.limit, 20) : undefined;
+    const embeddingLimit = opts.embeddingLimit ? parseLimitOption(opts.embeddingLimit, 0) : undefined;
     if (opts.foreground) {
       const intervalMs = opts.interval ? toMsWindow(opts.interval) : config.rag.workerIntervalMs;
       if (opts.interval && intervalMs <= 0) throw new Error(`unsupported interval: ${opts.interval}`);
       do {
         const result = await runRagIndexOnce(config, {
-          ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+          embeddingLimit: embeddingLimit ?? limit ?? config.rag.embeddingBatchSize,
+          ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
         });
         if (opts.json) console.log(JSON.stringify(result));
-        else console.log(`rag pass: summarized=${result.summarized} skipped=${result.skipped} failed=${result.failed}`);
+        else console.log(`rag pass: summarized=${result.summarized} skipped=${result.skipped} failed=${result.failed} embedded=${result.embeddedDocuments} embeddings=${result.embeddingStatus.status}`);
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       } while (true);
     }
     const intervalMs = opts.interval ? toMsWindow(opts.interval) : undefined;
     if (opts.interval && (!intervalMs || intervalMs <= 0)) throw new Error(`unsupported interval: ${opts.interval}`);
     const daemon = startRagDaemon(configPath, config, {
-      ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+      ...(embeddingLimit !== undefined ? { embeddingLimit } : {}),
       ...(intervalMs !== undefined ? { intervalMs } : {}),
+      ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
     });
     if (opts.json) {
       console.log(JSON.stringify(daemon, null, 2));
@@ -831,13 +844,15 @@ rag
   .command("worker")
   .option("--foreground", "Run worker loop in foreground")
   .option("--limit <n>", "Maximum traces per pass")
+  .option("--embedding-limit <n>", "Internal embedding document limit per pass")
   .option("--interval-ms <n>", "Internal worker interval override in milliseconds")
   .option("--lexical-only", "Skip embedding refresh")
-  .action(async (opts: { foreground?: boolean; limit?: string; intervalMs?: string; lexicalOnly?: boolean }) => {
+  .action(async (opts: { foreground?: boolean; limit?: string; embeddingLimit?: string; intervalMs?: string; lexicalOnly?: boolean }) => {
     if (!opts.foreground) throw new Error("rag worker is internal; use rag watch");
     const intervalMs = opts.intervalMs ? parseLimitOption(opts.intervalMs, 0, Number.MAX_SAFE_INTEGER) : undefined;
     await runRagWorker(program.opts<{ config: string }>().config, {
       ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+      ...(opts.embeddingLimit ? { embeddingLimit: parseLimitOption(opts.embeddingLimit, 0) } : {}),
       ...(intervalMs !== undefined ? { intervalMs } : {}),
       ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
     });

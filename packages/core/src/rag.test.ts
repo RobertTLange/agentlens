@@ -3,10 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@agentlens/contracts";
-import { mergeConfig } from "./config.js";
+import { mergeConfig, saveConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
-import { runRagIndexOnce } from "./ragIndexer.js";
+import { runRagIndexOnce, runRagWorker } from "./ragIndexer.js";
 import { assignAdaptiveClusters, getRagProjection } from "./ragProjection.js";
 import { RagStore } from "./ragStore.js";
 import { stableId } from "./utils.js";
@@ -25,6 +25,72 @@ async function tempDir(): Promise<string> {
 
 function testConfig(dbPath: string, extra: Record<string, unknown> = {}) {
   return mergeConfig({
+    sessionLogDirectories: [],
+    sources: {
+      codex_home: {
+        name: "codex_home",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 2,
+        agentHint: "codex",
+      },
+      claude_projects: {
+        name: "claude_projects",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 2,
+        agentHint: "claude",
+      },
+      claude_history: {
+        name: "claude_history",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["history.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 2,
+        agentHint: "claude",
+      },
+      cursor_agent_transcripts: {
+        name: "cursor_agent_transcripts",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 2,
+        agentHint: "cursor",
+      },
+      opencode_storage_session: {
+        name: "opencode_storage_session",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.json"],
+        excludeGlobs: [],
+        maxDepth: 2,
+        agentHint: "opencode",
+      },
+      gemini_tmp: {
+        name: "gemini_tmp",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/chats/session-*.json", "**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 2,
+        agentHint: "gemini",
+      },
+      pi_agent_sessions: {
+        name: "pi_agent_sessions",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 2,
+        agentHint: "pi",
+      },
+    },
     rag: {
       dbPath,
       daemonPidPath: path.join(path.dirname(dbPath), "rag.pid"),
@@ -567,6 +633,91 @@ describe("rag indexer", () => {
     expect(second.summarized).toBe(2);
     expect(store.getStatus(config).sessions.complete).toBe(4);
     store.close();
+  });
+
+  it("bounds embedding refresh by the pass limit", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local", embeddingBatchSize: 10 });
+    const store = new RagStore(config);
+    store.upsertSession({
+      summary: summary(),
+      fingerprint: "complete",
+      status: "complete",
+      content: content(),
+      summaryText: "summary",
+      summaryModel: "fake",
+      summaryGeneratedAtMs: 1,
+      nowMs: 2,
+    });
+    store.replaceDocuments(
+      "trace-1",
+      Array.from({ length: 5 }, (_, index) => ({
+        documentId: `trace-1:trace_chunk:${index}`,
+        traceId: "trace-1",
+        kind: "trace" as const,
+        chunkIndex: index,
+        content: `document ${index}`,
+      })),
+      3,
+    );
+    store.close();
+
+    const previousFakeEmbeddings = process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+    process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = "1";
+    try {
+      const result = await runRagIndexOnce(config, { limit: 2 });
+      const updated = new RagStore(config);
+
+      expect(result.embeddedDocuments).toBe(2);
+      expect(updated.getStatus(config).embeddings).toMatchObject({ status: "dirty", count: 2 });
+      updated.close();
+    } finally {
+      if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+      else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
+    }
+  });
+
+  it("uses a bounded embedding pass by default in the worker loop", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local", embeddingBatchSize: 3 });
+    const configPath = path.join(dir, "config.toml");
+    await saveConfig(config, configPath);
+    const store = new RagStore(config);
+    store.upsertSession({
+      summary: summary(),
+      fingerprint: "complete",
+      status: "complete",
+      content: content(),
+      summaryText: "summary",
+      summaryModel: "fake",
+      summaryGeneratedAtMs: 1,
+      nowMs: 2,
+    });
+    store.replaceDocuments(
+      "trace-1",
+      Array.from({ length: 8 }, (_, index) => ({
+        documentId: `trace-1:trace_chunk:${index}`,
+        traceId: "trace-1",
+        kind: "trace" as const,
+        chunkIndex: index,
+        content: `document ${index}`,
+      })),
+      3,
+    );
+    store.close();
+
+    const previousFakeEmbeddings = process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+    process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = "1";
+    try {
+      await runRagWorker(configPath, { once: true });
+      const updated = new RagStore(config);
+
+      expect(updated.getStatus(config).embeddings).toMatchObject({ status: "dirty", count: 3 });
+      updated.close();
+    } finally {
+      if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+      else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
+    }
   });
 });
 

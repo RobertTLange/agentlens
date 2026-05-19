@@ -23,6 +23,7 @@ import { missingRagStatus, RagStore } from "./ragStore.js";
 export interface RagIndexOptions {
   once?: boolean;
   limit?: number;
+  embeddingLimit?: number;
   force?: boolean;
   forceLarge?: boolean;
   lexicalOnly?: boolean;
@@ -36,6 +37,7 @@ export interface RagIndexRunResult {
   skipped: number;
   failed: number;
   lexicalDocumentCount: number;
+  embeddedDocuments: number;
   embeddingStatus: RagIndexStatus["embeddings"];
   lastError: string;
 }
@@ -129,14 +131,27 @@ function readPid(pidPath: string): number | null {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
-async function embedChangedDocuments(store: RagStore, provider: EmbeddingProvider | null, config: AppConfig): Promise<RagIndexStatus["embeddings"]> {
+async function embedChangedDocuments(
+  store: RagStore,
+  provider: EmbeddingProvider | null,
+  config: AppConfig,
+  maxDocuments?: number,
+): Promise<{ status: RagIndexStatus["embeddings"]; embeddedDocuments: number }> {
   if (!provider) {
-    return { status: "disabled", model: config.rag.embeddingModel, dimension: null, count: 0 };
+    return {
+      status: { status: "disabled", model: config.rag.embeddingModel, dimension: null, count: 0 },
+      embeddedDocuments: 0,
+    };
   }
+  let embeddedDocuments = 0;
+  const budget = maxDocuments === undefined ? Number.POSITIVE_INFINITY : Math.max(0, maxDocuments);
   try {
     store.setMeta("embedding_model", provider.model);
-    for (;;) {
-      const batch = store.listDocumentsWithoutEmbeddings(provider.model, config.rag.embeddingBatchSize);
+    while (embeddedDocuments < budget) {
+      const remaining = budget - embeddedDocuments;
+      const batchLimit = Math.min(config.rag.embeddingBatchSize, remaining);
+      if (batchLimit <= 0) break;
+      const batch = store.listDocumentsWithoutEmbeddings(provider.model, batchLimit);
       if (batch.length === 0) break;
       const vectors = await provider.embed(batch.map((document) => document.content));
       const nowMs = Date.now();
@@ -145,12 +160,13 @@ async function embedChangedDocuments(store: RagStore, provider: EmbeddingProvide
         const document = batch[index];
         if (vector && document) {
           store.upsertEmbedding(document.documentId, provider.model, vector, nowMs);
+          embeddedDocuments += 1;
         }
       }
     }
-    return store.getStatus(config).embeddings;
+    return { status: store.getStatus(config).embeddings, embeddedDocuments };
   } catch (error) {
-    return unavailableEmbeddingStatus(config, error);
+    return { status: unavailableEmbeddingStatus(config, error), embeddedDocuments };
   }
 }
 
@@ -277,9 +293,12 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
       }
     }
 
-    const embeddingStatus = options.lexicalOnly
-      ? { status: "disabled" as const, model: config.rag.embeddingModel, dimension: null, count: 0 }
-      : await embedChangedDocuments(store, createEmbeddingProvider(config), config);
+    const embeddingResult = options.lexicalOnly
+      ? {
+          status: { status: "disabled" as const, model: config.rag.embeddingModel, dimension: null, count: 0 },
+          embeddedDocuments: 0,
+        }
+      : await embedChangedDocuments(store, createEmbeddingProvider(config), config, options.embeddingLimit ?? options.limit);
     store.setMeta("last_run_at_ms", String(Date.now()));
     store.setMeta("last_run_error", lastError);
     return {
@@ -290,7 +309,8 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
       skipped,
       failed,
       lexicalDocumentCount,
-      embeddingStatus,
+      embeddedDocuments: embeddingResult.embeddedDocuments,
+      embeddingStatus: embeddingResult.status,
       lastError,
     };
   } finally {
@@ -385,12 +405,13 @@ export async function getRagSummary(config: AppConfig, traceId: string): Promise
 
 export async function runRagWorker(
   configPath: string,
-  options: { once?: boolean; limit?: number; lexicalOnly?: boolean; intervalMs?: number } = {},
+  options: { once?: boolean; limit?: number; embeddingLimit?: number; lexicalOnly?: boolean; intervalMs?: number } = {},
 ): Promise<void> {
   do {
     const config = await loadConfig(configPath);
     await runRagIndexOnce(config, {
       ...(options.limit !== undefined ? { limit: options.limit } : {}),
+      embeddingLimit: options.embeddingLimit ?? options.limit ?? config.rag.embeddingBatchSize,
       ...(options.lexicalOnly !== undefined ? { lexicalOnly: options.lexicalOnly } : {}),
     });
     if (options.once) break;
@@ -401,7 +422,7 @@ export async function runRagWorker(
 export function startRagDaemon(
   configPath: string,
   config: AppConfig,
-  options: { limit?: number; intervalMs?: number } = {},
+  options: { limit?: number; embeddingLimit?: number; intervalMs?: number; lexicalOnly?: boolean } = {},
 ): { reused: boolean; pid: number; pidPath: string; logPath: string } {
   const pidPath = path.resolve(expandHome(config.rag.daemonPidPath));
   const logPath = path.resolve(expandHome(config.rag.daemonLogPath));
@@ -414,7 +435,9 @@ export function startRagDaemon(
   const out = openSync(logPath, "a");
   const workerArgs = [process.argv[1] ?? "", "--config", configPath, "rag", "worker", "--foreground"];
   if (options.limit !== undefined) workerArgs.push("--limit", String(options.limit));
+  if (options.embeddingLimit !== undefined) workerArgs.push("--embedding-limit", String(options.embeddingLimit));
   if (options.intervalMs !== undefined) workerArgs.push("--interval-ms", String(options.intervalMs));
+  if (options.lexicalOnly) workerArgs.push("--lexical-only");
   const child = spawn(process.execPath, workerArgs, {
     detached: true,
     stdio: ["ignore", out, out],

@@ -32,7 +32,7 @@ export class LocalHfEmbeddingProvider implements EmbeddingProvider {
     const extractor = await this.load();
     const vectors: Float32Array[] = [];
     for (const text of texts) {
-      const output = await extractor(text, { pooling: "mean", normalize: true });
+      const output = await extractor(text, { pooling: "mean", normalize: true, truncation: true });
       vectors.push(normalizeVector(extractVector(output)));
     }
     return vectors;
