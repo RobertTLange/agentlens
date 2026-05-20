@@ -212,7 +212,11 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
   };
   try {
     await embedAllMissingSummaryDocuments();
-    await traceIndex.refreshRecent();
+    if (options.limit === undefined) {
+      await traceIndex.refresh();
+    } else {
+      await traceIndex.refreshRecent();
+    }
     const nowMs = Date.now();
     const summaries = traceIndex.getSummaries();
     const discoveredTraceCount = traceIndex.getStartupStatus().discoveredTraceCount || summaries.length;
