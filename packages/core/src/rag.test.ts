@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import type { NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@age
 import { mergeConfig, saveConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
-import { ragWorkerNodeOptions, runRagIndexOnce, runRagWorker, stopRagDaemon } from "./ragIndexer.js";
+import { ragWorkerNodeOptions, runRagIndexOnce, runRagSupervisor, runRagWorker, stopRagDaemon } from "./ragIndexer.js";
 import { assignAdaptiveClusters, getRagProjection } from "./ragProjection.js";
 import { RagStore } from "./ragStore.js";
 import { readDaemonPid } from "./ragStoreHelpers.js";
@@ -1053,6 +1053,36 @@ if (count === 1) {
     store.close();
     expect(stopRagDaemon(config)).toEqual({ stopped: false, stale: true, pid: process.pid });
     expect(() => process.kill(process.pid, 0)).not.toThrow();
+  });
+
+  it("restarts a crashed worker child from the RAG supervisor", async () => {
+    const dir = await tempDir();
+    const configPath = path.join(dir, "config.toml");
+    await saveConfig(testConfig(path.join(dir, "rag.db")), configPath);
+    const markerPath = path.join(dir, "first-run");
+    const attemptsPath = path.join(dir, "attempts.txt");
+    const fakeCli = path.join(dir, "fake-agentlens.js");
+    await writeFile(
+      fakeCli,
+      `#!/usr/bin/env node
+const fs = require("fs");
+fs.appendFileSync(${JSON.stringify(attemptsPath)}, process.argv.slice(2).join(" ") + "\\n");
+if (!fs.existsSync(${JSON.stringify(markerPath)})) {
+  fs.writeFileSync(${JSON.stringify(markerPath)}, "crashed");
+  process.exit(134);
+}
+process.exit(0);
+`,
+      "utf8",
+    );
+    await chmod(fakeCli, 0o755);
+
+    await runRagSupervisor(configPath, {}, { entrypoint: fakeCli, maxPasses: 2, restartDelayMs: 1, maxRestartDelayMs: 1 });
+    const attempts = (await readFile(attemptsPath, "utf8")).trim().split("\n");
+
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toContain("rag worker --foreground --once");
+    expect(attempts[1]).toContain("rag worker --foreground --once");
   });
 });
 
