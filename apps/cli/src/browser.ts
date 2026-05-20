@@ -265,6 +265,27 @@ async function resolveListeningPid(port: number): Promise<number | undefined> {
   }
 }
 
+async function processLooksLikeAgentLensServer(pid: number): Promise<boolean> {
+  if (process.platform === "win32") {
+    return false;
+  }
+  try {
+    const command = await new Promise<string>((resolve, reject) => {
+      execFile("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }, (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+    const normalized = command.toLowerCase();
+    return normalized.includes("agentlens") && normalized.includes("server");
+  } catch {
+    return false;
+  }
+}
+
 async function writeRuntimeState({
   host,
   logPath,
@@ -433,16 +454,22 @@ export async function launchBrowser(options: LaunchBrowserOptions): Promise<Laun
       typeof runtimeState?.pid === "number" && typeof listeningPid === "number" && runtimeState.pid === listeningPid;
     const runtimeMatchesTarget =
       runtimeState?.host === host && runtimeState?.port === port && runtimeState?.url === url;
+    const untrackedAgentLensServer =
+      typeof listeningPid === "number" &&
+      !managedPidMatches &&
+      Boolean(options.configFingerprint) &&
+      (await processLooksLikeAgentLensServer(listeningPid));
     const shouldRestartManagedServer =
       Boolean(options.configFingerprint) &&
       typeof runtimeState?.configFingerprint === "string" &&
       runtimeState.configFingerprint !== options.configFingerprint &&
       managedPidMatches &&
       runtimeMatchesTarget;
+    const shouldRestartUntrackedAgentLensServer = untrackedAgentLensServer && !runtimeMatchesTarget;
 
-    if (shouldRestartManagedServer && typeof runtimeState?.pid === "number") {
+    if ((shouldRestartManagedServer && typeof runtimeState?.pid === "number") || shouldRestartUntrackedAgentLensServer) {
       try {
-        process.kill(runtimeState.pid, "SIGTERM");
+        process.kill(shouldRestartUntrackedAgentLensServer ? listeningPid as number : runtimeState?.pid as number, "SIGTERM");
         if (await waitForPortUnbound(host, port, 5_000)) {
           const restarted = await spawnServer({
             host,

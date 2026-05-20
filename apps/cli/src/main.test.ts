@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -725,6 +725,94 @@ describe("cli", () => {
       expect(pidInfo.pid).not.toBe(999999);
     } finally {
       await healthServer.close();
+    }
+  }, 20_000);
+
+  it("restarts an untracked AgentLens server when runtime metadata points elsewhere", async () => {
+    const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-runtime-untracked-"));
+    const fakeEntrypoint = path.join(runtimeDir, "fake-agentlens-server.mjs");
+    const startsPath = path.join(runtimeDir, "starts.log");
+    const port = await getFreePort();
+    await writeFile(
+      fakeEntrypoint,
+      `import { createServer } from "node:http";
+import { appendFileSync } from "node:fs";
+const host = process.env.AGENTLENS_HOST ?? "127.0.0.1";
+const port = Number(process.env.AGENTLENS_PORT ?? "8787");
+appendFileSync(${JSON.stringify(startsPath)}, String(process.pid) + "\\n", "utf8");
+const server = createServer((request, response) => {
+  if (request.url === "/api/healthz") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  if (request.url === "/api/readyz") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true, ready: true }));
+    return;
+  }
+  response.writeHead(200, { "content-type": "text/plain" });
+  response.end("ok");
+});
+server.listen(port, host);
+process.on("SIGTERM", () => {
+  server.close(() => process.exit(0));
+});`,
+      "utf8",
+    );
+    const oldServer = spawn(process.execPath, [fakeEntrypoint], {
+      cwd: repoRoot,
+      env: { ...process.env, AGENTLENS_HOST: "127.0.0.1", AGENTLENS_PORT: String(port) },
+      stdio: "ignore",
+    });
+    await waitForHealth(`http://127.0.0.1:${port}/api/healthz`);
+    const pidPath = path.join(runtimeDir, "server.pid");
+    await writeFile(
+      pidPath,
+      JSON.stringify(
+        {
+          pid: 999999,
+          host: "127.0.0.1",
+          port: 1,
+          url: "http://127.0.0.1:1",
+          logPath: path.join(runtimeDir, "logs", "server.log"),
+          startedAt: "2026-03-15T00:00:00.000Z",
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf8",
+    );
+
+    let newPid: number | undefined;
+    try {
+      const output = await runCliWithEnvAsync(
+        ["--browser", "--host", "127.0.0.1", "--port", String(port)],
+        {
+          AGENTLENS_SKIP_OPEN: "1",
+          AGENTLENS_RUNTIME_DIR: runtimeDir,
+          AGENTLENS_SERVER_ENTRYPOINT: fakeEntrypoint,
+          AGENTLENS_STARTUP_TIMEOUT_MS: "5000",
+        },
+      );
+      expect(output).toContain(`AgentLens started in background: http://127.0.0.1:${port}`);
+
+      const pidInfo = JSON.parse(await readFile(pidPath, "utf8")) as { pid?: number; port?: number; url?: string };
+      newPid = pidInfo.pid;
+      expect(pidInfo.port).toBe(port);
+      expect(pidInfo.url).toBe(`http://127.0.0.1:${port}`);
+      expect(newPid).toBeTypeOf("number");
+      expect(newPid).not.toBe(oldServer.pid);
+      expect((await readFile(startsPath, "utf8")).trim().split("\n")).toHaveLength(2);
+    } finally {
+      if (newPid) await stopProcess(newPid);
+      if (oldServer.pid) {
+        try {
+          process.kill(oldServer.pid, "SIGTERM");
+        } catch {
+          // Already restarted.
+        }
+      }
     }
   }, 20_000);
 
