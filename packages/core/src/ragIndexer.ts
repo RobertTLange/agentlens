@@ -31,6 +31,7 @@ import {
 export interface RagIndexOptions {
   once?: boolean;
   limit?: number;
+  /** Caps trace-document embeddings; summary-document embeddings are drained first for projection freshness. */
   embeddingLimit?: number;
   force?: boolean;
   forceLarge?: boolean;

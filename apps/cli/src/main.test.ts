@@ -795,7 +795,10 @@ describe("cli", () => {
     const ragWatchHelp = runCli(["rag", "watch", "--help"]);
     expect(ragWatchHelp).toContain("--lexical-only");
     expect(ragWatchHelp).toContain("--embedding-limit");
-    expect(runCli(["rag", "index", "--help"])).toContain("--embedding-limit");
+    expect(ragWatchHelp).toContain("Maximum trace documents to embed per pass");
+    const ragIndexHelp = runCli(["rag", "index", "--help"]);
+    expect(ragIndexHelp).toContain("--embedding-limit");
+    expect(ragIndexHelp).toContain("Maximum trace documents to embed");
 
     const noArgsOutput = runCli([]);
     expect(noArgsOutput).toContain("Usage: agentlens");

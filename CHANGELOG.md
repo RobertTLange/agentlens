@@ -19,7 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Prioritized summary-document embeddings, refreshed the Summaries projection periodically, and decoupled `rag watch --limit` from the default embedding batch so the embedding map catches up in the same daemon pass as summaries arrive.
-- Bounded RAG worker embedding refresh per pass and exposed `--embedding-limit` / `--lexical-only` controls so daemon passes are less likely to OOM.
+- Bounded RAG worker trace-document embedding refresh per pass and exposed `--embedding-limit` / `--lexical-only` controls so daemon passes are less likely to OOM.
 - Stabilized RAG daemon passes by enabling SQLite WAL/busy timeout handling, avoiding full-history hydration during bounded indexing, and embedding all missing summary documents before trace chunks.
 - Started detached RAG workers with a larger default Node heap unless `NODE_OPTIONS` already sets one.
 - Kept embedding-map hover previews inside the visible plot boundary.

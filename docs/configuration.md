@@ -87,6 +87,8 @@ modelCacheDir = "~/.agentlens/models"
 
 Summaries, trace chunks, and embeddings are stored locally. They are built from AgentLens-redacted normalized events, but may still contain sensitive workflow context such as filenames, decisions, errors, and followups. Lexical search works without the local embedding model; semantic and hybrid ranking become available when the model can be loaded from cache or downloaded by the Hugging Face runtime.
 
+Indexing embeds missing summary documents before trace chunks so the Summaries projection can catch up quickly. The CLI `--embedding-limit` option caps trace-document embeddings only; summary-document embeddings are drained first.
+
 ## Analysis
 
 The Analysis tab and `agentlens analysis` command derive skill and subagent usage from the indexed trace corpus on request. No additional persistent index is written.
