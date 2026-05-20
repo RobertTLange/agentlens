@@ -26,6 +26,7 @@ import {
 import { SessionTraceRow } from "./SessionTraceRow.js";
 import { ActivityView } from "./ActivityView.js";
 import { SummariesView } from "./SummariesView.js";
+import { AnalysisView } from "./AnalysisView.js";
 import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
 
@@ -407,7 +408,7 @@ export function App(): JSX.Element {
   const [flashStatus, setFlashStatus] = useState("");
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
-  const [activeView, setActiveView] = useState<"inspector" | "activity" | "summaries">("inspector");
+  const [activeView, setActiveView] = useState<"inspector" | "activity" | "summaries" | "analysis">("inspector");
   const [summariesSelectedTraceId, setSummariesSelectedTraceId] = useState("");
   const [inspectorSummaryTraceId, setInspectorSummaryTraceId] = useState("");
   const [selectedHeatmapMetric, setSelectedHeatmapMetric] = useState<ActivityHeatmapMetric | null>(null);
@@ -2185,6 +2186,15 @@ export function App(): JSX.Element {
               >
                 Summaries
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeView === "analysis"}
+                className={`mono hero-view-button ${activeView === "analysis" ? "active" : ""}`}
+                onClick={() => setActiveView("analysis")}
+              >
+                Analysis
+              </button>
             </div>
             <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
               <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -2557,9 +2567,16 @@ export function App(): JSX.Element {
             setActiveView("inspector");
           }}
         />
-      ) : (
+      ) : activeView === "summaries" ? (
         <SummariesView
           selectedTraceId={summariesSelectedTraceId}
+          onInspectTrace={(traceId) => {
+            setSelectedId(traceId);
+            setActiveView("inspector");
+          }}
+        />
+      ) : (
+        <AnalysisView
           onInspectTrace={(traceId) => {
             setSelectedId(traceId);
             setActiveView("inspector");

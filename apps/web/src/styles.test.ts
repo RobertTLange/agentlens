@@ -90,6 +90,13 @@ describe("responsive inspector layout styles", () => {
     expect(styles).toMatch(/\.event-card \.kind,\s*\.event-card \.event-agent-badge\s*{[^}]*white-space:\s*normal;/s);
   });
 
+  it("keeps analysis content inside its own scrollable viewport", () => {
+    expect(styles).toMatch(/\.analysis-view\s*{[^}]*grid-row:\s*2\s*\/\s*4;/s);
+    expect(styles).toMatch(/\.analysis-view\s*{[^}]*overflow-y:\s*auto;/s);
+    expect(styles).toMatch(/\.analysis-view\s*{[^}]*overflow-x:\s*hidden;/s);
+    expect(styles).toMatch(/\.analysis-dashboard-grid\s*{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.45fr\)\s*minmax\(0,\s*0\.9fr\);/s);
+  });
+
   it("renders the responsive inspector breakpoints with computed viewport styles", () => {
     const narrowDesktop = renderResponsiveInspector(960);
     const narrowDesktopStyle = computedStyle(narrowDesktop);
