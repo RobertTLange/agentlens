@@ -65,9 +65,23 @@ interface RagWorkItem {
   existing: RagSummaryRecord | null;
 }
 
+interface RagWorkerExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+export interface RagSupervisorRuntimeOptions {
+  entrypoint?: string;
+  maxPasses?: number;
+  restartDelayMs?: number;
+  maxRestartDelayMs?: number;
+}
+
 const INTERNAL_RAG_MARKER = "agentlens-rag-";
 const INTERNAL_RAG_SKIP_REASON = "internal_rag_summary_trace";
 const DEFAULT_RAG_WORKER_HEAP_MB = 8192;
+const DEFAULT_RAG_WORKER_RESTART_DELAY_MS = 1_000;
+const DEFAULT_RAG_WORKER_MAX_RESTART_DELAY_MS = 60_000;
 
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -430,6 +444,121 @@ export async function runRagWorker(
   } while (true);
 }
 
+function buildRagWorkerArgs(
+  entrypoint: string,
+  configPath: string,
+  options: { limit?: number; embeddingLimit?: number; intervalMs?: number; lexicalOnly?: boolean },
+  mode: "loop" | "once",
+): string[] {
+  const workerArgs = [entrypoint, "--config", configPath, "rag", "worker", "--foreground"];
+  if (mode === "once") workerArgs.push("--once");
+  if (options.limit !== undefined) workerArgs.push("--limit", String(options.limit));
+  if (options.embeddingLimit !== undefined) workerArgs.push("--embedding-limit", String(options.embeddingLimit));
+  if (options.intervalMs !== undefined && mode === "loop") workerArgs.push("--interval-ms", String(options.intervalMs));
+  if (options.lexicalOnly) workerArgs.push("--lexical-only");
+  return workerArgs;
+}
+
+function buildRagSupervisorArgs(
+  entrypoint: string,
+  configPath: string,
+  options: { limit?: number; embeddingLimit?: number; intervalMs?: number; lexicalOnly?: boolean },
+): string[] {
+  const supervisorArgs = [entrypoint, "--config", configPath, "rag", "supervisor", "--foreground"];
+  if (options.limit !== undefined) supervisorArgs.push("--limit", String(options.limit));
+  if (options.embeddingLimit !== undefined) supervisorArgs.push("--embedding-limit", String(options.embeddingLimit));
+  if (options.intervalMs !== undefined) supervisorArgs.push("--interval-ms", String(options.intervalMs));
+  if (options.lexicalOnly) supervisorArgs.push("--lexical-only");
+  return supervisorArgs;
+}
+
+function childExitOk(exit: RagWorkerExit): boolean {
+  return exit.code === 0 && exit.signal === null;
+}
+
+function describeWorkerExit(exit: RagWorkerExit): string {
+  return `code=${exit.code ?? "null"} signal=${exit.signal ?? "null"}`;
+}
+
+export async function runRagSupervisor(
+  configPath: string,
+  options: { limit?: number; embeddingLimit?: number; intervalMs?: number; lexicalOnly?: boolean } = {},
+  runtime: RagSupervisorRuntimeOptions = {},
+): Promise<void> {
+  let stopping = false;
+  let activeChild: ReturnType<typeof spawn> | null = null;
+  let wakeSleep: (() => void) | null = null;
+  let restartDelayMs = Math.max(0, runtime.restartDelayMs ?? DEFAULT_RAG_WORKER_RESTART_DELAY_MS);
+  const maxRestartDelayMs = Math.max(restartDelayMs, runtime.maxRestartDelayMs ?? DEFAULT_RAG_WORKER_MAX_RESTART_DELAY_MS);
+  const entrypoint = runtime.entrypoint ?? process.argv[1] ?? "";
+
+  const wake = (): void => {
+    const currentWake = wakeSleep;
+    if (currentWake) currentWake();
+  };
+  const handleStop = (): void => {
+    stopping = true;
+    if (activeChild?.pid) activeChild.kill("SIGTERM");
+    wake();
+  };
+  const sleep = async (delayMs: number): Promise<void> => {
+    if (delayMs <= 0 || stopping) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, delayMs);
+      function done(): void {
+        clearTimeout(timer);
+        if (wakeSleep === done) wakeSleep = null;
+        resolve();
+      }
+      wakeSleep = done;
+    });
+  };
+  const runWorkerOnce = async (): Promise<RagWorkerExit> =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, buildRagWorkerArgs(entrypoint, configPath, options, "once"), {
+        stdio: ["ignore", "inherit", "inherit"],
+        shell: false,
+        env: {
+          ...process.env,
+          NODE_OPTIONS: ragWorkerNodeOptions(),
+        },
+      });
+      activeChild = child;
+      child.on("error", reject);
+      child.on("close", (code, signal) => {
+        if (activeChild === child) activeChild = null;
+        resolve({ code, signal });
+      });
+    });
+
+  process.once("SIGTERM", handleStop);
+  process.once("SIGINT", handleStop);
+  try {
+    let passes = 0;
+    while (!stopping) {
+      const exit = await runWorkerOnce();
+      passes += 1;
+      if (stopping) break;
+      if (runtime.maxPasses !== undefined && passes >= runtime.maxPasses) break;
+
+      if (childExitOk(exit)) {
+        restartDelayMs = Math.max(0, runtime.restartDelayMs ?? DEFAULT_RAG_WORKER_RESTART_DELAY_MS);
+        const config = await loadConfig(configPath);
+        await sleep(options.intervalMs ?? config.rag.workerIntervalMs);
+      } else {
+        console.error(`[agentlens-rag] worker exited (${describeWorkerExit(exit)}); restarting in ${restartDelayMs}ms`);
+        await sleep(restartDelayMs);
+        restartDelayMs = Math.min(maxRestartDelayMs, Math.max(1, restartDelayMs * 2));
+      }
+    }
+  } finally {
+    process.off("SIGTERM", handleStop);
+    process.off("SIGINT", handleStop);
+    const child = activeChild as ReturnType<typeof spawn> | null;
+    if (child?.pid) child.kill("SIGTERM");
+  }
+}
+
 export function startRagDaemon(
   configPath: string,
   config: AppConfig,
@@ -444,12 +573,8 @@ export function startRagDaemon(
     return { reused: true, pid: existing.pid, pidPath, logPath };
   }
   const out = openSync(logPath, "a");
-  const workerArgs = [process.argv[1] ?? "", "--config", configPath, "rag", "worker", "--foreground"];
-  if (options.limit !== undefined) workerArgs.push("--limit", String(options.limit));
-  if (options.embeddingLimit !== undefined) workerArgs.push("--embedding-limit", String(options.embeddingLimit));
-  if (options.intervalMs !== undefined) workerArgs.push("--interval-ms", String(options.intervalMs));
-  if (options.lexicalOnly) workerArgs.push("--lexical-only");
-  const child = spawn(process.execPath, workerArgs, {
+  const supervisorArgs = buildRagSupervisorArgs(process.argv[1] ?? "", configPath, options);
+  const child = spawn(process.execPath, supervisorArgs, {
     detached: true,
     stdio: ["ignore", out, out],
     shell: false,
@@ -463,7 +588,7 @@ export function startRagDaemon(
   const metadata: RagDaemonPidFile = {
     command: RAG_DAEMON_COMMAND,
     pid: child.pid ?? 0,
-    argv: [process.execPath, ...workerArgs],
+    argv: [process.execPath, ...supervisorArgs],
     configPath,
     startedAtMs: Date.now(),
   };

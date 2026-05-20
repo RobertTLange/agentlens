@@ -11,6 +11,7 @@ import {
   mergeConfig,
   runRagIndexOnce,
   runRagWorker,
+  runRagSupervisor,
   searchRag,
   saveConfig,
   startRagDaemon,
@@ -843,14 +844,34 @@ rag
 rag
   .command("worker")
   .option("--foreground", "Run worker loop in foreground")
+  .option("--once", "Run one worker pass and exit")
+  .option("--limit <n>", "Maximum traces per pass")
+  .option("--embedding-limit <n>", "Internal embedding document limit per pass")
+  .option("--interval-ms <n>", "Internal worker interval override in milliseconds")
+  .option("--lexical-only", "Skip embedding refresh")
+  .action(async (opts: { foreground?: boolean; once?: boolean; limit?: string; embeddingLimit?: string; intervalMs?: string; lexicalOnly?: boolean }) => {
+    if (!opts.foreground) throw new Error("rag worker is internal; use rag watch");
+    const intervalMs = opts.intervalMs ? parseLimitOption(opts.intervalMs, 0, Number.MAX_SAFE_INTEGER) : undefined;
+    await runRagWorker(program.opts<{ config: string }>().config, {
+      ...(opts.once !== undefined ? { once: opts.once } : {}),
+      ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
+      ...(opts.embeddingLimit ? { embeddingLimit: parseLimitOption(opts.embeddingLimit, 0) } : {}),
+      ...(intervalMs !== undefined ? { intervalMs } : {}),
+      ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
+    });
+  });
+
+rag
+  .command("supervisor")
+  .option("--foreground", "Run supervisor loop in foreground")
   .option("--limit <n>", "Maximum traces per pass")
   .option("--embedding-limit <n>", "Internal embedding document limit per pass")
   .option("--interval-ms <n>", "Internal worker interval override in milliseconds")
   .option("--lexical-only", "Skip embedding refresh")
   .action(async (opts: { foreground?: boolean; limit?: string; embeddingLimit?: string; intervalMs?: string; lexicalOnly?: boolean }) => {
-    if (!opts.foreground) throw new Error("rag worker is internal; use rag watch");
+    if (!opts.foreground) throw new Error("rag supervisor is internal; use rag watch");
     const intervalMs = opts.intervalMs ? parseLimitOption(opts.intervalMs, 0, Number.MAX_SAFE_INTEGER) : undefined;
-    await runRagWorker(program.opts<{ config: string }>().config, {
+    await runRagSupervisor(program.opts<{ config: string }>().config, {
       ...(opts.limit ? { limit: parseLimitOption(opts.limit, 20) } : {}),
       ...(opts.embeddingLimit ? { embeddingLimit: parseLimitOption(opts.embeddingLimit, 0) } : {}),
       ...(intervalMs !== undefined ? { intervalMs } : {}),

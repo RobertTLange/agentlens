@@ -109,7 +109,7 @@ function processLooksLikeRagWorker(pid: number): boolean {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    return /\brag\b/.test(command) && /\bworker\b/.test(command) && command.includes("--foreground");
+    return /\brag\b/.test(command) && /\b(?:worker|supervisor)\b/.test(command) && command.includes("--foreground");
   } catch {
     return false;
   }
