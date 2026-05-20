@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
 import { Command } from "commander";
-import type { AppConfig, NamedCount, TraceSummary } from "@agentlens/contracts";
+import type { AnalysisResponse, AppConfig, NamedCount, TraceSummary } from "@agentlens/contracts";
 import {
+  buildAnalysis,
   DEFAULT_CONFIG_PATH,
   getRagStatus,
   getRagSummary,
@@ -111,6 +112,11 @@ function fmtPct(count: number, total: number): string {
   return `${((count / total) * 100).toFixed(1)}%`;
 }
 
+function fmtByAgentCounts(rows: Array<{ agent: string; count: number }>): string {
+  if (rows.length === 0) return "-";
+  return rows.map((row) => `${row.agent}:${row.count}`).join(",");
+}
+
 function printNamedTable(section: string, rows: string[][], opts: { llm?: boolean } = {}): void {
   if (rows.length === 0) return;
   if (opts.llm) {
@@ -153,6 +159,133 @@ async function summaries(configPath: string, agent?: string): Promise<TraceSumma
   const list = snapshot.getSummaries();
   if (!agent) return list;
   return list.filter((summary) => summary.agent === agent.toLowerCase());
+}
+
+async function renderAnalysis(opts: { json?: boolean; llm?: boolean; agent?: string; since?: string }): Promise<void> {
+  const configPath = program.opts<{ config: string }>().config;
+  const agent = parseAgentOption(opts.agent);
+  assertValidSince(opts.since);
+  const snapshot = await loadSnapshot(configPath);
+  const since = opts.since ? toMsWindow(opts.since) : undefined;
+  const analysis = buildAnalysis(snapshot, {
+    ...(agent ? { agent } : {}),
+    ...(since !== undefined ? { since } : {}),
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(analysis, null, 2));
+    return;
+  }
+
+  printAnalysisTables(analysis, { llm: opts.llm === true });
+}
+
+function printAnalysisTables(analysis: AnalysisResponse, opts: { llm?: boolean } = {}): void {
+  printNamedTable(
+    "overview",
+    [
+      [
+        "traces",
+        "supported",
+        "skill_uses",
+        "explicit",
+        "inferred",
+        "subagent_spawns",
+        "configured_skills",
+        "unused_configured",
+        "observed_unconfigured",
+      ],
+      [
+        String(analysis.summary.traceCount),
+        String(analysis.summary.supportedTraceCount),
+        String(analysis.summary.totalSkillCount),
+        String(analysis.summary.explicitSkillCount),
+        String(analysis.summary.inferredSkillCount),
+        String(analysis.summary.subagentSpawnCount),
+        String(analysis.summary.configuredSkillCount),
+        String(analysis.summary.unusedConfiguredSkillCount),
+        String(analysis.summary.observedUnconfiguredSkillCount),
+      ],
+    ],
+    opts,
+  );
+
+  printNamedTable(
+    "by_agent",
+    [
+      ["agent", "support", "sessions", "explicit", "inferred", "skill_uses", "subagent_spawns"],
+      ...analysis.byAgent.map((row) => [
+        row.agent,
+        row.detectorSupport,
+        String(row.sessionCount),
+        String(row.explicitSkillCount),
+        String(row.inferredSkillCount),
+        String(row.totalSkillCount),
+        String(row.subagentSpawnCount),
+      ]),
+    ],
+    opts,
+  );
+
+  printNamedTable(
+    "skills",
+    [
+      ["skill", "status", "explicit", "inferred", "total", "sessions", "by_agent"],
+      ...analysis.skills.map((row) => [
+        row.name,
+        row.inventoryStatus,
+        String(row.explicitCount),
+        String(row.inferredCount),
+        String(row.totalCount),
+        String(row.sessionCount),
+        fmtByAgentCounts(row.byAgent),
+      ]),
+    ],
+    opts,
+  );
+
+  printNamedTable(
+    "subagents",
+    [
+      ["subagent", "spawns", "sessions", "by_agent"],
+      ...analysis.subagents.map((row) => [row.name, String(row.spawnCount), String(row.sessionCount), fmtByAgentCounts(row.byAgent)]),
+    ],
+    opts,
+  );
+
+  printNamedTable(
+    "unused_configured_skills",
+    [["skill"], ...analysis.inventory.unusedConfiguredSkills.map((skill) => [skill])],
+    opts,
+  );
+
+  printNamedTable(
+    "top_sessions",
+    [
+      ["rank", "trace_id", "session_id", "agent", "explicit", "inferred", "subagent_spawns", "top_skills", "top_subagents", "path_tail"],
+      ...analysis.topSessions.map((row, index) => [
+        String(index + 1),
+        row.traceId,
+        row.sessionId || "-",
+        row.agent,
+        String(row.explicitSkillCount),
+        String(row.inferredSkillCount),
+        String(row.subagentSpawnCount),
+        row.topSkills.map((skill) => `${skill.name}:${skill.count}`).join(",") || "-",
+        row.topSubagents.map((subagent) => `${subagent.name}:${subagent.count}`).join(",") || "-",
+        pathTail(row.path),
+      ]),
+    ],
+    opts,
+  );
+
+  if (analysis.inventory.warnings.length > 0) {
+    printNamedTable(
+      "inventory_warnings",
+      [["warning"], ...analysis.inventory.warnings.map((warning) => [warning])],
+      opts,
+    );
+  }
 }
 
 function sortByRecent(items: TraceSummary[]): TraceSummary[] {
@@ -400,6 +533,17 @@ program
         { llm: true },
       );
     }
+  });
+
+program
+  .command("analysis")
+  .description("Analyze skill and subagent usage across indexed traces")
+  .option("--json", "JSON output")
+  .option("--llm", "Deterministic table output for LLM agents")
+  .option("--agent <name>", "Filter by agent")
+  .option("--since <window>", "Filter by recency window (e.g. 24h, 30m, 7d)")
+  .action(async (opts: { json?: boolean; llm?: boolean; agent?: string; since?: string }) => {
+    await renderAnalysis(opts);
   });
 
 async function renderSessionsList(opts: {

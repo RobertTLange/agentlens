@@ -10,6 +10,7 @@ import fastifyStatic from "@fastify/static";
 import type {
   ActivityHydrationProgress,
   ActivityHeatmapMetric,
+  AnalysisResponse,
   AppConfig,
   EventsAppendedLiveEnvelope,
   IndexStartupStatus,
@@ -25,6 +26,7 @@ import type {
   TraceUpsertLiveEnvelope,
 } from "@agentlens/contracts";
 import {
+  buildAnalysisAsync,
   DEFAULT_CONFIG_PATH,
   getRagStatus,
   getRagProjection,
@@ -33,6 +35,7 @@ import {
   mergeConfig,
   saveConfig,
   searchRag,
+  toMsWindow,
   TraceIndex,
 } from "@agentlens/core";
 import {
@@ -52,6 +55,8 @@ const STOP_WAIT_POLL_MS = 120;
 const DEFAULT_RECENT_TRACE_LIMIT = 50;
 const MAX_RECENT_TRACE_LIMIT = 5000;
 const MAX_TRACE_INPUT_TEXT_LENGTH = 2000;
+const DEFAULT_ANALYSIS_CACHE_TTL_MS = 30_000;
+const ANALYSIS_BUILD_YIELD_EVERY = 8;
 const ACTIVITY_HEATMAP_METRICS: ActivityHeatmapMetric[] = ["sessions", "output_tokens", "total_cost_usd"];
 const LIVE_STREAM_BATCH_FLUSH_MS = 64;
 const RAG_SEARCH_MODES = ["hybrid", "lexical", "semantic"] as const;
@@ -140,6 +145,11 @@ interface RunningProcess {
 }
 
 interface CurrentUserIdentity { username: string; uid: string }
+
+interface AnalysisCacheEntry {
+  expiresAtMs: number;
+  value: AnalysisResponse;
+}
 
 interface TmuxPaneInfo {
   socketPath: string;
@@ -357,6 +367,15 @@ function parseSinceWindow(rawValue: string | undefined): string | undefined {
     throw new Error("invalid since window");
   }
   return rawValue;
+}
+
+function parseSinceWindowMs(rawValue: string | undefined): number | undefined {
+  if (!rawValue) return undefined;
+  const sinceMs = toMsWindow(rawValue);
+  if (sinceMs <= 0) {
+    throw new Error("invalid since window");
+  }
+  return sinceMs;
 }
 
 function parseActivityHeatmapMetric(rawValue: string | undefined): ActivityHeatmapMetric | undefined {
@@ -2251,10 +2270,24 @@ export function resolveDefaultWebDistPath(packagedWebDistPath: string, monorepoW
   return monorepoWebDistPath;
 }
 
+function analysisCacheKey(version: number, agent: string | undefined, since: number | undefined): string {
+  return `v=${version}|agent=${agent ?? ""}|since=${since ?? ""}`;
+}
+
+function pruneAnalysisCache(cache: Map<string, AnalysisCacheEntry>, nowMsValue: number): void {
+  if (cache.size < 64) return;
+  for (const [key, entry] of cache) {
+    if (entry.expiresAtMs > nowMsValue) continue;
+    cache.delete(key);
+  }
+}
+
 export async function createServer(options: CreateServerOptions): Promise<FastifyInstance> {
   const server = Fastify({ logger: false });
   const traceIndex = options.traceIndex;
   const activityCache = new ActivityResponseCache(DEFAULT_ACTIVITY_CACHE_TTL_MS);
+  const analysisCache = new Map<string, AnalysisCacheEntry>();
+  const analysisInFlight = new Map<string, Promise<AnalysisResponse>>();
   const configPath = options.configPath ?? DEFAULT_CONFIG_PATH;
   const stopTraceSession = options.stopTraceSession ?? stopTraceSessionProcess;
   const openTraceSession = options.openTraceSession ?? openTraceSessionProcess;
@@ -2426,6 +2459,58 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     const query = request.query as { agent?: string; limit?: string };
     const traces = listRecentTraceSummaries(traceIndex, query);
     return { traces };
+  });
+
+  server.get("/api/analysis", async (request, reply) => {
+    const query = request.query as { agent?: string; since?: string };
+    const startup = traceIndex.getStartupStatus();
+    if (!startup.inspectorReady) {
+      reply.code(503);
+      return {
+        warming: true,
+        startup,
+        ...(startup.startupError ? { startupError: startup.startupError } : {}),
+      };
+    }
+
+    try {
+      const agent = parseAgentKind(query.agent);
+      const since = parseSinceWindowMs(query.since);
+      const version = traceIndex.getStreamVersion();
+      const key = analysisCacheKey(version, agent, since);
+      const nowMsValue = Date.now();
+      const cached = analysisCache.get(key);
+      if (cached && cached.expiresAtMs > nowMsValue) {
+        return cached.value;
+      }
+
+      const existing = analysisInFlight.get(key);
+      if (existing) {
+        return await existing;
+      }
+
+      const buildPromise = buildAnalysisAsync(traceIndex, {
+        ...(agent ? { agent } : {}),
+        ...(since !== undefined ? { since } : {}),
+        yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
+      })
+        .then((analysis) => {
+          analysisCache.set(key, {
+            value: analysis,
+            expiresAtMs: Date.now() + DEFAULT_ANALYSIS_CACHE_TTL_MS,
+          });
+          pruneAnalysisCache(analysisCache, Date.now());
+          return analysis;
+        })
+        .finally(() => {
+          analysisInFlight.delete(key);
+        });
+      analysisInFlight.set(key, buildPromise);
+      return await buildPromise;
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
   });
 
   server.get("/api/trace/:id", async (request, reply) => {
@@ -2731,7 +2816,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
         ...(status ? { status } : {}),
         ...(agent ? { agent } : {}),
         ...(since ? { since } : {}),
-        limit: parseBoundedPositiveInt(query.limit, 200, 5000),
+        limit: parseBoundedPositiveInt(query.limit, 5000, 5000),
       });
     } catch (error) {
       reply.code(400);
