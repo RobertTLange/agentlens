@@ -154,4 +154,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     searchCandidateMultiplier: 8,
     rrfK: 60,
   },
+  analysis: {
+    skillRoots: ["~/.codex/skills", "~/.claude/skills"],
+    topSessionLimit: 20,
+  },
 };

@@ -132,6 +132,10 @@ embeddingBatchSize = 32
 searchCandidateMultiplier = 8
 rrfK = 60
 
+[analysis]
+skillRoots = ["~/.codex/skills", "~/.claude/skills"]
+topSessionLimit = 20
+
 [cost]
 enabled = true
 currency = "USD"

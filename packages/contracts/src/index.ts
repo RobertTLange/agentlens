@@ -21,6 +21,9 @@ export type RagSearchMode = "hybrid" | "lexical" | "semantic";
 export type RagDocumentKind = "summary" | "trace";
 export type RagRefreshStatus = "pending" | "running" | "complete" | "stale" | "failed" | "skipped";
 export type RagEmbeddingStatus = "ready" | "missing" | "dirty" | "unavailable" | "disabled";
+export type AnalysisDetectorSupport = "supported" | "unsupported";
+export type AnalysisSkillConfidence = "explicit" | "inferred";
+export type AnalysisInventoryStatus = "configured" | "unconfigured";
 
 export interface ScanConfig {
   mode: ScanMode;
@@ -134,6 +137,11 @@ export interface RagConfig {
   rrfK: number;
 }
 
+export interface AnalysisConfig {
+  skillRoots: string[];
+  topSessionLimit: number;
+}
+
 export interface TokenTotals {
   inputTokens: number;
   cachedReadTokens: number;
@@ -176,6 +184,7 @@ export interface AppConfig {
   cost: CostConfig;
   models: ModelsConfig;
   rag: RagConfig;
+  analysis: AnalysisConfig;
 }
 
 export interface NormalizedEvent {
@@ -357,6 +366,82 @@ export interface RagProjectionResponse {
   embeddedCount: number;
   missingEmbeddingCount: number;
   warnings: string[];
+}
+
+export interface AnalysisCountByAgent {
+  agent: AgentKind;
+  count: number;
+}
+
+export interface AnalysisSkillUsageRow {
+  name: string;
+  inventoryStatus: AnalysisInventoryStatus;
+  explicitCount: number;
+  inferredCount: number;
+  totalCount: number;
+  sessionCount: number;
+  byAgent: AnalysisCountByAgent[];
+}
+
+export interface AnalysisSubagentUsageRow {
+  name: string;
+  spawnCount: number;
+  sessionCount: number;
+  byAgent: AnalysisCountByAgent[];
+}
+
+export interface AnalysisSourceAgentRow {
+  agent: AgentKind;
+  detectorSupport: AnalysisDetectorSupport;
+  sessionCount: number;
+  explicitSkillCount: number;
+  inferredSkillCount: number;
+  totalSkillCount: number;
+  subagentSpawnCount: number;
+}
+
+export interface AnalysisTopSessionRow {
+  traceId: string;
+  sessionId: string;
+  agent: AgentKind;
+  path: string;
+  lastEventTs: number | null;
+  mtimeMs: number;
+  explicitSkillCount: number;
+  inferredSkillCount: number;
+  subagentSpawnCount: number;
+  topSkills: NamedCount[];
+  topSubagents: NamedCount[];
+}
+
+export interface AnalysisInventorySummary {
+  configuredSkills: string[];
+  unusedConfiguredSkills: string[];
+  observedUnconfiguredSkills: string[];
+  skillRoots: string[];
+  warnings: string[];
+}
+
+export interface AnalysisSummary {
+  generatedAtMs: number;
+  traceCount: number;
+  supportedTraceCount: number;
+  explicitSkillCount: number;
+  inferredSkillCount: number;
+  totalSkillCount: number;
+  subagentSpawnCount: number;
+  configuredSkillCount: number;
+  unusedConfiguredSkillCount: number;
+  observedUnconfiguredSkillCount: number;
+}
+
+export interface AnalysisResponse {
+  summary: AnalysisSummary;
+  inventory: AnalysisInventorySummary;
+  byAgent: AnalysisSourceAgentRow[];
+  skills: AnalysisSkillUsageRow[];
+  subagents: AnalysisSubagentUsageRow[];
+  topSessions: AnalysisTopSessionRow[];
 }
 
 export interface TraceTocItem {

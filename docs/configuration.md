@@ -29,6 +29,7 @@ agentlens config set scan.includeMetaDefault true
 - `[redaction]`: key/value redaction rules
 - `[pricingSync]`: live pricing refresh behavior for `agentlens --browser`
 - `[rag]`: local quiet-trace summaries, SQLite storage, Headless summarization, and hybrid search
+- `[analysis]`: skill inventory roots and analysis display limits
 - `[cost]`: model pricing tables + estimation policy
 - `[models]`: context window defaults/overrides
 
@@ -85,6 +86,19 @@ modelCacheDir = "~/.agentlens/models"
 ```
 
 Summaries, trace chunks, and embeddings are stored locally. They are built from AgentLens-redacted normalized events, but may still contain sensitive workflow context such as filenames, decisions, errors, and followups. Lexical search works without the local embedding model; semantic and hybrid ranking become available when the model can be loaded from cache or downloaded by the Hugging Face runtime.
+
+## Analysis
+
+The Analysis tab and `agentlens analysis` command derive skill and subagent usage from the indexed trace corpus on request. No additional persistent index is written.
+
+```toml
+[analysis]
+skillRoots = ["~/.codex/skills", "~/.claude/skills"]
+topSessionLimit = 20
+```
+
+- `skillRoots`: directories scanned for configured skills; each immediate child directory with a `SKILL.md` is treated as one configured skill
+- `topSessionLimit`: maximum top-contributing sessions returned by analysis responses and CLI output
 
 ## Practical Scan Settings
 
