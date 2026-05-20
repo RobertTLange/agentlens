@@ -929,6 +929,21 @@ export class TraceIndex extends EventEmitter {
     await this.bootstrapRecentTraces();
   }
 
+  async hydrateNextPendingBatch(): Promise<number> {
+    if (!this.hasPendingHydrationWork()) return 0;
+    const refreshNowMs = nowMs();
+    const stats: RefreshStats = {
+      parsedFileCount: 0,
+      dirtyPathCount: 0,
+      usedFullRefresh: false,
+      hadFileMutations: false,
+    };
+    await this.hydratePendingBatch(refreshNowMs, stats);
+    this.updateStartupProgress();
+    this.finishMutationBatch(refreshNowMs, stats);
+    return stats.parsedFileCount;
+  }
+
   getPerformanceStats(): IndexPerformanceStats {
     const stats = this.buildRetentionStats();
     return {

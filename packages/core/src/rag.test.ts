@@ -828,6 +828,50 @@ describe("rag indexer", () => {
     store.close();
   });
 
+  it("continues bounded passes past recent active traces to find older quiet work", async () => {
+    const dir = await tempDir();
+    const tracesDir = path.join(dir, "traces");
+    await mkdir(tracesDir, { recursive: true });
+    const recentMtime = new Date();
+    for (let index = 0; index < 120; index += 1) {
+      const tracePath = path.join(tracesDir, `recent-${index}.jsonl`);
+      await writeFile(tracePath, buildCodexTraceLog(`recent-session-${index}`, index), "utf8");
+      await utimes(tracePath, recentMtime, recentMtime);
+    }
+    await writeQuietTrace(path.join(tracesDir, "old-eligible.jsonl"), buildCodexTraceLog("old-eligible-session", 121), 0);
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [tracesDir],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 2,
+          agentHint: "codex",
+        },
+      },
+      rag: {
+        dbPath: path.join(dir, "rag.db"),
+        daemonPidPath: path.join(dir, "rag.pid"),
+        daemonLogPath: path.join(dir, "rag.log"),
+        embeddingBackend: "disabled",
+        headlessExecutable: await writeFakeHeadless(dir),
+      },
+    });
+
+    const result = await runRagIndexOnce(config, { limit: 1 });
+    const store = new RagStore(config);
+    const summaries = store.listSummaries({ status: "complete" });
+
+    expect(result.discoveredTraces).toBe(121);
+    expect(result.quietEligibleTraces).toBe(1);
+    expect(result.summarized).toBe(1);
+    expect(summaries.map((summary) => summary.sessionId)).toEqual(["old-eligible-session"]);
+    store.close();
+  });
+
   it("retries failed summaries on a later indexing pass", async () => {
     const dir = await tempDir();
     const tracesDir = path.join(dir, "traces");

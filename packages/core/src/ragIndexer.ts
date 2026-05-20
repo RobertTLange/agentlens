@@ -228,23 +228,27 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
       return traceIndex.getSessionDetailUncached(summary.id);
     };
 
-    for (const summary of summaries) {
-      const detail = summary.parseable ? getDetail(summary) : null;
-      if (!isInternalRagSummaryTrace(summary, ignoredSessionIds, detail)) continue;
-      internalTraceIds.add(summary.id);
-      const existing = store.getSession(summary.id);
-      const fingerprint = detail ? buildPromptInput(detail).fingerprint : existing?.fingerprint || internalRagFingerprint(summary);
-      const alreadySkipped = existing?.status === "skipped" && existing.skipReason === INTERNAL_RAG_SKIP_REASON && existing.fingerprint === fingerprint;
-      store.upsertSession({
-        summary,
-        fingerprint,
-        status: "skipped",
-        skipReason: INTERNAL_RAG_SKIP_REASON,
-        nowMs,
-      });
-      store.replaceDocuments(summary.id, [], nowMs);
-      if (!alreadySkipped) skipped += 1;
-    }
+    const markInternalSummaries = (): void => {
+      for (const summary of traceIndex.getSummaries()) {
+        if (internalTraceIds.has(summary.id)) continue;
+        const detail = summary.parseable ? getDetail(summary) : null;
+        if (!isInternalRagSummaryTrace(summary, ignoredSessionIds, detail)) continue;
+        internalTraceIds.add(summary.id);
+        const existing = store.getSession(summary.id);
+        const fingerprint = detail ? buildPromptInput(detail).fingerprint : existing?.fingerprint || internalRagFingerprint(summary);
+        const alreadySkipped = existing?.status === "skipped" && existing.skipReason === INTERNAL_RAG_SKIP_REASON && existing.fingerprint === fingerprint;
+        store.upsertSession({
+          summary,
+          fingerprint,
+          status: "skipped",
+          skipReason: INTERNAL_RAG_SKIP_REASON,
+          nowMs,
+        });
+        store.replaceDocuments(summary.id, [], nowMs);
+        if (!alreadySkipped) skipped += 1;
+      }
+    };
+    markInternalSummaries();
 
     for (const summary of summaries) {
       if (internalTraceIds.has(summary.id)) continue;
@@ -263,66 +267,78 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
         });
       }
     }
-    const eligible = summaries.filter((summary) => !internalTraceIds.has(summary.id) && isEligible(summary, config, nowMs));
-    const limit = Math.max(1, options.limit ?? (eligible.length || 1));
+    const eligibleSummaries = (): TraceSummary[] =>
+      traceIndex
+        .getSummaries()
+        .filter((summary) => !internalTraceIds.has(summary.id) && isEligible(summary, config, nowMs));
+    const limit = Math.max(1, options.limit ?? (eligibleSummaries().length || 1));
     let selectedCount = 0;
-    for (const summary of eligible) {
-      const detail = getDetail(summary);
-      if (!detail) continue;
-      const promptInput = buildPromptInput(detail);
-      const existing = store.getSession(summary.id);
-      if (!options.force && isCurrentTerminalRagSession(existing, promptInput.fingerprint)) continue;
-      selectedCount += 1;
-      try {
-        if (promptInput.promptBytes > config.rag.summaryMaxPromptBytes && !options.forceLarge) {
+    const visitedEligibleTraceIds = new Set<string>();
+    while (selectedCount < limit) {
+      for (const summary of eligibleSummaries()) {
+        if (visitedEligibleTraceIds.has(summary.id)) continue;
+        visitedEligibleTraceIds.add(summary.id);
+        const detail = getDetail(summary);
+        if (!detail) continue;
+        const promptInput = buildPromptInput(detail);
+        const existing = store.getSession(summary.id);
+        if (!options.force && isCurrentTerminalRagSession(existing, promptInput.fingerprint)) continue;
+        selectedCount += 1;
+        try {
+          if (promptInput.promptBytes > config.rag.summaryMaxPromptBytes && !options.forceLarge) {
+            store.upsertSession({
+              summary,
+              fingerprint: promptInput.fingerprint,
+              status: "skipped",
+              skipReason: "input_too_large",
+              nowMs,
+            });
+            skipped += 1;
+            continue;
+          }
           store.upsertSession({
             summary,
             fingerprint: promptInput.fingerprint,
-            status: "skipped",
-            skipReason: "input_too_large",
+            status: existing?.summary ? "stale" : "pending",
             nowMs,
           });
-          skipped += 1;
-          continue;
+          const result = await runHeadlessSummary(config, promptInput.prompt);
+          store.addInternalSummarySessionIds(result.internalSummarySessionIds);
+          const corpus = buildRagCorpus(detail, result.content);
+          store.upsertSession({
+            summary,
+            fingerprint: corpus.fingerprint,
+            status: "complete",
+            content: result.content,
+            summaryText: corpus.summaryText,
+            summaryModel: result.model,
+            summaryGeneratedAtMs: Date.now(),
+            nowMs: Date.now(),
+          });
+          store.replaceDocuments(summary.id, corpus.documents, Date.now());
+          await embedAllMissingSummaryDocuments(summary.id);
+          lexicalDocumentCount += corpus.documents.length;
+          summarized += 1;
+        } catch (error) {
+          store.addInternalSummarySessionIds(internalSummarySessionIdsFromError(error));
+          failed += 1;
+          lastError = asErrorMessage(error);
+          const detailSummary = traceIndex.getSummaries().find((row) => row.id === summary.id) ?? summary;
+          const fingerprint = store.getSession(summary.id)?.fingerprint ?? "";
+          store.upsertSession({
+            summary: detailSummary,
+            fingerprint,
+            status: "failed",
+            error: lastError,
+            nowMs: Date.now(),
+          });
         }
-        store.upsertSession({
-          summary,
-          fingerprint: promptInput.fingerprint,
-          status: existing?.summary ? "stale" : "pending",
-          nowMs,
-        });
-        const result = await runHeadlessSummary(config, promptInput.prompt);
-        store.addInternalSummarySessionIds(result.internalSummarySessionIds);
-        const corpus = buildRagCorpus(detail, result.content);
-        store.upsertSession({
-          summary,
-          fingerprint: corpus.fingerprint,
-          status: "complete",
-          content: result.content,
-          summaryText: corpus.summaryText,
-          summaryModel: result.model,
-          summaryGeneratedAtMs: Date.now(),
-          nowMs: Date.now(),
-        });
-        store.replaceDocuments(summary.id, corpus.documents, Date.now());
-        await embedAllMissingSummaryDocuments(summary.id);
-        lexicalDocumentCount += corpus.documents.length;
-        summarized += 1;
-      } catch (error) {
-        store.addInternalSummarySessionIds(internalSummarySessionIdsFromError(error));
-        failed += 1;
-        lastError = asErrorMessage(error);
-        const detailSummary = traceIndex.getSummaries().find((row) => row.id === summary.id) ?? summary;
-        const fingerprint = store.getSession(summary.id)?.fingerprint ?? "";
-        store.upsertSession({
-          summary: detailSummary,
-          fingerprint,
-          status: "failed",
-          error: lastError,
-          nowMs: Date.now(),
-        });
+        if (selectedCount >= limit) break;
       }
-      if (selectedCount >= limit) break;
+      if (selectedCount >= limit || traceIndex.getStartupStatus().fullReady) break;
+      const hydratedCount = await traceIndex.hydrateNextPendingBatch();
+      if (hydratedCount <= 0) break;
+      markInternalSummaries();
     }
 
     await embedAllMissingSummaryDocuments();
@@ -332,7 +348,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
     return {
       dbPath: store.dbPath,
       discoveredTraces: discoveredTraceCount,
-      quietEligibleTraces: eligible.length,
+      quietEligibleTraces: eligibleSummaries().length,
       summarized,
       skipped,
       failed,
