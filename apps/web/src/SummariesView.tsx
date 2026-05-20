@@ -10,6 +10,7 @@ import type {
 
 const SEARCH_DEBOUNCE_MS = 250;
 const SUMMARY_REFRESH_MS = 30_000;
+const SUMMARY_LIST_LIMIT = 5000;
 const AGENT_OPTIONS: Array<AgentKind | ""> = ["", "codex", "claude", "cursor", "gemini", "opencode", "pi", "unknown"];
 const STATUS_OPTIONS = ["complete", "stale", "failed", "skipped", "pending"] as const;
 const CLUSTER_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0f766e", "#be123c", "#4b5563"];
@@ -193,7 +194,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       const statusResponse = await fetch("/api/rag/status");
       const statusJson = (await statusResponse.json()) as RagIndexStatus;
       setStatus(statusJson);
-      const params = new URLSearchParams({ status: summaryStatus, limit: "200" });
+      const params = new URLSearchParams({ status: summaryStatus, limit: String(SUMMARY_LIST_LIMIT) });
       if (agent) params.set("agent", agent);
       const projectionParams = new URLSearchParams({ status: summaryStatus, limit: "5000" });
       if (agent) projectionParams.set("agent", agent);

@@ -58,13 +58,6 @@ export interface RagSearchRequest {
   since?: string;
 }
 
-interface RagWorkItem {
-  summary: TraceSummary;
-  detail: ReturnType<TraceIndex["getSessionDetail"]>;
-  promptInput: ReturnType<typeof buildPromptInput>;
-  existing: RagSummaryRecord | null;
-}
-
 interface RagWorkerExit {
   code: number | null;
   signal: NodeJS.Signals | null;
@@ -193,34 +186,41 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
   let failed = 0;
   let lexicalDocumentCount = 0;
   let embeddedDocuments = 0;
+  let traceEmbeddedDocuments = 0;
   let embeddingStatus: RagIndexStatus["embeddings"] = options.lexicalOnly
     ? { status: "disabled", model: config.rag.embeddingModel, dimension: null, count: 0 }
     : store.getStatus(config).embeddings;
   const embeddingProvider = options.lexicalOnly ? null : createEmbeddingProvider(config);
-  const embeddingBudget = options.embeddingLimit ?? options.limit;
-  const embedWithinBudget = async (documentOptions: { kind?: RagDocumentKind; traceId?: string } = {}): Promise<void> => {
+  const traceEmbeddingBudget = options.embeddingLimit ?? options.limit;
+  const embedAllMissingSummaryDocuments = async (traceId?: string): Promise<void> => {
     if (options.lexicalOnly) return;
-    const remainingBudget = embeddingBudget === undefined ? undefined : Math.max(0, embeddingBudget - embeddedDocuments);
-    if (remainingBudget !== undefined && remainingBudget <= 0) return;
-    const result = await embedChangedDocuments(store, embeddingProvider, config, remainingBudget, documentOptions);
+    const result = await embedChangedDocuments(store, embeddingProvider, config, undefined, {
+      kind: "summary",
+      ...(traceId ? { traceId } : {}),
+    });
     embeddedDocuments += result.embeddedDocuments;
     embeddingStatus = result.status;
   };
+  const embedTraceDocumentsWithinBudget = async (): Promise<void> => {
+    if (options.lexicalOnly) return;
+    const remainingBudget = traceEmbeddingBudget === undefined ? undefined : Math.max(0, traceEmbeddingBudget - traceEmbeddedDocuments);
+    if (remainingBudget !== undefined && remainingBudget <= 0) return;
+    const result = await embedChangedDocuments(store, embeddingProvider, config, remainingBudget, { kind: "trace" });
+    embeddedDocuments += result.embeddedDocuments;
+    traceEmbeddedDocuments += result.embeddedDocuments;
+    embeddingStatus = result.status;
+  };
   try {
-    await embedWithinBudget({ kind: "summary" });
-    await traceIndex.refresh();
+    await embedAllMissingSummaryDocuments();
+    await traceIndex.refreshRecent();
     const nowMs = Date.now();
     const summaries = traceIndex.getSummaries();
+    const discoveredTraceCount = traceIndex.getStartupStatus().discoveredTraceCount || summaries.length;
     const ignoredSessionIds = store.getInternalSummarySessionIds();
     const internalTraceIds = new Set<string>();
-    const detailByTraceId = new Map<string, ReturnType<TraceIndex["getSessionDetail"]>>();
     const getDetail = (summary: TraceSummary): ReturnType<TraceIndex["getSessionDetail"]> | null => {
       if (!summary.parseable) return null;
-      const cached = detailByTraceId.get(summary.id);
-      if (cached) return cached;
-      const detail = traceIndex.getSessionDetail(summary.id);
-      detailByTraceId.set(summary.id, detail);
-      return detail;
+      return traceIndex.getSessionDetailUncached(summary.id);
     };
 
     for (const summary of summaries) {
@@ -260,18 +260,14 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
     }
     const eligible = summaries.filter((summary) => !internalTraceIds.has(summary.id) && isEligible(summary, config, nowMs));
     const limit = Math.max(1, options.limit ?? (eligible.length || 1));
-    const selected: RagWorkItem[] = [];
+    let selectedCount = 0;
     for (const summary of eligible) {
       const detail = getDetail(summary);
       if (!detail) continue;
       const promptInput = buildPromptInput(detail);
       const existing = store.getSession(summary.id);
       if (!options.force && isCurrentTerminalRagSession(existing, promptInput.fingerprint)) continue;
-      selected.push({ summary, detail, promptInput, existing });
-      if (selected.length >= limit) break;
-    }
-
-    for (const { summary, detail, promptInput, existing } of selected) {
+      selectedCount += 1;
       try {
         if (promptInput.promptBytes > config.rag.summaryMaxPromptBytes && !options.forceLarge) {
           store.upsertSession({
@@ -304,7 +300,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
           nowMs: Date.now(),
         });
         store.replaceDocuments(summary.id, corpus.documents, Date.now());
-        await embedWithinBudget({ kind: "summary", traceId: summary.id });
+        await embedAllMissingSummaryDocuments(summary.id);
         lexicalDocumentCount += corpus.documents.length;
         summarized += 1;
       } catch (error) {
@@ -321,14 +317,16 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
           nowMs: Date.now(),
         });
       }
+      if (selectedCount >= limit) break;
     }
 
-    await embedWithinBudget();
+    await embedAllMissingSummaryDocuments();
+    await embedTraceDocumentsWithinBudget();
     store.setMeta("last_run_at_ms", String(Date.now()));
     store.setMeta("last_run_error", lastError);
     return {
       dbPath: store.dbPath,
-      discoveredTraces: summaries.length,
+      discoveredTraces: discoveredTraceCount,
       quietEligibleTraces: eligible.length,
       summarized,
       skipped,

@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:f
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import type { NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@agentlens/contracts";
 import { mergeConfig, saveConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
@@ -292,6 +293,79 @@ describe("rag corpus", () => {
 });
 
 describe("rag store", () => {
+  it("keeps writer operations available while another connection is reading", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"));
+    const store = new RagStore(config);
+    const reader = new Database(config.rag.dbPath, { readonly: true });
+    reader.exec("BEGIN");
+    reader.prepare("SELECT COUNT(*) AS count FROM rag_sessions").get();
+
+    try {
+      const traceSummary = summary({ id: "writer-during-read", sessionId: "writer-session" });
+      const traceContent = content();
+      const corpus = buildRagCorpus({ summary: traceSummary, events: [event(0, "writer event")] }, traceContent);
+
+      expect(() => {
+        store.upsertSession({
+          summary: traceSummary,
+          fingerprint: corpus.fingerprint,
+          status: "complete",
+          content: traceContent,
+          summaryText: corpus.summaryText,
+          summaryModel: "fake",
+          summaryGeneratedAtMs: 1_700_000_002_000,
+          nowMs: 1_700_000_002_000,
+        });
+      }).not.toThrow();
+    } finally {
+      reader.exec("ROLLBACK");
+      reader.close();
+      store.close();
+    }
+  });
+
+  it("lists summaries by newest original trace before applying the limit", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"));
+    const store = new RagStore(config);
+    const seed = (traceId: string, lastEventTs: number, updatedAtMs: number): void => {
+      const traceSummary = summary({
+        id: traceId,
+        sessionId: `session-${traceId}`,
+        path: `/tmp/${traceId}.jsonl`,
+        lastEventTs,
+        mtimeMs: lastEventTs - 100,
+      });
+      const traceContent = { ...content(), title: `Title ${traceId}` };
+      const corpus = buildRagCorpus(
+        { summary: traceSummary, events: [event(0, `event ${traceId}`, { traceId })] },
+        traceContent,
+      );
+      store.upsertSession({
+        summary: traceSummary,
+        fingerprint: corpus.fingerprint,
+        status: "complete",
+        content: traceContent,
+        summaryText: corpus.summaryText,
+        summaryModel: "fake",
+        summaryGeneratedAtMs: updatedAtMs,
+        nowMs: updatedAtMs,
+      });
+      store.replaceDocuments(traceId, corpus.documents, updatedAtMs);
+    };
+
+    seed("old-trace-recent-summary", 1_700_000_001_000, 1_700_000_006_000);
+    seed("new-trace-old-summary", 1_700_000_003_000, 1_700_000_004_000);
+    seed("middle-trace", 1_700_000_002_000, 1_700_000_005_000);
+
+    expect(store.listSummaries({ status: "complete", limit: 2 }).map((record) => record.traceId)).toEqual([
+      "new-trace-old-summary",
+      "middle-trace",
+    ]);
+    store.close();
+  });
+
   it("migrates idempotently, indexes lexical documents, and returns status counts", async () => {
     const dir = await tempDir();
     const config = testConfig(path.join(dir, "rag.db"));
@@ -672,6 +746,45 @@ describe("rag indexer", () => {
     store.close();
   });
 
+  it("does not hydrate every historical trace during a bounded index pass", async () => {
+    const dir = await tempDir();
+    const tracesDir = path.join(dir, "traces");
+    await mkdir(tracesDir, { recursive: true });
+    for (let index = 0; index < 130; index += 1) {
+      await writeQuietTrace(path.join(tracesDir, `trace-${index}.jsonl`), buildCodexTraceLog(`session-${index}`, index), index);
+    }
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [tracesDir],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 2,
+          agentHint: "codex",
+        },
+      },
+      rag: {
+        dbPath: path.join(dir, "rag.db"),
+        daemonPidPath: path.join(dir, "rag.pid"),
+        daemonLogPath: path.join(dir, "rag.log"),
+        embeddingBackend: "disabled",
+        headlessExecutable: await writeFakeHeadless(dir),
+      },
+    });
+
+    const result = await runRagIndexOnce(config, { limit: 1 });
+    const store = new RagStore(config);
+
+    expect(result.discoveredTraces).toBe(130);
+    expect(result.quietEligibleTraces).toBeLessThan(130);
+    expect(result.summarized).toBe(1);
+    expect(store.getStatus(config).sessions.complete).toBe(1);
+    store.close();
+  });
+
   it("retries failed summaries on a later indexing pass", async () => {
     const dir = await tempDir();
     const tracesDir = path.join(dir, "traces");
@@ -790,6 +903,61 @@ describe("rag indexer", () => {
 
     expect(first?.documentId).toBe("old-summary:summary:0");
     store.close();
+  });
+
+  it("drains missing summary embeddings independently of the trace embedding budget", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local", embeddingBatchSize: 2 });
+    const store = new RagStore(config);
+    for (let index = 0; index < 5; index += 1) {
+      const traceId = `summary-trace-${index}`;
+      store.upsertSession({
+        summary: summary({ id: traceId, sessionId: `session-${traceId}` }),
+        fingerprint: traceId,
+        status: "complete",
+        content: content(),
+        summaryText: `summary ${index}`,
+        summaryModel: "fake",
+        summaryGeneratedAtMs: 1,
+        nowMs: 2,
+      });
+      store.replaceDocuments(
+        traceId,
+        [
+          {
+            documentId: `${traceId}:summary:0`,
+            traceId,
+            kind: "summary" as const,
+            chunkIndex: 0,
+            content: `summary document ${index}`,
+          },
+          {
+            documentId: `${traceId}:trace:0`,
+            traceId,
+            kind: "trace" as const,
+            chunkIndex: 0,
+            content: `trace document ${index}`,
+          },
+        ],
+        3,
+      );
+    }
+    store.close();
+
+    const previousFakeEmbeddings = process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+    process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = "1";
+    try {
+      const result = await runRagIndexOnce(config, { embeddingLimit: 1 });
+      const updated = new RagStore(config);
+
+      expect(result.embeddedDocuments).toBe(6);
+      expect(updated.listDocumentsWithoutEmbeddings("agentlens-hash-test", 10, { kind: "summary" })).toEqual([]);
+      expect(updated.listDocumentsWithoutEmbeddings("agentlens-hash-test", 10, { kind: "trace" })).toHaveLength(4);
+      updated.close();
+    } finally {
+      if (previousFakeEmbeddings === undefined) delete process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS;
+      else process.env.AGENTLENS_RAG_FAKE_EMBEDDINGS = previousFakeEmbeddings;
+    }
   });
 
   it("uses a bounded embedding pass by default in the worker loop", async () => {
@@ -942,7 +1110,7 @@ describe("rag indexer", () => {
         .map((document) => document.documentId);
 
       expect(result.summarized).toBe(1);
-      expect(result.embeddedDocuments).toBe(3);
+      expect(result.embeddedDocuments).toBe(4);
       expect(missingSummaryIds).not.toContain(`${traceId}:summary:0`);
       updated.close();
     } finally {

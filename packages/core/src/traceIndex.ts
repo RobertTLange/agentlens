@@ -925,6 +925,10 @@ export class TraceIndex extends EventEmitter {
     await this.runRefreshLoop();
   }
 
+  async refreshRecent(): Promise<void> {
+    await this.bootstrapRecentTraces();
+  }
+
   getPerformanceStats(): IndexPerformanceStats {
     const stats = this.buildRetentionStats();
     return {
@@ -1946,6 +1950,30 @@ export class TraceIndex extends EventEmitter {
     return {
       summary: found.summary,
       events,
+    };
+  }
+
+  getSessionDetailUncached(id: string): SessionDetail {
+    const found = this.entries.get(id);
+    if (!found) {
+      throw new Error(`unknown trace id: ${id}`);
+    }
+    if (found.cachedFullEvents && found.cachedFullEvents.length >= found.summary.eventCount) {
+      return {
+        summary: found.summary,
+        events: found.cachedFullEvents,
+      };
+    }
+    if (found.residentEvents.length >= found.summary.eventCount) {
+      return {
+        summary: found.summary,
+        events: found.residentEvents,
+      };
+    }
+    const parsed = this.parserRegistry.parseFileSync(found.file, found.summary.parser);
+    return {
+      summary: found.summary,
+      events: redactEvents(parsed.events, this.config.redaction),
     };
   }
 
