@@ -99,7 +99,7 @@ skillRoots = ["~/.codex/skills", "~/.claude/skills"]
 topSessionLimit = 20
 ```
 
-- `skillRoots`: directories scanned for configured skills; each immediate child directory with a `SKILL.md` is treated as one configured skill
+- `skillRoots`: directories scanned recursively for configured skills; each directory with a `SKILL.md` is treated as one configured skill
 - `topSessionLimit`: maximum top-contributing sessions returned by analysis responses and CLI output
 
 ## Practical Scan Settings

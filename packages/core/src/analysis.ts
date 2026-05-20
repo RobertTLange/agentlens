@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync, type Dirent } from "node:fs";
 import path from "node:path";
 import type {
   AgentKind,
@@ -18,7 +18,7 @@ import { asArray, asRecord, asString, expandHome, nowMs } from "./utils.js";
 
 const AGENT_ORDER: AgentKind[] = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"];
 const SUPPORTED_DETECTOR_AGENTS = new Set<AgentKind>(["codex", "claude"]);
-const SKILL_PATH_PATTERN = /(?:^|[\\/])skills[\\/]([^\\/]+)[\\/]SKILL\.md\b/g;
+const SKILL_PATH_PATTERN = /(?:^|[\\/])skills[\\/](?:(?!SKILL\.md\b)[^\\/]+[\\/])*([^\\/]+)[\\/]SKILL\.md\b/g;
 
 export interface BuildAnalysisOptions {
   agent?: AgentKind;
@@ -118,6 +118,28 @@ function normalizeSkillRoots(roots: string[]): string[] {
   return normalized;
 }
 
+function inventorySkillDirectory(directory: string, configured: Set<string>, warnings: string[]): void {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    warnings.push(`Skill directory unreadable: ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  if (existsSync(path.join(directory, "SKILL.md"))) {
+    const name = path.basename(directory);
+    if (isValidSkillName(name)) {
+      configured.add(name);
+    }
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    inventorySkillDirectory(path.join(directory, entry.name), configured, warnings);
+  }
+}
+
 function inventoryConfiguredSkills(skillRoots: string[]): {
   configuredSkills: string[];
   skillRoots: string[];
@@ -143,20 +165,7 @@ function inventoryConfiguredSkills(skillRoots: string[]): {
       warnings.push(`Skill root is not a directory: ${root}`);
       continue;
     }
-    let entries: string[];
-    try {
-      entries = readdirSync(root);
-    } catch (error) {
-      warnings.push(`Skill root unreadable: ${root}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
-    for (const entry of entries) {
-      if (!isValidSkillName(entry)) continue;
-      const skillMdPath = path.join(root, entry, "SKILL.md");
-      if (existsSync(skillMdPath)) {
-        configured.add(entry);
-      }
-    }
+    inventorySkillDirectory(root, configured, warnings);
   }
 
   return {

@@ -17,6 +17,7 @@ async function buildAnalysisFixture(): Promise<TraceIndex> {
   const skillRoot = path.join(root, "skills");
   await writeSkill(skillRoot, "bug-hunt-swarm");
   await writeSkill(skillRoot, "clean-code");
+  await writeSkill(path.join(skillRoot, ".system"), "imagegen");
   await writeSkill(skillRoot, "unused-skill");
 
   const codexRoot = path.join(root, ".codex", "sessions", "2026", "05", "20");
@@ -27,6 +28,8 @@ async function buildAnalysisFixture(): Promise<TraceIndex> {
   await mkdir(cursorRoot, { recursive: true });
 
   const recentTs = new Date(Date.now() - 60_000).toISOString();
+  const bugHuntSkillPath = path.join(skillRoot, "bug-hunt-swarm", "SKILL.md");
+  const imagegenSkillPath = path.join(skillRoot, ".system", "imagegen", "SKILL.md");
   await writeFile(
     path.join(codexRoot, "codex.jsonl"),
     [
@@ -44,7 +47,7 @@ async function buildAnalysisFixture(): Promise<TraceIndex> {
           content: [
             {
               type: "input_text",
-              text: `Use $clean-code and read ${path.join(skillRoot, "bug-hunt-swarm", "SKILL.md")} plus /tmp/skills/unlisted/SKILL.md`,
+              text: `Use $clean-code and read ${bugHuntSkillPath} plus ${imagegenSkillPath} plus /tmp/skills/unlisted/SKILL.md`,
             },
           ],
         },
@@ -148,10 +151,10 @@ describe("buildAnalysis", () => {
 
     expect(analysis.summary.traceCount).toBe(3);
     expect(analysis.summary.supportedTraceCount).toBe(2);
-    expect(analysis.summary.explicitSkillCount).toBe(2);
+    expect(analysis.summary.explicitSkillCount).toBe(3);
     expect(analysis.summary.inferredSkillCount).toBe(1);
     expect(analysis.summary.subagentSpawnCount).toBe(2);
-    expect(analysis.inventory.configuredSkills).toEqual(["bug-hunt-swarm", "clean-code", "unused-skill"]);
+    expect(analysis.inventory.configuredSkills).toEqual(["bug-hunt-swarm", "clean-code", "imagegen", "unused-skill"]);
     expect(analysis.inventory.unusedConfiguredSkills).toEqual(["unused-skill"]);
     expect(analysis.inventory.observedUnconfiguredSkills).toEqual(["unlisted"]);
     expect(analysis.inventory.warnings[0]).toContain("Skill root not found:");
@@ -159,6 +162,7 @@ describe("buildAnalysis", () => {
     expect(analysis.skills).toMatchObject([
       { name: "bug-hunt-swarm", inventoryStatus: "configured", explicitCount: 1, inferredCount: 0, totalCount: 1 },
       { name: "clean-code", inventoryStatus: "configured", explicitCount: 0, inferredCount: 1, totalCount: 1 },
+      { name: "imagegen", inventoryStatus: "configured", explicitCount: 1, inferredCount: 0, totalCount: 1 },
       { name: "unlisted", inventoryStatus: "unconfigured", explicitCount: 1, inferredCount: 0, totalCount: 1 },
     ]);
     expect(analysis.subagents).toMatchObject([
@@ -173,7 +177,7 @@ describe("buildAnalysis", () => {
     });
     expect(analysis.topSessions[0]).toMatchObject({
       agent: "codex",
-      explicitSkillCount: 2,
+      explicitSkillCount: 3,
       inferredSkillCount: 1,
       subagentSpawnCount: 1,
     });
