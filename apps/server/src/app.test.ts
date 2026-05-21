@@ -312,6 +312,111 @@ async function buildFixtureWithCustomTrace(
   return { configPath, index, sessionId };
 }
 
+async function buildAnalysisApiFixture(): Promise<{ configPath: string; index: TraceIndex }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-server-analysis-"));
+  const skillRoot = path.join(root, "skills");
+  await mkdir(path.join(skillRoot, "clean-code"), { recursive: true });
+  await writeFile(path.join(skillRoot, "clean-code", "SKILL.md"), "---\nname: clean-code\n---\n", "utf8");
+
+  const codexRoot = path.join(root, ".codex", "sessions", "2026", "05", "20");
+  const claudeRoot = path.join(root, ".claude", "projects", "proj");
+  await mkdir(codexRoot, { recursive: true });
+  await mkdir(claudeRoot, { recursive: true });
+  const recentTs = new Date(Date.now() - 60_000).toISOString();
+  const oldTs = new Date(Date.now() - 10 * 86_400_000).toISOString();
+
+  await writeFile(
+    path.join(codexRoot, "recent.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: recentTs,
+        type: "session_meta",
+        payload: { id: "analysis-codex", cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: recentTs,
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `Use $clean-code and ${path.join(skillRoot, "clean-code", "SKILL.md")}` }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: recentTs,
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          id: "spawn-1",
+          name: "spawn_agent",
+          call_id: "call-spawn-1",
+          arguments: JSON.stringify({ agent_type: "worker" }),
+        },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  await writeFile(
+    path.join(claudeRoot, "old.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: oldTs,
+        type: "assistant",
+        sessionId: "analysis-claude-old",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "task-1", name: "Task", input: { subagent_type: "explorer" } }],
+        },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  const config = mergeConfig({
+    sessionLogDirectories: [],
+    analysis: {
+      skillRoots: [skillRoot],
+      topSessionLimit: 10,
+    },
+    sources: {
+      codex_home: {
+        name: "codex_home",
+        enabled: true,
+        roots: [path.join(root, ".codex", "sessions")],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "codex",
+      },
+      claude_projects: {
+        name: "claude_projects",
+        enabled: true,
+        roots: [path.join(root, ".claude", "projects")],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+      claude_history: {
+        name: "claude_history",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["history.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+    },
+  });
+
+  const configPath = path.join(root, "config.toml");
+  await saveConfig(config, configPath);
+  const index = new TraceIndex(config);
+  await index.refresh();
+  return { configPath, index };
+}
+
 describe("server api", () => {
   it("coalesces bursty live deltas into one ordered batch envelope", async () => {
     const original = buildTraceLog("server-session-burst", 1, true);
@@ -1231,6 +1336,75 @@ describe("server api", () => {
 
     await server.close();
   }, 20_000);
+
+  it("serves analysis and applies agent and since filters", async () => {
+    const fixture = await buildAnalysisApiFixture();
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({ method: "GET", url: "/api/analysis" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      summary: {
+        traceCount: 2,
+        supportedTraceCount: 2,
+        explicitSkillCount: 1,
+        inferredSkillCount: 1,
+        subagentSpawnCount: 2,
+      },
+      inventory: {
+        configuredSkills: ["clean-code"],
+      },
+    });
+
+    const codexOnly = await server.inject({ method: "GET", url: "/api/analysis?agent=codex" });
+    expect(codexOnly.statusCode).toBe(200);
+    expect(codexOnly.json()).toMatchObject({
+      summary: { traceCount: 1, subagentSpawnCount: 1 },
+      subagents: [{ name: "worker", spawnCount: 1 }],
+    });
+
+    const recentOnly = await server.inject({ method: "GET", url: "/api/analysis?since=7d" });
+    expect(recentOnly.statusCode).toBe(200);
+    expect(recentOnly.json()).toMatchObject({
+      summary: { traceCount: 1, subagentSpawnCount: 1 },
+    });
+
+    const invalid = await server.inject({ method: "GET", url: "/api/analysis?agent=bad" });
+    expect(invalid.statusCode).toBe(400);
+
+    await server.close();
+  });
+
+  it("returns a warming response for analysis before inspector readiness", async () => {
+    const fixture = await buildAnalysisApiFixture();
+    const startup: IndexStartupStatus = {
+      phase: "bootstrapping",
+      inspectorReady: false,
+      fullReady: false,
+      isPartial: false,
+      discoveredTraceCount: 2,
+      hydratedTraceCount: 0,
+      startupError: "",
+    };
+    const startupSpy = vi.spyOn(fixture.index, "getStartupStatus").mockReturnValue(startup);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const response = await server.inject({ method: "GET", url: "/api/analysis" });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ warming: true, startup });
+
+    startupSpy.mockRestore();
+    await server.close();
+  });
 
   it("serves local-day agent activity bins with break markers and dominant colors", async () => {
     const fixture = await buildFixtureWithTraceCount(3);

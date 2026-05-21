@@ -1,5 +1,6 @@
 export * from "./config.js";
 export * from "./sourceProfiles.js";
+export * from "./analysis.js";
 export * from "./pricingSync.js";
 export * from "./ragCorpus.js";
 export * from "./ragEmbeddings.js";

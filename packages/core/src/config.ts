@@ -7,6 +7,7 @@ import type {
   ActivityHeatmapConfig,
   ActivityHeatmapMetric,
   AgentKind,
+  AnalysisConfig,
   CostConfig,
   CostModelRate,
   ModelsConfig,
@@ -45,7 +46,8 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
   return merged;
 }
 
-export type PartialAppConfigInput = Omit<Partial<AppConfig>, "rag"> & {
+export type PartialAppConfigInput = Omit<Partial<AppConfig>, "analysis" | "rag"> & {
+  analysis?: Partial<AnalysisConfig>;
   rag?: Partial<RagConfig>;
   sessionJsonlDirectories?: string[];
 };
@@ -413,6 +415,18 @@ function mergeRag(input?: Partial<RagConfig>): RagConfig {
   };
 }
 
+function mergeAnalysis(input?: Partial<AnalysisConfig>): AnalysisConfig {
+  const defaults = DEFAULT_CONFIG.analysis;
+  const rawRoots = Array.isArray(input?.skillRoots) ? input.skillRoots : defaults.skillRoots;
+  const skillRoots = rawRoots
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+  return {
+    skillRoots: skillRoots.length > 0 ? skillRoots : defaults.skillRoots,
+    topSessionLimit: Math.max(1, positiveIntOrDefault(input?.topSessionLimit, defaults.topSessionLimit)),
+  };
+}
+
 export function mergeConfigWithPricingDefaults(
   input?: PartialAppConfigInput,
   pricingDefaults?: PricingDefaultsOverride,
@@ -463,6 +477,7 @@ export function mergeConfigWithPricingDefaults(
     cost: mergeCost(input?.cost, pricingDefaults?.modelRates),
     models: mergeModels(input?.models, pricingDefaults?.contextWindows),
     rag: mergeRag(input?.rag),
+    analysis: mergeAnalysis(input?.analysis),
   };
 }
 

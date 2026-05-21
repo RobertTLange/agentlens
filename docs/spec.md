@@ -1,499 +1,458 @@
-# AgentLens RAG Summaries and Hybrid Search Spec
+# AgentLens Analysis Tab Spec
 
 ## Goal
 
-Add a local RAG layer that summarizes quiet agent traces, stores one structured summary per trace/session, indexes summaries plus redacted trace text, and exposes hybrid retrieval through CLI, HTTP API, and a new Web UI tab beside `Inspector` and `Activity`.
+Add an `Analysis` tab beside `Inspector`, `Activity`, and `Summaries` that reports how agent sessions use skills and subagents across the AgentLens trace corpus. Add matching CLI support through a top-level `agentlens analysis` command.
 
-Primary use cases:
+The feature should answer:
 
-- Find prior traces relevant to a current coding task.
-- Let coding agents discover previous debugging work before acting.
-- Search summaries and full redacted trace content from the CLI.
-- Surface workflow-level patterns such as repeated blockers, tool failures, and followups.
+- Which skills are actually used?
+- Which configured skills appear unused?
+- Which unknown/unconfigured skills are observed in traces?
+- Which subagent roles are spawned?
+- Which source agents (`codex`, `claude`, etc.) are using each skill or subagent?
+- Which sessions contributed most to each category, with links back to Inspector?
+
+## Decisions
+
+- Source of truth: AgentLens parsed traces, not a separate raw-log scanner.
+- Scope: skills and subagents only. Do not include CLI tool adoption in v1.
+- Skill confidence: count explicit and inferred skill usage separately.
+- Default window: the full AgentLens indexed corpus.
+- Filters: support optional recency and source-agent filters in API, CLI, and Web UI.
+- Inventory: include configured/known skills plus observed unconfigured skills.
+- Breakdown: group stats by trace source agent (`TraceSummary.agent`).
+- Parser support: reliable detectors for Codex and Claude in v1; all other parsers are scanned but may report unsupported/unclassified detector status.
+- Subagent metric: count observed spawn events and label them as `spawns`.
+- Computation: derive on request from existing trace details; no persistent database/index in v1.
+- API: add dedicated `/api/analysis`.
+- CLI: add top-level `agentlens analysis [--json|--llm] [--since <window>] [--agent <name>]`.
+- UI: aggregate-first tab with top contributing sessions and Inspector links.
 
 ## Existing Anchors
 
-AgentLens already has the pieces this feature should extend:
+AgentLens already has the right extension points:
 
-- `TraceIndex` in `packages/core` discovers, parses, redacts, and serves normalized events.
-- `apps/cli/src/main.ts` owns the Commander CLI.
-- `apps/server/src/app.ts` owns Fastify API routes.
-- `apps/web/src/App.tsx` owns the primary `Inspector` / `Activity` tab switch.
-- Shared public shapes live in `packages/contracts/src/index.ts`.
+- Shared contracts: `packages/contracts/src/index.ts`
+- Trace parsing/indexing: `packages/core/src/traceIndex.ts`
+- Core exports: `packages/core/src/index.ts`
+- Server routes: `apps/server/src/app.ts`
+- CLI commands: `apps/cli/src/main.ts`
+- Primary Web tabs: `apps/web/src/App.tsx`
+- Existing feature view examples: `apps/web/src/ActivityView.tsx`, `apps/web/src/SummariesView.tsx`
 
-Do not replace the live in-memory trace index. The RAG layer is a persistent, derived index.
+Agentic Garden reference implementation:
+
+- `/Users/rob/Dropbox/projects/agentic-aquarium/agentic-garden/scripts/analyze-agent-usage.py`
+- `/Users/rob/Dropbox/projects/agentic-aquarium/agentic-garden/scripts/agent_usage_render.py`
+- `/Users/rob/Dropbox/projects/agentic-aquarium/agentic-garden/docs/agent-usage-analysis.md`
+- `/Users/rob/Dropbox/projects/agentic-aquarium/agentic-garden/tests/analyze-agent-usage_test.sh`
+
+Reusable Garden ideas:
+
+- Inventory skills from `*/SKILL.md`.
+- Detect explicit skill use from `.../skills/<name>/SKILL.md` paths.
+- Detect inferred skill use from `$skill-name` and nearby text like `skill ... skill-name`.
+- Detect Codex subagents from `spawn_agent` tool calls and `collab_agent_spawn_end`.
+- Detect Claude subagents from `Task` tool usage.
+- Render configured used/unused rows plus JSON output.
+
+Do not reuse Garden's raw log discovery or CLI tool counting in AgentLens v1.
 
 ## Product Behavior
 
-### Quiet Trace Rule
+### Analysis Tab
 
-`agentlens rag watch` and `agentlens rag index --once` must summarize only traces that have not been updated for at least 4 hours.
+Add a fourth primary tab named `Analysis`.
 
-Eligibility:
+The tab should show:
 
-- `max(summary.lastEventTs ?? 0, summary.mtimeMs) <= Date.now() - rag.quietPeriodMs`
-- default `rag.quietPeriodMs = 14_400_000`
-- parseable trace
-- at least one non-meta event
-- new or stale in the RAG DB
+- Summary counters: total sessions scanned, supported sessions, skill uses, explicit skill uses, inferred skill uses, subagent spawns, configured skills, unused configured skills, observed unconfigured skills.
+- Source-agent breakdown: rows by `TraceSummary.agent` with sessions, explicit skill uses, inferred skill uses, total skill uses, and subagent spawns.
+- Skills table: skill name, inventory status (`configured` or `unconfigured`), explicit count, inferred count, total count, sessions, and counts by source agent.
+- Subagents table: role/name, spawn count, sessions, and counts by source agent.
+- Unused configured skills table: configured skills with zero explicit/inferred usage.
+- Top sessions table: sessions contributing the most skill/subagent events, with `Inspect` actions that switch to Inspector and select that trace.
+- Detector coverage note: show which source agents had reliable detectors (`codex`, `claude`) and which were scanned without v1-specific detection rules.
 
-This quiet-period rule is required. Active traces should remain searchable only through existing live Inspector APIs until they become quiet.
+Keep this as a utilitarian analysis surface, not a marketing page. Use dense tables, compact summary cards, and predictable controls.
 
-### Staleness
+### Filters
 
-A RAG summary is stale when any fingerprint input changes:
+Initial filters:
 
-- trace id, path, agent, parser, source profile, session id
-- file size and mtime
-- event count
-- hash of the redacted normalized event payload used for summarization
+- Source agent: all, `codex`, `claude`, `cursor`, `gemini`, `opencode`, `pi`, `unknown`
+- Since window: all, `24h`, `7d`, `30d`, custom text matching CLI `toMsWindow`
 
-If a stale trace is still inside the 4-hour quiet period, keep the previous complete summary visible and mark refresh state as stale/pending.
+Default filter is all agents and all indexed traces.
 
-### Summarization Input
+### Empty States
 
-Send full redacted normalized events to Headless. Do not send raw trace files and do not ask Headless to read trace paths.
+- No traces: show `No sessions indexed`.
+- No supported traces: show `No Codex or Claude sessions available for v1 analysis`.
+- No skills/subagents observed: still show configured skill inventory and unused configured skills.
+- Skill roots missing: show a non-fatal inventory warning and continue with observed usage.
 
-Prompt payload includes:
+## Data Model
 
-- trace metadata and current `TraceSummary`
-- every redacted normalized event with index, timestamp, event kind, role, preview, text blocks, tool name/type/call id, tool args/result text, and error flag
-
-If the prompt would exceed `rag.summaryMaxPromptBytes`, mark the job `skipped` with `input_too_large`. Manual indexing may override with `--force-large`.
-
-### Structured Summary
-
-Store one JSON object per trace/session:
+Add contract types in `packages/contracts/src/index.ts`.
 
 ```ts
-interface RagTraceSummaryContent {
-  title: string;
-  userGoal: string;
-  outcome: string;
-  keySteps: string[];
-  filesOrProjects: string[];
-  toolsUsed: string[];
-  errorsOrBlockers: string[];
-  decisions: string[];
-  workflowObservations: string[];
-  followups: string[];
-  searchKeywords: string[];
+export type AnalysisDetectorSupport = "supported" | "unsupported";
+export type AnalysisSkillConfidence = "explicit" | "inferred";
+export type AnalysisInventoryStatus = "configured" | "unconfigured";
+
+export interface AnalysisCountByAgent {
+  agent: AgentKind;
+  count: number;
 }
-```
 
-Validation:
+export interface AnalysisSkillUsageRow {
+  name: string;
+  inventoryStatus: AnalysisInventoryStatus;
+  explicitCount: number;
+  inferredCount: number;
+  totalCount: number;
+  sessionCount: number;
+  byAgent: AnalysisCountByAgent[];
+}
 
-- fields are required
-- strings are trimmed
-- arrays may default to `[]`
-- invalid JSON or invalid shape marks the refresh `failed`
-- a failed refresh must not delete the previous complete summary
+export interface AnalysisSubagentUsageRow {
+  name: string;
+  spawnCount: number;
+  sessionCount: number;
+  byAgent: AnalysisCountByAgent[];
+}
 
-### Retrieval Corpus
+export interface AnalysisSourceAgentRow {
+  agent: AgentKind;
+  detectorSupport: AnalysisDetectorSupport;
+  sessionCount: number;
+  explicitSkillCount: number;
+  inferredSkillCount: number;
+  totalSkillCount: number;
+  subagentSpawnCount: number;
+}
 
-Index two document classes:
-
-| Kind | Content | Notes |
-| --- | --- | --- |
-| `summary` | flattened structured summary | one per trace, highest signal |
-| `trace` | chunks of full redacted normalized event text | chunked by event order |
-
-Trace chunks target about 8,000 characters and must not split an individual event. Search results collapse chunk hits to trace-level results while preserving representative snippets.
-
-## Configuration
-
-Add `[rag]` to `AppConfig`, defaults, merge logic, `example.config.toml`, and configuration docs.
-
-```toml
-[rag]
-enabled = true
-dbPath = "~/.agentlens/rag.db"
-quietPeriodMs = 14400000
-workerIntervalMs = 300000
-daemonPidPath = "~/.agentlens/rag-worker.pid"
-daemonLogPath = "~/.agentlens/logs/rag-worker.log"
-
-headlessExecutable = "headless"
-summaryAgent = "codex"
-summaryModel = ""
-summaryReasoningEffort = "medium"
-summaryPermissionMode = "read-only"
-summaryTimeoutMs = 600000
-summaryMaxPromptBytes = 1500000
-
-embeddingBackend = "local"
-embeddingModel = "sentence-transformers/all-MiniLM-L6-v2"
-modelCacheDir = "~/.agentlens/models"
-embeddingBatchSize = 32
-searchCandidateMultiplier = 8
-rrfK = 60
-```
-
-## Storage
-
-Use SQLite at `rag.dbPath`. Use explicit schema metadata and idempotent migrations.
-
-Required tables:
-
-| Table | Purpose |
-| --- | --- |
-| `rag_meta` | schema version, embedding metadata, last run metadata |
-| `rag_sessions` | one row per trace/session summary and refresh status |
-| `rag_documents` | searchable summary and trace chunk documents |
-| `rag_embeddings` | Float32 vector blobs keyed by document id |
-| `rag_document_fts` | FTS5 virtual table for lexical retrieval |
-
-Important `rag_sessions` columns:
-
-- `trace_id primary key`, `session_id`, `agent`, `parser`, `source_profile`, `path`
-- `first_event_ts`, `last_event_ts`, `mtime_ms`, `size_bytes`, `event_count`
-- `fingerprint`, `status`, `skip_reason`, `error`
-- `summary_json`, `summary_text`, `summary_model`, `summary_generated_at_ms`
-- `created_at_ms`, `updated_at_ms`
-
-Statuses:
-
-- `pending`: queued but not processed
-- `running`: worker owns the row
-- `complete`: usable summary and documents exist
-- `stale`: previous summary exists but trace changed
-- `failed`: latest refresh failed
-- `skipped`: intentionally skipped, for example oversized input
-
-All SQL must use parameters. No string-built SQL from user input.
-
-## Embeddings
-
-Use local Hugging Face loading with model id `sentence-transformers/all-MiniLM-L6-v2`, matching Archivist's configured model. AgentLens is TypeScript/Node, so implement an embedding provider abstraction and a concrete local HF provider.
-
-Requirements:
-
-- cache model files under `rag.modelCacheDir`
-- normalize vectors before storage
-- store Float32 vector blobs with model and dimension metadata
-- do not require model downloads in normal CI
-- lexical search must keep working if embedding dependencies/model files are unavailable
-
-Vector search can start as in-process cosine ranking over stored vectors. Keep the storage layout compatible with future sqlite-vec/sqlite-vss acceleration.
-
-## Headless Summarization
-
-Invoke Headless using argument arrays, never shell strings.
-
-Command shape:
-
-```text
-headless <summaryAgent> --prompt-file <prompt.md> --work-dir <tmp-work-dir> --allow read-only --timeout <seconds> --json
-```
-
-Add `--model` and `--reasoning-effort` only when configured. Always use `read-only` unless config explicitly changes later; v1 default and tests should enforce read-only.
-
-Environment allowlist:
-
-- runtime: `HOME`, `PATH`, `LANG`, `LC_ALL`, `TMPDIR`, `TEMP`, `TMP`
-- provider auth needed by Headless: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, plus existing Headless auth envs as needed
-
-Prompt rules:
-
-- describe the payload as redacted local trace data
-- require strict JSON matching `RagTraceSummaryContent`
-- forbid invented files, outcomes, and followups
-- require uncertainty to be represented plainly
-
-Failure handling:
-
-- timeout kills the child and marks the refresh failed
-- non-zero exit marks failed
-- malformed output marks failed
-- no failed refresh may delete the last complete summary
-- logs must not contain full prompt text or full event text
-
-## Worker and Daemon
-
-### CLI
-
-Add:
-
-```bash
-agentlens rag index --once [--limit n] [--force] [--force-large] [--lexical-only] [--json]
-agentlens rag watch [--interval <window>] [--limit n] [--foreground] [--json]
-agentlens rag status [--json]
-agentlens rag stop
-agentlens search <query> [--mode hybrid|lexical|semantic] [--limit n] [--agent name] [--since window] [--json] [--llm]
-```
-
-`agentlens rag watch` starts a background daemon by default.
-
-Daemon behavior:
-
-- if no live daemon exists, spawn a detached worker and return immediately
-- if a live daemon PID exists, print reuse status and return
-- write PID to `rag.daemonPidPath`
-- write logs to `rag.daemonLogPath`
-- `--foreground` runs the loop inline for debugging and tests
-- `rag stop` terminates the PID from the PID file and tolerates stale/missing PID files
-
-Internal worker:
-
-```bash
-agentlens rag worker --foreground
-```
-
-The worker loop:
-
-1. load config
-2. initialize/migrate SQLite
-3. refresh `TraceIndex`
-4. find quiet eligible stale/new traces
-5. summarize up to `--limit`
-6. replace lexical documents
-7. embed changed documents unless `--lexical-only`
-8. update run status
-9. sleep `workerIntervalMs`
-10. repeat until signaled
-
-Do not use Headless cron. AgentLens owns scheduling and invokes Headless only for summarization.
-
-### One-Shot Indexing
-
-`agentlens rag index --once` runs the same pipeline once in the foreground. JSON output should include DB path, discovered traces, quiet eligible traces, summarized/skipped/failed counts, lexical document count, embedding status, and last error.
-
-## Search
-
-Modes:
-
-- `lexical`: FTS5 only
-- `semantic`: local embeddings only
-- `hybrid`: reciprocal rank fusion over lexical and semantic candidates
-
-Default: `hybrid`.
-
-Hybrid score:
-
-```text
-score = 1 / (rrfK + lexicalRank) + 1 / (rrfK + semanticRank)
-```
-
-Result contract:
-
-```ts
-interface RagSearchResult {
+export interface AnalysisTopSessionRow {
   traceId: string;
   sessionId: string;
   agent: AgentKind;
   path: string;
-  title: string;
-  userGoal: string;
-  outcome: string;
-  updatedAtMs: number;
-  summaryGeneratedAtMs: number | null;
-  score: number;
-  lexicalRank?: number;
-  semanticRank?: number;
-  matchedKinds: Array<"summary" | "trace">;
-  snippets: string[];
+  lastEventTs: number | null;
+  mtimeMs: number;
+  explicitSkillCount: number;
+  inferredSkillCount: number;
+  subagentSpawnCount: number;
+  topSkills: NamedCount[];
+  topSubagents: NamedCount[];
+}
+
+export interface AnalysisInventorySummary {
+  configuredSkills: string[];
+  unusedConfiguredSkills: string[];
+  observedUnconfiguredSkills: string[];
+  skillRoots: string[];
+  warnings: string[];
+}
+
+export interface AnalysisSummary {
+  generatedAtMs: number;
+  traceCount: number;
+  supportedTraceCount: number;
+  explicitSkillCount: number;
+  inferredSkillCount: number;
+  totalSkillCount: number;
+  subagentSpawnCount: number;
+}
+
+export interface AnalysisResponse {
+  summary: AnalysisSummary;
+  inventory: AnalysisInventorySummary;
+  byAgent: AnalysisSourceAgentRow[];
+  skills: AnalysisSkillUsageRow[];
+  subagents: AnalysisSubagentUsageRow[];
+  topSessions: AnalysisTopSessionRow[];
 }
 ```
 
-CLI `--llm` output must be deterministic and include next calls:
+Keep response rows sorted deterministically:
 
-- `agentlens session <trace_id> --llm`
-- `agentlens sessions events <trace_id> --llm --limit 200`
-- `agentlens rag summary <trace_id> --json`
+- Usage rows: descending total/spawn count, then name ascending.
+- Source-agent rows: configured `AgentKind` order.
+- Top sessions: descending total analysis activity, then most recent, then trace id.
 
-If `agentlens rag summary` is not added, replace that next call with the implemented equivalent.
+## Configuration
 
-## HTTP API
+Add an `[analysis]` config block.
 
-Add read-only endpoints:
+```toml
+[analysis]
+skillRoots = ["~/.codex/skills", "~/.claude/skills"]
+topSessionLimit = 20
+```
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/rag/status` | DB/index/daemon status |
-| `GET /api/rag/search?q=...&mode=hybrid&limit=20&agent=codex&since=7d` | search summaries and trace chunks |
-| `GET /api/rag/summaries?status=complete&agent=codex&since=7d` | list summaries |
-| `GET /api/rag/summaries/:traceId` | fetch one structured summary |
-
-Status shape:
+Contract:
 
 ```ts
-interface RagIndexStatus {
-  enabled: boolean;
-  dbPath: string;
-  daemon: { running: boolean; pid: number | null; pidPath: string; logPath: string };
-  sessions: { total: number; complete: number; pending: number; stale: number; failed: number; skipped: number };
-  documents: number;
-  embeddings: {
-    status: "ready" | "missing" | "dirty" | "unavailable" | "disabled";
-    model: string;
-    dimension: number | null;
-    count: number;
-    error?: string;
-  };
-  lastRunAtMs: number | null;
-  lastRunError: string;
+export interface AnalysisConfig {
+  skillRoots: string[];
+  topSessionLimit: number;
 }
 ```
 
-HTTP rules:
+Implementation tasks:
 
-- disabled RAG returns `200` with `enabled: false`
-- missing DB returns empty status, not `500`
-- invalid params return `400`
-- unknown `traceId` returns `404`
+- Add `AnalysisConfig` to `AppConfig`.
+- Add defaults in `packages/core/src/sourceProfiles.ts`.
+- Merge config in `packages/core/src/config.ts`.
+- Document config in `example.config.toml` and `docs/configuration.md`.
+
+Inventory rules:
+
+- Expand `~`.
+- Ignore missing roots with warnings.
+- A configured skill is any directory containing `SKILL.md`.
+- Use the directory basename as the skill name.
+- Deduplicate names across roots.
+- Do not read arbitrary large skill contents; only existence/path is needed.
+
+## Core Implementation
+
+Add `packages/core/src/analysis.ts`.
+
+Public API:
+
+```ts
+export interface BuildAnalysisOptions {
+  agent?: AgentKind;
+  since?: number;
+  topSessionLimit?: number;
+}
+
+export function buildAnalysis(traceIndex: TraceIndex, options?: BuildAnalysisOptions): AnalysisResponse;
+```
+
+Filtering:
+
+- Start from `traceIndex.getSummaries()`.
+- Apply `agent` if provided.
+- Apply `since` against `summary.lastEventTs ?? summary.mtimeMs`.
+- For each included trace, call `traceIndex.getSessionDetail(summary.id)` to use existing parsed/redacted normalized events.
+
+This is intentionally on-request. Do not add new persistent state in v1.
+
+### Detection Rules
+
+#### Explicit Skills
+
+Count occurrences of paths matching:
+
+```text
+/skills/<skill-name>/SKILL.md
+```
+
+Sources to inspect:
+
+- `event.toolArgsText`
+- `event.toolResultText`
+- `event.textBlocks`
+- `event.preview`
+- stringified shallow values from `event.raw` only when needed for Codex/Claude gaps
+
+Normalize names case-sensitively by path segment. Do not count names with path traversal segments.
+
+#### Inferred Skills
+
+For each configured skill name, inspect user/assistant text for:
+
+- `$<skill-name>`
+- `<skill-name>` within 60 characters before `skill`
+- `skill` within 60 characters before `<skill-name>`
+
+Sources:
+
+- `event.textBlocks`
+- `event.preview`
+- `event.toolArgsText` only for user-provided prompt-like tool inputs if tests show this is needed
+
+Do not infer unknown skill names from arbitrary text in v1. Unknown/unconfigured skills are surfaced only from explicit `SKILL.md` paths.
+
+#### Codex Subagents
+
+Detect:
+
+- `tool_use` with `toolName` or `functionName` equal to `spawn_agent`; parse `event.toolArgsText` JSON when possible and count `agent_type || "default"`.
+- raw `response_item` function/custom tool calls named `spawn_agent` if the normalized event does not expose enough arguments.
+- raw event payload `type === "collab_agent_spawn_end"` and count `new_agent_role || "unknown"`.
+
+Avoid double-counting the same spawn event. Use `event.eventId` plus detected role as the per-session dedupe key.
+
+#### Claude Subagents
+
+Detect:
+
+- `tool_use` with `toolName === "Task"`; parse args from `event.toolArgsText` or raw content and count `subagent_type || agent_type || "task"`.
+- Claude sidechain files are currently excluded by the default `claude_projects` source profile, so do not rely on sidechain trace files in v1.
+
+Avoid double-counting the same event.
+
+#### Other Agents
+
+For `cursor`, `gemini`, `opencode`, `pi`, and `unknown`:
+
+- Include sessions in `traceCount`.
+- Mark source-agent row `detectorSupport: "unsupported"`.
+- Do not invent skill/subagent usage.
+- Future parser-specific detectors can be added behind the same analysis API.
+
+## Server API
+
+Add:
+
+```http
+GET /api/analysis?agent=<agent>&since=<window>
+```
+
+Behavior:
+
+- Return `503` warming response only if Inspector is not ready, matching other trace-derived endpoints.
+- Parse `agent` with existing `parseAgentKind`.
+- Parse `since` with existing `parseSinceWindow` / `toMsWindow` pattern.
+- Return `AnalysisResponse`.
+- Return `400` for invalid filters.
+
+Add tests in `apps/server/src/app.test.ts` for:
+
+- Basic `/api/analysis` response.
+- `agent` filter.
+- `since` filter.
+- Warming/not-ready behavior if applicable to existing test harness.
+
+## CLI
+
+Add a top-level command:
+
+```bash
+agentlens analysis [--json] [--llm] [--agent <name>] [--since <window>]
+```
+
+Default human output:
+
+- `overview`
+- `by_agent`
+- `skills`
+- `subagents`
+- `unused_configured_skills`
+- `top_sessions`
+
+`--llm` output:
+
+- Deterministic Markdown-ish section headings like existing `summary --llm`.
+- Stable table columns and no ANSI color.
+
+`--json` output:
+
+- Print the exact `AnalysisResponse` shape.
+
+Add CLI tests in `apps/cli/src/main.test.ts`:
+
+- `analysis --json` includes explicit/inferred skill counts and subagent spawns.
+- default output includes skills/subagents/unused sections.
+- `--agent codex` filters out Claude rows.
+- `--since` excludes old sessions.
+- `--llm` has deterministic section headers.
 
 ## Web UI
 
-Add a third primary tab:
+Add `apps/web/src/AnalysisView.tsx`.
 
-```text
-Inspector | Activity | Summaries
-```
+Responsibilities:
 
-The `Summaries` tab should be an operational search/browser view, not a landing page.
+- Fetch `/api/analysis`.
+- Render loading, error, empty, and data states.
+- Provide source-agent and since filters.
+- Render summary counters and tables.
+- Call `onInspectTrace(traceId)` for top session links.
 
-Layout:
+Integrate in `apps/web/src/App.tsx`:
 
-- toolbar with search input, mode segmented control, agent/status filters, refresh button
-- result list with ranked rows, agent badge, title, outcome, score/status, snippets
-- detail panel with structured summary sections: key steps, files/projects, errors/blockers, workflow observations, followups
-- status strip with daemon state, complete/stale/failed counts, embedding status, last run time
+- Extend active view state union with `"analysis"`.
+- Add `Analysis` button in the primary tablist.
+- Render `AnalysisView` with the same Inspector navigation callback pattern used by `ActivityView` and `SummariesView`.
 
-Interactions:
+Styling:
 
-- opening the tab fetches `/api/rag/status` and `/api/rag/summaries`
-- empty query shows recent complete summaries, newest first
-- typing a query debounces `/api/rag/search`
-- selecting a row opens detail in the tab
-- `Inspect trace` switches to Inspector and selects the trace
-- semantic unavailable state keeps lexical results usable
+- Add scoped classes in `apps/web/src/styles.css`.
+- Reuse existing panel/table visual language.
+- Keep compact, work-focused layout.
+- Avoid nested cards.
+- Ensure mobile tables either scroll horizontally or collapse cleanly.
 
-Design constraints:
+Add Web tests:
 
-- match existing dense AgentLens style
-- avoid marketing copy
-- do not nest cards inside cards
-- no text/button overlap on mobile
-- use existing agent badge conventions
+- `apps/web/src/App.test.tsx`: tab button appears and switches views.
+- `apps/web/src/AnalysisView.test.tsx`: renders summary, tables, filters, errors, and Inspect callback.
+- CSS/responsive test only if new layout introduces fixed-width risk.
 
-## Shared Contracts
+## Verification Plan
 
-Add to `packages/contracts`:
-
-- `RagConfig`
-- `RagTraceSummaryContent`
-- `RagSummaryRecord`
-- `RagDocumentKind`
-- `RagSearchMode`
-- `RagSearchResult`
-- `RagIndexStatus`
-- `RagSearchResponse`
-- `RagSummaryListResponse`
-
-All API shapes must be JSON-serializable and stable enough for agent consumption.
-
-## Security and Privacy
-
-Requirements:
-
-- summarize only AgentLens-redacted normalized events
-- never pass raw trace files for Headless to read
-- never build shell command strings
-- validate all CLI and HTTP inputs
-- parameterize all SQL
-- keep DB local
-- do not log prompt payloads, raw event text, secrets, or full tool outputs
-- document that summaries and embeddings are local but may still contain sensitive workflow context
-
-## Implementation Plan
-
-1. Contracts/config: add RAG config/types, defaults, TOML merge, example config, and config docs.
-2. Store: add SQLite migrations, session/document/embedding upserts, status, stale detection, and deletion cleanup.
-3. Corpus: build summarizer payloads and deterministic summary/trace documents from redacted `TraceIndex` details.
-4. Headless: add subprocess runner, prompt builder, timeout handling, JSON validation, and failure preservation.
-5. Embeddings: add provider abstraction, local HF provider, vector storage, fake provider test hooks, and semantic fallback.
-6. Indexer/daemon: add one-shot sync, worker loop, detached PID/log lifecycle, foreground mode, and stop/status helpers.
-7. Search: add lexical, semantic, hybrid RRF ranking, result collapse, snippets, `agentlens search`, and LLM output.
-8. Server: add RAG service wiring and `/api/rag/*` routes.
-9. Web: add `SummariesView`, tab wiring, data fetches, result/detail UI, inspect navigation, and responsive styling.
-
-## Verification and Testing Guidelines
-
-### Required Gate
-
-Run before handoff:
+Run targeted tests while implementing:
 
 ```bash
 npm -w packages/contracts run build
-npm -w packages/core run test
-npm -w apps/cli run test
-npm -w apps/server run test
-npm -w apps/web run test
-npm run typecheck
+npm -w packages/core test
+npm -w apps/server test
+npm -w apps/cli test
+npm -w apps/web test
+```
+
+Run full gate before handoff:
+
+```bash
 npm run build
+npm run typecheck
 npm test
 ```
 
-For Web UI work, also run dev servers and verify with Playwright screenshots on desktop and mobile.
+For browser-visible behavior, run the app and verify with Playwright:
 
 ```bash
 npm -w apps/server run dev
-npm -w apps/web run dev
 ```
 
-Browser checks: app loads; `Inspector`, `Activity`, and `Summaries` tabs are visible; `Summaries` opens without layout overlap; search returns mocked or real results; result detail opens; `Inspect trace` navigates to Inspector; mobile controls remain readable.
+Then check:
 
-### Unit Test Matrix
+- Analysis tab appears beside `Inspector`, `Activity`, `Summaries`.
+- Loading state resolves.
+- Filters update the request and visible rows.
+- `Inspect` opens the selected trace in Inspector.
+- Desktop and mobile layouts do not overlap.
 
-- Store: empty DB migration creates all tables; migration is idempotent; cascade delete removes documents/embeddings; status counts are correct; stale fingerprint detection works; previous complete summary survives failed refresh.
-- Corpus: prompt uses redacted normalized fields only; all normalized events are included; chunks do not split events; content hashes are deterministic; oversized prompt marks `input_too_large`.
-- Headless: executable is invoked with an argument array; `--allow read-only` is passed by default; prompt is written to a temp file; timeout kills child process; strict JSON is accepted; malformed JSON is rejected; prompt text is not logged.
-- Embeddings: fake provider stores Float32 vector blobs; changed documents refresh vectors; unchanged documents reuse vectors; missing provider reports `unavailable`; lexical indexing works without embeddings.
-- Search: FTS returns expected traces; fake semantic vectors rank expected traces; hybrid RRF order is deterministic; `agent` and `since` filters work; chunk hits collapse to trace hits; empty query returns recent summaries.
-- CLI: `rag index --once --json` prints stable counts; `rag watch --foreground` runs inline in tests; `rag watch` writes/reuses PID file; `rag stop` handles missing/stale PID files; `rag status --json` handles missing DB; `search --llm` prints deterministic next-call tables.
-- Server: `/api/rag/status` works before DB exists; `/api/rag/search` validates query/mode/limit; `/api/rag/summaries` filters by status/agent/since; `/api/rag/summaries/:traceId` returns `404` for unknown ids.
-- Web: tablist includes `Summaries`; opening tab fetches status/summaries; query debounce calls search; semantic unavailable status still allows lexical results; selecting a result renders detail; inspect action switches to Inspector; responsive CSS prevents overlapping controls.
+## Implementation Order
 
-### Manual Verification
+1. Add contracts and config defaults/merge logic.
+2. Implement `packages/core/src/analysis.ts` with fixture-focused unit tests.
+3. Export analysis builder from `packages/core/src/index.ts`.
+4. Add `/api/analysis` route and server tests.
+5. Add `agentlens analysis` CLI command and tests.
+6. Add `AnalysisView` and wire the Web tab.
+7. Add Web tests and CSS.
+8. Run full verification gate and browser check.
 
-First run:
+## Non-Goals For V1
 
-```bash
-npm run build
-agentlens rag status --json
-agentlens rag index --once --limit 2 --json
-agentlens search "failed test" --llm --limit 5
-agentlens rag watch
-agentlens rag status --json
-agentlens --browser
-```
+- CLI tool adoption.
+- Persistent analysis database.
+- Cross-session subagent lifecycle tracking.
+- Completion/success/failure status for subagents.
+- Parser-specific detection for Cursor, Gemini, OpenCode, or Pi.
+- Editing or importing Agentic Garden Python code.
+- LLM-generated analysis summaries.
 
-Daemon:
+## Open Follow-Ups
 
-```bash
-agentlens rag watch
-agentlens rag watch
-agentlens rag status --json
-tail -n 100 ~/.agentlens/logs/rag-worker.log
-agentlens rag stop
-agentlens rag status --json
-```
-
-Additional manual checks:
-
-- Quiet period: touch/create a trace and verify it is not summarized within 4 hours; use an older fixture and verify it becomes complete; mutate the fixture and verify stale then complete after quiet again.
-- Failure: configure invalid `headlessExecutable`, run one-shot index, verify failed status, restore executable, rerun with `--force`, verify complete status.
-- Semantic fallback: run without local model/dependencies, verify semantic status `unavailable`, verify `--mode lexical` works, then add model cache and verify hybrid results include semantic ranks.
-- CI: normal CI must not require real Headless or Hugging Face downloads; use fake headless executables, fake embedding providers, temporary SQLite DBs, and synthetic traces; put real model/headless smoke tests behind `AGENTLENS_RAG_SMOKE=1`.
-
-## Acceptance Criteria
-
-- `agentlens rag watch` starts/reuses a background daemon and returns quickly.
-- The worker summarizes only traces quiet for at least 4 hours.
-- One structured summary is stored per trace/session.
-- Lexical search works without embeddings.
-- Hybrid search works when the local HF model is available.
-- CLI, HTTP, and Web UI expose summaries/search.
-- `Summaries` appears next to `Inspector` and `Activity`.
-- Existing Inspector and Activity flows remain unchanged.
-- Full build/typecheck/test gate passes.
+- Add parser-specific detectors for OpenCode/Pi/Gemini if their traces expose subagent concepts.
+- Add trend charts by day/week once the aggregate tables are stable.
+- Add project/repo path filtering if users want per-repository skill adoption.
+- Add configurable inferred-skill matching if false positives appear.

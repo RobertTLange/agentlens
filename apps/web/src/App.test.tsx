@@ -7,6 +7,7 @@ import type {
   AgentActivityYear,
   ActivityHydrationProgress,
   ActivityUsageSummary,
+  AnalysisResponse,
   EventKind,
   NormalizedEvent,
   OverviewStats,
@@ -218,6 +219,84 @@ function makeRagProjection(items: RagSummaryRecord[]): RagProjectionResponse {
     embeddedCount: items.length,
     missingEmbeddingCount: 0,
     warnings: [],
+  };
+}
+
+function makeAnalysisResponse(): AnalysisResponse {
+  return {
+    summary: {
+      generatedAtMs: 1_700_000_000_000,
+      traceCount: 3,
+      supportedTraceCount: 2,
+      explicitSkillCount: 1,
+      inferredSkillCount: 1,
+      totalSkillCount: 2,
+      subagentSpawnCount: 1,
+      configuredSkillCount: 2,
+      unusedConfiguredSkillCount: 1,
+      observedUnconfiguredSkillCount: 0,
+    },
+    inventory: {
+      configuredSkills: ["clean-code", "unused-skill"],
+      unusedConfiguredSkills: ["unused-skill"],
+      observedUnconfiguredSkills: [],
+      skillRoots: ["/tmp/skills"],
+      warnings: [],
+    },
+    byAgent: [
+      {
+        agent: "codex",
+        detectorSupport: "supported",
+        sessionCount: 2,
+        explicitSkillCount: 1,
+        inferredSkillCount: 1,
+        totalSkillCount: 2,
+        subagentSpawnCount: 1,
+      },
+      {
+        agent: "cursor",
+        detectorSupport: "unsupported",
+        sessionCount: 1,
+        explicitSkillCount: 0,
+        inferredSkillCount: 0,
+        totalSkillCount: 0,
+        subagentSpawnCount: 0,
+      },
+    ],
+    skills: [
+      {
+        name: "clean-code",
+        inventoryStatus: "configured",
+        explicitCount: 1,
+        inferredCount: 1,
+        totalCount: 2,
+        sessionCount: 1,
+        byAgent: [{ agent: "codex", count: 2 }],
+      },
+    ],
+    subagents: [
+      {
+        name: "worker",
+        spawnCount: 1,
+        sessionCount: 1,
+        byAgent: [{ agent: "codex", count: 1 }],
+      },
+    ],
+    topSessions: [
+      {
+        traceId: "trace-a",
+        sessionId: "session-trace-a",
+        agent: "codex",
+        path: "/tmp/trace-a.jsonl",
+        lastEventTs: 4_000,
+        mtimeMs: 3_900,
+        explicitSkillCount: 1,
+        inferredSkillCount: 1,
+        subagentSpawnCount: 1,
+        topSkills: [{ name: "clean-code", count: 2 }],
+        topSubagents: [{ name: "worker", count: 1 }],
+      },
+    ],
   };
 }
 
@@ -1028,6 +1107,9 @@ beforeEach(() => {
         const resolvedColor = color || activityWeek.presentation.color;
         return new Response(JSON.stringify({ activity: weekForMetricAndColor(activityWeek, resolvedMetric, resolvedColor) }), { status: 200 });
       }
+      if (url.includes("/api/analysis")) {
+        return new Response(JSON.stringify(makeAnalysisResponse()), { status: 200 });
+      }
       if (url.includes("/api/rag/status")) {
         return new Response(JSON.stringify(makeRagStatus()), { status: 200 });
       }
@@ -1226,6 +1308,27 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.body.textContent).toContain("Trace Inspector"));
   });
 
+  it("opens the Analysis tab and navigates top sessions to Inspector", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const analysisTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Analysis");
+    if (!(analysisTab instanceof HTMLButtonElement)) throw new Error("missing analysis tab");
+    fireEvent.click(analysisTab);
+
+    await waitFor(() => expect(document.querySelector(".analysis-view")).toBeTruthy());
+    await waitFor(() => expect(document.body.textContent).toContain("clean-code"));
+    expect(document.body.textContent).toContain("unused-skill");
+    expect(requestedUrls.some((url) => url.includes("/api/analysis"))).toBe(true);
+
+    const inspectButton = Array.from(document.querySelectorAll(".analysis-inspect-button")).find(
+      (node) => node.textContent === "Inspect",
+    );
+    if (!(inspectButton instanceof HTMLButtonElement)) throw new Error("missing analysis inspect button");
+    fireEvent.click(inspectButton);
+    await waitFor(() => expect(document.body.textContent).toContain("Trace Inspector"));
+  });
+
   it("renders search results that are not in the loaded summaries page", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -1255,6 +1358,8 @@ describe("App sessions list live motion", () => {
     fireEvent.click(summariesTab);
 
     await waitFor(() => expect(document.querySelectorAll(".rag-result-row").length).toBe(2));
+    const summaryListRequest = requestedUrls.find((url) => url.includes("/api/rag/summaries?status=complete"));
+    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("5000");
     const rows = Array.from(document.querySelectorAll(".rag-result-row"));
     expect(rows[0]?.textContent).toContain("Newer trace summary");
     expect(rows[1]?.textContent).toContain("Parser regression");

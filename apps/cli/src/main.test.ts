@@ -302,6 +302,116 @@ async function buildRecencyFixture(): Promise<{ configPath: string; newestSessio
   return { configPath, newestSessionId: rows[0]?.sessionId ?? "cli-recency-today" };
 }
 
+async function buildAnalysisFixture(): Promise<{ configPath: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agentlens-cli-analysis-"));
+  const skillRoot = path.join(root, "skills");
+  await mkdir(path.join(skillRoot, "clean-code"), { recursive: true });
+  await mkdir(path.join(skillRoot, "unused-skill"), { recursive: true });
+  await writeFile(path.join(skillRoot, "clean-code", "SKILL.md"), "---\nname: clean-code\n---\n", "utf8");
+  await writeFile(path.join(skillRoot, "unused-skill", "SKILL.md"), "---\nname: unused-skill\n---\n", "utf8");
+
+  const codexRoot = path.join(root, ".codex", "sessions", "2026", "05", "20");
+  const claudeRoot = path.join(root, ".claude", "projects", "proj");
+  await mkdir(codexRoot, { recursive: true });
+  await mkdir(claudeRoot, { recursive: true });
+
+  const recentTs = new Date(Date.now() - 60_000).toISOString();
+  const oldTs = new Date(Date.now() - 10 * 86_400_000).toISOString();
+  await writeFile(
+    path.join(codexRoot, "recent.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: recentTs,
+        type: "session_meta",
+        payload: { id: "cli-analysis-codex", cwd: "/tmp/proj", cli_version: "0.1.0" },
+      }),
+      JSON.stringify({
+        timestamp: recentTs,
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: `Use $clean-code and read ${path.join(skillRoot, "clean-code", "SKILL.md")}`,
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        timestamp: recentTs,
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          id: "spawn-1",
+          name: "spawn_agent",
+          call_id: "call-spawn-1",
+          arguments: JSON.stringify({ agent_type: "worker" }),
+        },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  await writeFile(
+    path.join(claudeRoot, "old.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: oldTs,
+        type: "assistant",
+        sessionId: "cli-analysis-claude-old",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "task-1", name: "Task", input: { subagent_type: "explorer" } }],
+        },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  const config = mergeConfig({
+    sessionLogDirectories: [],
+    analysis: {
+      skillRoots: [skillRoot],
+      topSessionLimit: 20,
+    },
+    sources: {
+      codex_home: {
+        name: "codex_home",
+        enabled: true,
+        roots: [path.join(root, ".codex", "sessions")],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "codex",
+      },
+      claude_projects: {
+        name: "claude_projects",
+        enabled: true,
+        roots: [path.join(root, ".claude", "projects")],
+        includeGlobs: ["**/*.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+      claude_history: {
+        name: "claude_history",
+        enabled: false,
+        roots: [],
+        includeGlobs: ["history.jsonl"],
+        excludeGlobs: [],
+        maxDepth: 8,
+        agentHint: "claude",
+      },
+    },
+  });
+
+  const configPath = path.join(root, "config.toml");
+  await saveConfig(config, configPath);
+  return { configPath };
+}
+
 function runCli(args: string[]): string {
   return runCliWithEnv(args);
 }
@@ -556,6 +666,57 @@ describe("cli", () => {
     expect(parsed.index).toBeTypeOf("number");
   });
 
+  it("supports analysis json, filters, and deterministic table output", async () => {
+    const fixture = await buildAnalysisFixture();
+
+    const analysis = JSON.parse(runCli(["--config", fixture.configPath, "analysis", "--json"])) as {
+      summary: {
+        traceCount: number;
+        explicitSkillCount: number;
+        inferredSkillCount: number;
+        subagentSpawnCount: number;
+      };
+      skills: Array<{ name: string; explicitCount: number; inferredCount: number }>;
+      subagents: Array<{ name: string; spawnCount: number }>;
+      inventory: { unusedConfiguredSkills: string[] };
+    };
+    expect(analysis.summary.traceCount).toBe(2);
+    expect(analysis.summary.explicitSkillCount).toBe(1);
+    expect(analysis.summary.inferredSkillCount).toBe(1);
+    expect(analysis.summary.subagentSpawnCount).toBe(2);
+    expect(analysis.skills.find((row) => row.name === "clean-code")).toMatchObject({
+      explicitCount: 1,
+      inferredCount: 1,
+    });
+    expect(analysis.subagents.map((row) => row.name)).toEqual(["explorer", "worker"]);
+    expect(analysis.inventory.unusedConfiguredSkills).toEqual(["unused-skill"]);
+
+    const defaultOutput = runCli(["--config", fixture.configPath, "analysis"]);
+    expect(defaultOutput).toContain("overview:");
+    expect(defaultOutput).toContain("skills:");
+    expect(defaultOutput).toContain("subagents:");
+    expect(defaultOutput).toContain("unused_configured_skills:");
+
+    const codexOnly = JSON.parse(runCli(["--config", fixture.configPath, "analysis", "--json", "--agent", "codex"])) as {
+      summary: { traceCount: number; subagentSpawnCount: number };
+      subagents: Array<{ name: string }>;
+    };
+    expect(codexOnly.summary.traceCount).toBe(1);
+    expect(codexOnly.summary.subagentSpawnCount).toBe(1);
+    expect(codexOnly.subagents).toEqual([expect.objectContaining({ name: "worker" })]);
+
+    const recentOnly = JSON.parse(runCli(["--config", fixture.configPath, "analysis", "--json", "--since", "7d"])) as {
+      summary: { traceCount: number; subagentSpawnCount: number };
+    };
+    expect(recentOnly.summary.traceCount).toBe(1);
+    expect(recentOnly.summary.subagentSpawnCount).toBe(1);
+
+    const llm = runCli(["--config", fixture.configPath, "analysis", "--llm"]);
+    expect(llm).toContain("## overview");
+    expect(llm).toContain("## by_agent");
+    expect(llm).toContain("## top_sessions");
+  });
+
   it("renders deterministic llm summary/session/events tables for chained agent calls", async () => {
     const fixture = await buildFixture();
 
@@ -634,7 +795,10 @@ describe("cli", () => {
     const ragWatchHelp = runCli(["rag", "watch", "--help"]);
     expect(ragWatchHelp).toContain("--lexical-only");
     expect(ragWatchHelp).toContain("--embedding-limit");
-    expect(runCli(["rag", "index", "--help"])).toContain("--embedding-limit");
+    expect(ragWatchHelp).toContain("Maximum trace documents to embed per pass");
+    const ragIndexHelp = runCli(["rag", "index", "--help"]);
+    expect(ragIndexHelp).toContain("--embedding-limit");
+    expect(ragIndexHelp).toContain("Maximum trace documents to embed");
 
     const noArgsOutput = runCli([]);
     expect(noArgsOutput).toContain("Usage: agentlens");

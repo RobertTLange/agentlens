@@ -102,6 +102,7 @@ export interface RagSummaryEmbeddingList {
 
 const RAG_SCHEMA_VERSION = "1";
 const INTERNAL_SUMMARY_SESSION_IDS_META_KEY = "internal_summary_session_ids";
+const SQLITE_BUSY_TIMEOUT_MS = 15_000;
 
 function titleFromSummaryJson(value: string | null, fallback: string): string {
   if (!value) return fallback;
@@ -120,9 +121,16 @@ export class RagStore {
   constructor(config: AppConfig) {
     this.dbPath = dbPathFromConfig(config);
     mkdirSync(path.dirname(this.dbPath), { recursive: true });
-    this.db = new Database(this.dbPath);
-    this.db.pragma("foreign_keys = ON");
+    this.db = new Database(this.dbPath, { timeout: SQLITE_BUSY_TIMEOUT_MS });
+    this.configureConnection();
     this.migrate();
+  }
+
+  private configureConnection(): void {
+    this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma("foreign_keys = ON");
   }
 
   close(): void {
@@ -349,13 +357,13 @@ export class RagStore {
       WHERE (@status = '' OR status = @status)
         AND (@agent = '' OR agent = @agent)
         AND (@sinceMs = 0 OR updated_at_ms >= @sinceMs)
-      ORDER BY updated_at_ms DESC, trace_id
+      ORDER BY COALESCE(last_event_ts, mtime_ms) DESC, COALESCE(summary_generated_at_ms, updated_at_ms) DESC, trace_id
       LIMIT @limit
     `).all({
       status: options.status ?? "",
       agent: options.agent ?? "",
       sinceMs: options.sinceMs ?? 0,
-      limit: Math.max(1, Math.min(5000, options.limit ?? 200)),
+      limit: Math.max(1, Math.min(5000, options.limit ?? 5000)),
     }) as RagSessionRow[];
     return rows.map(toSummaryRecord);
   }

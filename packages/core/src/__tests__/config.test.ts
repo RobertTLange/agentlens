@@ -71,6 +71,8 @@ describe("config", () => {
     expect(sonnet46Rate?.cachedCreate1hPer1MUsd).toBe(6);
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.pi", logType: "pi" });
+    expect(config.analysis.skillRoots).toEqual(["~/.codex/skills", "~/.claude/skills"]);
+    expect(config.analysis.topSessionLimit).toBe(20);
     const defaultEnabledSources = [
       "codex_home",
       "claude_projects",
@@ -347,5 +349,17 @@ maxResidentEventsPerWarmTrace = 20
 
     expect(config.activityHeatmap.metric).toBe("sessions");
     expect(config.activityHeatmap.color).toBe("#dc2626");
+  });
+
+  it("merges analysis config with sanitized values", () => {
+    const config = mergeConfig({
+      analysis: {
+        skillRoots: ["~/custom-skills", "  ", "~/.codex/skills"],
+        topSessionLimit: 7,
+      },
+    });
+
+    expect(config.analysis.skillRoots).toEqual(["~/custom-skills", "~/.codex/skills"]);
+    expect(config.analysis.topSessionLimit).toBe(7);
   });
 });

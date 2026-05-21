@@ -31,6 +31,7 @@ import {
 export interface RagIndexOptions {
   once?: boolean;
   limit?: number;
+  /** Caps trace-document embeddings; summary-document embeddings are drained first for projection freshness. */
   embeddingLimit?: number;
   force?: boolean;
   forceLarge?: boolean;
@@ -56,13 +57,6 @@ export interface RagSearchRequest {
   limit?: number;
   agent?: AgentKind;
   since?: string;
-}
-
-interface RagWorkItem {
-  summary: TraceSummary;
-  detail: ReturnType<TraceIndex["getSessionDetail"]>;
-  promptInput: ReturnType<typeof buildPromptInput>;
-  existing: RagSummaryRecord | null;
 }
 
 interface RagWorkerExit {
@@ -193,53 +187,68 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
   let failed = 0;
   let lexicalDocumentCount = 0;
   let embeddedDocuments = 0;
+  let traceEmbeddedDocuments = 0;
   let embeddingStatus: RagIndexStatus["embeddings"] = options.lexicalOnly
     ? { status: "disabled", model: config.rag.embeddingModel, dimension: null, count: 0 }
     : store.getStatus(config).embeddings;
   const embeddingProvider = options.lexicalOnly ? null : createEmbeddingProvider(config);
-  const embeddingBudget = options.embeddingLimit ?? options.limit;
-  const embedWithinBudget = async (documentOptions: { kind?: RagDocumentKind; traceId?: string } = {}): Promise<void> => {
+  const traceEmbeddingBudget = options.embeddingLimit ?? options.limit;
+  const embedAllMissingSummaryDocuments = async (traceId?: string): Promise<void> => {
     if (options.lexicalOnly) return;
-    const remainingBudget = embeddingBudget === undefined ? undefined : Math.max(0, embeddingBudget - embeddedDocuments);
-    if (remainingBudget !== undefined && remainingBudget <= 0) return;
-    const result = await embedChangedDocuments(store, embeddingProvider, config, remainingBudget, documentOptions);
+    const result = await embedChangedDocuments(store, embeddingProvider, config, undefined, {
+      kind: "summary",
+      ...(traceId ? { traceId } : {}),
+    });
     embeddedDocuments += result.embeddedDocuments;
     embeddingStatus = result.status;
   };
+  const embedTraceDocumentsWithinBudget = async (): Promise<void> => {
+    if (options.lexicalOnly) return;
+    const remainingBudget = traceEmbeddingBudget === undefined ? undefined : Math.max(0, traceEmbeddingBudget - traceEmbeddedDocuments);
+    if (remainingBudget !== undefined && remainingBudget <= 0) return;
+    const result = await embedChangedDocuments(store, embeddingProvider, config, remainingBudget, { kind: "trace" });
+    embeddedDocuments += result.embeddedDocuments;
+    traceEmbeddedDocuments += result.embeddedDocuments;
+    embeddingStatus = result.status;
+  };
   try {
-    await embedWithinBudget({ kind: "summary" });
-    await traceIndex.refresh();
+    await embedAllMissingSummaryDocuments();
+    if (options.limit === undefined) {
+      await traceIndex.refresh();
+    } else {
+      await traceIndex.refreshRecent();
+    }
     const nowMs = Date.now();
     const summaries = traceIndex.getSummaries();
+    const discoveredTraceCount = traceIndex.getStartupStatus().discoveredTraceCount || summaries.length;
     const ignoredSessionIds = store.getInternalSummarySessionIds();
     const internalTraceIds = new Set<string>();
-    const detailByTraceId = new Map<string, ReturnType<TraceIndex["getSessionDetail"]>>();
     const getDetail = (summary: TraceSummary): ReturnType<TraceIndex["getSessionDetail"]> | null => {
       if (!summary.parseable) return null;
-      const cached = detailByTraceId.get(summary.id);
-      if (cached) return cached;
-      const detail = traceIndex.getSessionDetail(summary.id);
-      detailByTraceId.set(summary.id, detail);
-      return detail;
+      return traceIndex.getSessionDetailUncached(summary.id);
     };
 
-    for (const summary of summaries) {
-      const detail = summary.parseable ? getDetail(summary) : null;
-      if (!isInternalRagSummaryTrace(summary, ignoredSessionIds, detail)) continue;
-      internalTraceIds.add(summary.id);
-      const existing = store.getSession(summary.id);
-      const fingerprint = detail ? buildPromptInput(detail).fingerprint : existing?.fingerprint || internalRagFingerprint(summary);
-      const alreadySkipped = existing?.status === "skipped" && existing.skipReason === INTERNAL_RAG_SKIP_REASON && existing.fingerprint === fingerprint;
-      store.upsertSession({
-        summary,
-        fingerprint,
-        status: "skipped",
-        skipReason: INTERNAL_RAG_SKIP_REASON,
-        nowMs,
-      });
-      store.replaceDocuments(summary.id, [], nowMs);
-      if (!alreadySkipped) skipped += 1;
-    }
+    const markInternalSummaries = (): void => {
+      for (const summary of traceIndex.getSummaries()) {
+        if (internalTraceIds.has(summary.id)) continue;
+        const detail = summary.parseable ? getDetail(summary) : null;
+        if (!isInternalRagSummaryTrace(summary, ignoredSessionIds, detail)) continue;
+        internalTraceIds.add(summary.id);
+        const existing = store.getSession(summary.id);
+        const fingerprint = detail ? buildPromptInput(detail).fingerprint : existing?.fingerprint || internalRagFingerprint(summary);
+        const alreadySkipped = existing?.status === "skipped" && existing.skipReason === INTERNAL_RAG_SKIP_REASON && existing.fingerprint === fingerprint;
+        store.upsertSession({
+          summary,
+          fingerprint,
+          status: "skipped",
+          skipReason: INTERNAL_RAG_SKIP_REASON,
+          nowMs,
+        });
+        store.replaceDocuments(summary.id, [], nowMs);
+        if (!alreadySkipped) skipped += 1;
+      }
+    };
+    markInternalSummaries();
 
     for (const summary of summaries) {
       if (internalTraceIds.has(summary.id)) continue;
@@ -258,78 +267,88 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
         });
       }
     }
-    const eligible = summaries.filter((summary) => !internalTraceIds.has(summary.id) && isEligible(summary, config, nowMs));
-    const limit = Math.max(1, options.limit ?? (eligible.length || 1));
-    const selected: RagWorkItem[] = [];
-    for (const summary of eligible) {
-      const detail = getDetail(summary);
-      if (!detail) continue;
-      const promptInput = buildPromptInput(detail);
-      const existing = store.getSession(summary.id);
-      if (!options.force && isCurrentTerminalRagSession(existing, promptInput.fingerprint)) continue;
-      selected.push({ summary, detail, promptInput, existing });
-      if (selected.length >= limit) break;
-    }
-
-    for (const { summary, detail, promptInput, existing } of selected) {
-      try {
-        if (promptInput.promptBytes > config.rag.summaryMaxPromptBytes && !options.forceLarge) {
+    const eligibleSummaries = (): TraceSummary[] =>
+      traceIndex
+        .getSummaries()
+        .filter((summary) => !internalTraceIds.has(summary.id) && isEligible(summary, config, nowMs));
+    const limit = Math.max(1, options.limit ?? (eligibleSummaries().length || 1));
+    let selectedCount = 0;
+    const visitedEligibleTraceIds = new Set<string>();
+    while (selectedCount < limit) {
+      for (const summary of eligibleSummaries()) {
+        if (visitedEligibleTraceIds.has(summary.id)) continue;
+        visitedEligibleTraceIds.add(summary.id);
+        const detail = getDetail(summary);
+        if (!detail) continue;
+        const promptInput = buildPromptInput(detail);
+        const existing = store.getSession(summary.id);
+        if (!options.force && isCurrentTerminalRagSession(existing, promptInput.fingerprint)) continue;
+        selectedCount += 1;
+        try {
+          if (promptInput.promptBytes > config.rag.summaryMaxPromptBytes && !options.forceLarge) {
+            store.upsertSession({
+              summary,
+              fingerprint: promptInput.fingerprint,
+              status: "skipped",
+              skipReason: "input_too_large",
+              nowMs,
+            });
+            skipped += 1;
+            continue;
+          }
           store.upsertSession({
             summary,
             fingerprint: promptInput.fingerprint,
-            status: "skipped",
-            skipReason: "input_too_large",
+            status: existing?.summary ? "stale" : "pending",
             nowMs,
           });
-          skipped += 1;
-          continue;
+          const result = await runHeadlessSummary(config, promptInput.prompt);
+          store.addInternalSummarySessionIds(result.internalSummarySessionIds);
+          const corpus = buildRagCorpus(detail, result.content);
+          store.upsertSession({
+            summary,
+            fingerprint: corpus.fingerprint,
+            status: "complete",
+            content: result.content,
+            summaryText: corpus.summaryText,
+            summaryModel: result.model,
+            summaryGeneratedAtMs: Date.now(),
+            nowMs: Date.now(),
+          });
+          store.replaceDocuments(summary.id, corpus.documents, Date.now());
+          await embedAllMissingSummaryDocuments(summary.id);
+          lexicalDocumentCount += corpus.documents.length;
+          summarized += 1;
+        } catch (error) {
+          store.addInternalSummarySessionIds(internalSummarySessionIdsFromError(error));
+          failed += 1;
+          lastError = asErrorMessage(error);
+          const detailSummary = traceIndex.getSummaries().find((row) => row.id === summary.id) ?? summary;
+          const fingerprint = store.getSession(summary.id)?.fingerprint ?? "";
+          store.upsertSession({
+            summary: detailSummary,
+            fingerprint,
+            status: "failed",
+            error: lastError,
+            nowMs: Date.now(),
+          });
         }
-        store.upsertSession({
-          summary,
-          fingerprint: promptInput.fingerprint,
-          status: existing?.summary ? "stale" : "pending",
-          nowMs,
-        });
-        const result = await runHeadlessSummary(config, promptInput.prompt);
-        store.addInternalSummarySessionIds(result.internalSummarySessionIds);
-        const corpus = buildRagCorpus(detail, result.content);
-        store.upsertSession({
-          summary,
-          fingerprint: corpus.fingerprint,
-          status: "complete",
-          content: result.content,
-          summaryText: corpus.summaryText,
-          summaryModel: result.model,
-          summaryGeneratedAtMs: Date.now(),
-          nowMs: Date.now(),
-        });
-        store.replaceDocuments(summary.id, corpus.documents, Date.now());
-        await embedWithinBudget({ kind: "summary", traceId: summary.id });
-        lexicalDocumentCount += corpus.documents.length;
-        summarized += 1;
-      } catch (error) {
-        store.addInternalSummarySessionIds(internalSummarySessionIdsFromError(error));
-        failed += 1;
-        lastError = asErrorMessage(error);
-        const detailSummary = traceIndex.getSummaries().find((row) => row.id === summary.id) ?? summary;
-        const fingerprint = store.getSession(summary.id)?.fingerprint ?? "";
-        store.upsertSession({
-          summary: detailSummary,
-          fingerprint,
-          status: "failed",
-          error: lastError,
-          nowMs: Date.now(),
-        });
+        if (selectedCount >= limit) break;
       }
+      if (selectedCount >= limit || traceIndex.getStartupStatus().fullReady) break;
+      const hydratedCount = await traceIndex.hydrateNextPendingBatch();
+      if (hydratedCount <= 0) break;
+      markInternalSummaries();
     }
 
-    await embedWithinBudget();
+    await embedAllMissingSummaryDocuments();
+    await embedTraceDocumentsWithinBudget();
     store.setMeta("last_run_at_ms", String(Date.now()));
     store.setMeta("last_run_error", lastError);
     return {
       dbPath: store.dbPath,
-      discoveredTraces: summaries.length,
-      quietEligibleTraces: eligible.length,
+      discoveredTraces: discoveredTraceCount,
+      quietEligibleTraces: eligibleSummaries().length,
       summarized,
       skipped,
       failed,
