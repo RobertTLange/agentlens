@@ -228,6 +228,17 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
       return traceIndex.getSessionDetailUncached(summary.id);
     };
 
+    const markStoredInternalSummaries = (): void => {
+      for (const existing of store.listSummariesWithPathMarker(INTERNAL_RAG_MARKER)) {
+        if (internalTraceIds.has(existing.traceId)) continue;
+        internalTraceIds.add(existing.traceId);
+        const alreadySkipped = existing.status === "skipped" && existing.skipReason === INTERNAL_RAG_SKIP_REASON;
+        store.markSessionSkipped(existing.traceId, existing.fingerprint, INTERNAL_RAG_SKIP_REASON, nowMs);
+        store.replaceDocuments(existing.traceId, [], nowMs);
+        if (!alreadySkipped) skipped += 1;
+      }
+    };
+
     const markInternalSummaries = (): void => {
       for (const summary of traceIndex.getSummaries()) {
         if (internalTraceIds.has(summary.id)) continue;
@@ -248,6 +259,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
         if (!alreadySkipped) skipped += 1;
       }
     };
+    markStoredInternalSummaries();
     markInternalSummaries();
 
     for (const summary of summaries) {

@@ -16,6 +16,10 @@ export interface DiscoveredTraceFile {
   dev: number;
 }
 
+export function isInternalAgentLensTracePath(filePath: string): boolean {
+  return filePath.replace(/\\/g, "/").toLowerCase().includes("agentlens-rag-");
+}
+
 async function discoverProfile(config: AppConfig, profileName: string): Promise<DiscoveredTraceFile[]> {
   const profile = config.sources[profileName];
   if (!profile || !profile.enabled) {
@@ -38,6 +42,7 @@ async function discoverProfile(config: AppConfig, profileName: string): Promise<
     });
 
     for (const filePath of matches) {
+      if (isInternalAgentLensTracePath(filePath)) continue;
       try {
         const fileStat = await stat(filePath);
         const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
@@ -168,6 +173,7 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
     }
 
     for (const filePath of matches) {
+      if (isInternalAgentLensTracePath(filePath)) continue;
       if (entry.logType === "claude" && isClaudeCompactionSidechainFile(filePath)) {
         continue;
       }

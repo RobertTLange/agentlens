@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { mergeConfig } from "../config.js";
+import { discoverTraceFiles } from "../discovery.js";
 import { TraceIndex } from "../traceIndex.js";
 
 async function createTempRoot(): Promise<string> {
@@ -132,6 +133,35 @@ describe("trace index", () => {
       restartWatcherSpy.mockRestore();
       index.stop();
     }
+  });
+
+  it("excludes internal AgentLens RAG work traces from discovery", async () => {
+    const root = await createTempRoot();
+    const claudeRoot = path.join(root, ".claude", "projects");
+    const ragDir = path.join(claudeRoot, "-private-var-folders-T-agentlens-rag-test");
+    const normalDir = path.join(claudeRoot, "-Users-rob-project");
+    await mkdir(ragDir, { recursive: true });
+    await mkdir(normalDir, { recursive: true });
+    await writeFile(path.join(ragDir, "internal.jsonl"), buildCodexTraceLog("internal", 0), "utf8");
+    await writeFile(path.join(normalDir, "normal.jsonl"), buildCodexTraceLog("normal", 1), "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: path.join(root, ".claude"), logType: "claude" }],
+      sources: Object.fromEntries(
+        Object.entries(mergeConfig().sources).map(([key, value]) => [
+          key,
+          {
+            ...value,
+            enabled: false,
+            roots: [],
+          },
+        ]),
+      ),
+    });
+
+    const files = await discoverTraceFiles(config);
+
+    expect(files.map((file) => path.basename(file.path))).toEqual(["normal.jsonl"]);
   });
 
   it("becomes inspector-ready before full hydration finishes during start", async () => {

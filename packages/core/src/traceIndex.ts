@@ -23,7 +23,7 @@ import type {
   TraceTocItem,
   TraceSummary,
 } from "@agentlens/contracts";
-import { discoverTraceFiles, type DiscoveredTraceFile } from "./discovery.js";
+import { discoverTraceFiles, isInternalAgentLensTracePath, type DiscoveredTraceFile } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
 import { deriveSessionMetrics, type SessionUsagePoint } from "./metrics.js";
@@ -1158,6 +1158,7 @@ export class TraceIndex extends EventEmitter {
     );
     this.watcher = chokidar.watch(roots, {
       ignoreInitial: true,
+      ignored: (watchPath) => isInternalAgentLensTracePath(String(watchPath)),
       persistent: true,
       followSymlinks: false,
       awaitWriteFinish: {
@@ -1167,6 +1168,7 @@ export class TraceIndex extends EventEmitter {
     });
 
     const onDirty = (rawPath: string): void => {
+      if (isInternalAgentLensTracePath(rawPath)) return;
       const normalized = rawPath.toLowerCase();
       if (!normalized.endsWith(".jsonl") && !normalized.endsWith(".json") && !normalized.endsWith(".txt")) return;
       const resolvedPath = path.resolve(rawPath);
@@ -1554,6 +1556,7 @@ export class TraceIndex extends EventEmitter {
   }
 
   private async discoverSingleTraceFile(filePath: string, existingId?: string): Promise<DiscoveredTraceFile | null> {
+    if (isInternalAgentLensTracePath(filePath)) return null;
     const normalizedPath = filePath.toLowerCase();
     const isJsonl = normalizedPath.endsWith(".jsonl");
     const isJson = normalizedPath.endsWith(".json");

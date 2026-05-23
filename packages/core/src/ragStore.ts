@@ -368,6 +368,35 @@ export class RagStore {
     return rows.map(toSummaryRecord);
   }
 
+  listSummariesWithPathMarker(marker: string): RagSummaryRecord[] {
+    const normalizedMarker = marker.trim().toLowerCase();
+    if (!normalizedMarker) return [];
+    const rows = this.db.prepare(`
+      SELECT * FROM rag_sessions
+      WHERE instr(lower(path), @marker) > 0
+      ORDER BY COALESCE(last_event_ts, mtime_ms) DESC, trace_id
+    `).all({ marker: normalizedMarker }) as RagSessionRow[];
+    return rows.map(toSummaryRecord);
+  }
+
+  markSessionSkipped(traceId: string, fingerprint: string, skipReason: string, nowMs: number): boolean {
+    const result = this.db.prepare(`
+      UPDATE rag_sessions
+      SET
+        fingerprint = ?,
+        status = 'skipped',
+        skip_reason = ?,
+        error = '',
+        summary_json = NULL,
+        summary_text = '',
+        summary_model = '',
+        summary_generated_at_ms = NULL,
+        updated_at_ms = ?
+      WHERE trace_id = ?
+    `).run(fingerprint, skipReason, nowMs, traceId);
+    return result.changes > 0;
+  }
+
   listSummaryEmbeddings(options: { status?: RagRefreshStatus; agent?: AgentKind; limit?: number; model?: string } = {}): RagSummaryEmbeddingList {
     const limit = Math.max(1, Math.min(5000, options.limit ?? 5000));
     const filters = {
