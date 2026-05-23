@@ -1310,6 +1310,40 @@ if (count === 1) {
     expect(() => process.kill(process.pid, 0)).not.toThrow();
   });
 
+  it("detects live structured RAG daemon PID files without inspecting the process command", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"));
+    const pidPath = config.rag.daemonPidPath;
+
+    await writeFile(
+      pidPath,
+      JSON.stringify({
+        command: "agentlens-rag-worker",
+        pid: process.pid,
+        argv: [process.execPath, "agentlens", "--config", config.rag.dbPath, "rag", "supervisor", "--foreground"],
+        configPath: "test",
+        startedAtMs: Date.now(),
+      }),
+      "utf8",
+    );
+
+    expect(readDaemonPid(pidPath)).toBe(process.pid);
+
+    await writeFile(
+      pidPath,
+      JSON.stringify({
+        command: "agentlens-rag-worker",
+        pid: process.pid,
+        argv: [process.execPath, "agentlens", "summary"],
+        configPath: "test",
+        startedAtMs: Date.now(),
+      }),
+      "utf8",
+    );
+
+    expect(readDaemonPid(pidPath)).toBeNull();
+  });
+
   it("restarts a crashed worker child from the RAG supervisor", async () => {
     const dir = await tempDir();
     const configPath = path.join(dir, "config.toml");

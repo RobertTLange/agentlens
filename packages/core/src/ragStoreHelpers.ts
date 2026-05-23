@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import type {
   AgentKind,
@@ -100,19 +99,13 @@ export function readRagDaemonPidFile(pidPath: string): RagDaemonPidFile | null {
 }
 
 export function isLiveRagDaemon(metadata: RagDaemonPidFile): boolean {
-  return pidIsRunning(metadata.pid) && processLooksLikeRagWorker(metadata.pid);
+  return metadataLooksLikeRagDaemon(metadata) && pidIsRunning(metadata.pid);
 }
 
-function processLooksLikeRagWorker(pid: number): boolean {
-  try {
-    const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return /\brag\b/.test(command) && /\b(?:worker|supervisor)\b/.test(command) && command.includes("--foreground");
-  } catch {
-    return false;
-  }
+function metadataLooksLikeRagDaemon(metadata: RagDaemonPidFile): boolean {
+  return metadata.argv.includes("rag")
+    && metadata.argv.some((value) => value === "worker" || value === "supervisor")
+    && metadata.argv.includes("--foreground");
 }
 
 function deserializeSummary(value: string | null): RagTraceSummaryContent | null {
