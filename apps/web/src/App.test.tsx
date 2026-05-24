@@ -1364,7 +1364,7 @@ describe("App sessions list live motion", () => {
     expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2);
 
     const parserPoint = Array.from(document.querySelectorAll(".rag-projection-point")).find(
-      (node) => node.getAttribute("title") === "Parser regression",
+      (node) => node.getAttribute("aria-label")?.startsWith("Parser regression,"),
     );
     if (!(parserPoint instanceof HTMLButtonElement)) throw new Error("missing parser projection point");
     fireEvent.mouseEnter(parserPoint);

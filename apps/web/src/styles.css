@@ -3351,6 +3351,7 @@ body {
 
 .rag-projection-plot {
   position: relative;
+  isolation: isolate;
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -3365,6 +3366,7 @@ body {
 
 .rag-projection-point {
   position: absolute;
+  z-index: 1;
   width: 12px;
   height: 12px;
   transform: translate(-50%, -50%);
@@ -3395,16 +3397,18 @@ body {
 
 .rag-projection-preview {
   position: absolute;
-  z-index: 3;
+  z-index: 20;
   max-width: min(320px, calc(100% - 24px));
   transform: translate(-50%, -100%);
   pointer-events: none;
   padding: 6px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--text) 18%, var(--border));
   border-radius: 6px;
-  background: color-mix(in srgb, var(--panel) 96%, var(--text));
+  background: var(--panel);
   color: var(--text);
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.16);
+  box-shadow:
+    0 10px 24px rgba(15, 23, 42, 0.28),
+    0 0 0 1px color-mix(in srgb, var(--surface) 80%, transparent) inset;
   font-size: 0.72rem;
   font-weight: 700;
   line-height: 1.25;

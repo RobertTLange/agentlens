@@ -198,7 +198,6 @@ function SummaryProjectionPlot({
                 }}
                 aria-label={`${item.title || item.traceId}, ${item.agent}, ${fmtTime(item.originalTraceAtMs)}`}
                 aria-pressed={selectedTraceId === item.traceId}
-                title={item.title || item.traceId}
                 onMouseEnter={() => setPreviewTraceId(item.traceId)}
                 onMouseLeave={() => setPreviewTraceId("")}
                 onFocus={() => setPreviewTraceId(item.traceId)}
