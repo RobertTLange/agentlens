@@ -993,6 +993,8 @@ let tracePagesById: Record<string, TracePage>;
 let overview: OverviewStats;
 let rafQueue: FrameRequestCallback[];
 let requestedUrls: string[];
+let ragSummaries: RagSummaryRecord[];
+let ragProjectionSummaries: RagSummaryRecord[];
 let stopResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let openResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let inputResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
@@ -1028,6 +1030,17 @@ beforeEach(() => {
   );
   rafQueue = [];
   requestedUrls = [];
+  ragSummaries = [
+    makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
+    makeRagSummary("trace-b", {
+      lastEventTs: 8_000,
+      mtimeMs: 7_900,
+      summaryGeneratedAtMs: 5_000,
+      updatedAtMs: 5_100,
+      summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
+    }),
+  ];
+  ragProjectionSummaries = ragSummaries;
   stopResponsesByTraceId = {};
   openResponsesByTraceId = {};
   inputResponsesByTraceId = {};
@@ -1152,17 +1165,7 @@ beforeEach(() => {
         );
       }
       if (url.includes("/api/rag/projection")) {
-        const summaries = [
-          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
-          makeRagSummary("trace-b", {
-            lastEventTs: 8_000,
-            mtimeMs: 7_900,
-            summaryGeneratedAtMs: 5_000,
-            updatedAtMs: 5_100,
-            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
-          }),
-        ];
-        return new Response(JSON.stringify(makeRagProjection(summaries)), { status: 200 });
+        return new Response(JSON.stringify(makeRagProjection(ragProjectionSummaries)), { status: 200 });
       }
       if (url.includes("/api/rag/summaries/")) {
         const traceId = decodeURIComponent(url.match(/\/api\/rag\/summaries\/([^?]+)/)?.[1] ?? "");
@@ -1172,17 +1175,7 @@ beforeEach(() => {
         return new Response(JSON.stringify({ error: "summary not found" }), { status: 404 });
       }
       if (url.includes("/api/rag/summaries")) {
-        const summaries = [
-          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
-          makeRagSummary("trace-b", {
-            lastEventTs: 8_000,
-            mtimeMs: 7_900,
-            summaryGeneratedAtMs: 5_000,
-            updatedAtMs: 5_100,
-            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
-          }),
-        ];
-        return new Response(JSON.stringify({ summaries }), { status: 200 });
+        return new Response(JSON.stringify({ summaries: ragSummaries }), { status: 200 });
       }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
@@ -1387,6 +1380,66 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelector(".rag-result-row.active")?.textContent).toContain("Parser regression"));
     expect(parserPoint.getAttribute("aria-pressed")).toBe("true");
     expect(document.body.textContent).toContain("Parser behavior fixed");
+  });
+
+  it("windows the embedding map to seven session days without changing summaries or projection fetch shape", async () => {
+    const dayMs = 86_400_000;
+    const latestMs = Date.UTC(2026, 4, 24, 12);
+    ragSummaries = [
+      makeRagSummary("trace-recent", {
+        lastEventTs: latestMs,
+        mtimeMs: latestMs,
+        summary: { ...makeRagSummary("trace-recent").summary!, title: "Recent window summary" },
+      }),
+      makeRagSummary("trace-within", {
+        lastEventTs: latestMs - 4 * dayMs,
+        mtimeMs: latestMs - 4 * dayMs,
+        summary: { ...makeRagSummary("trace-within").summary!, title: "Within week summary" },
+      }),
+      makeRagSummary("trace-older", {
+        lastEventTs: latestMs - 12 * dayMs,
+        mtimeMs: latestMs - 12 * dayMs,
+        summary: { ...makeRagSummary("trace-older").summary!, title: "Older window summary" },
+      }),
+      makeRagSummary("trace-oldest", {
+        lastEventTs: latestMs - 14 * dayMs,
+        mtimeMs: latestMs - 14 * dayMs,
+        summary: { ...makeRagSummary("trace-oldest").summary!, title: "Oldest window summary" },
+      }),
+    ];
+    ragProjectionSummaries = ragSummaries;
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(4));
+    const projectionRequest = requestedUrls.find((url) => url.includes("/api/rag/projection?"));
+    expect(new URL(projectionRequest ?? "", "http://localhost").pathname).toBe("/api/rag/projection");
+    expect(new URL(projectionRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("5000");
+
+    const visibleTitles = () =>
+      Array.from(document.querySelectorAll(".rag-projection-point")).map((node) => node.getAttribute("aria-label")?.split(",")[0]);
+    const listTitles = () =>
+      Array.from(document.querySelectorAll(".rag-result-row strong")).map((node) => node.textContent);
+
+    expect(visibleTitles()).toEqual(["Recent window summary", "Within week summary"]);
+    expect(document.querySelector(".rag-projection-head")?.textContent).toContain("2/4 visible");
+
+    const rowsBefore = listTitles();
+    expect(rowsBefore).toEqual(["Recent window summary", "Within week summary", "Older window summary", "Oldest window summary"]);
+
+    const slider = document.querySelector('input[type="range"][aria-label="Projection time window"]') as HTMLInputElement | null;
+    if (!slider) throw new Error("missing projection window slider");
+    expect(slider.max).toBe("7");
+    fireEvent.change(slider, { target: { value: "7" } });
+
+    expect(visibleTitles()).toEqual(["Older window summary", "Oldest window summary"]);
+    expect(document.querySelector(".rag-projection-head")?.textContent).toContain("2/4 visible");
+    expect(listTitles()).toEqual(rowsBefore);
   });
 
   it("shows a trace summary shortcut only when the selected inspector trace has a summary", async () => {

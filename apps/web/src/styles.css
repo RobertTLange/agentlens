@@ -3328,6 +3328,27 @@ body {
   font-size: 0.66rem;
 }
 
+.rag-projection-title,
+.rag-projection-window {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rag-projection-title {
+  flex-wrap: wrap;
+}
+
+.rag-projection-window {
+  justify-content: flex-end;
+}
+
+.rag-projection-window input {
+  width: 120px;
+  accent-color: var(--accent);
+}
+
 .rag-projection-plot {
   position: relative;
   height: 100%;
