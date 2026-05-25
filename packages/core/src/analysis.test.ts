@@ -97,6 +97,7 @@ async function buildAnalysisFixture(): Promise<TraceIndex> {
     analysis: {
       skillRoots: [skillRoot, path.join(root, "missing-skills")],
       topSessionLimit: 2,
+      cachePath: path.join(root, "analysis-cache.json"),
     },
     sources: {
       codex_home: {
@@ -218,5 +219,26 @@ describe("buildAnalysis", () => {
     expect(firstCallCount).toBeGreaterThan(0);
     expect(uncachedDetailCalls).toBe(firstCallCount);
     expect(cachedDetailCalls).toBe(0);
+  });
+
+  it("persists per-session analysis across index restarts", async () => {
+    const index = await buildAnalysisFixture();
+    const config = index.getConfig();
+    buildAnalysis(index);
+
+    const restarted = new TraceIndex(config);
+    await restarted.refresh();
+    let uncachedDetailCalls = 0;
+    const originalGetSessionDetailUncached = restarted.getSessionDetailUncached.bind(restarted);
+    restarted.getSessionDetailUncached = ((id: string) => {
+      uncachedDetailCalls += 1;
+      return originalGetSessionDetailUncached(id);
+    }) as TraceIndex["getSessionDetailUncached"];
+
+    const analysis = buildAnalysis(restarted);
+
+    expect(analysis.summary.traceCount).toBe(3);
+    expect(analysis.summary.explicitSkillCount).toBe(3);
+    expect(uncachedDetailCalls).toBe(0);
   });
 });

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, type Dirent } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import path from "node:path";
 import type {
   AgentKind,
@@ -60,6 +60,24 @@ interface SessionAnalysisCacheEntry {
   counts: SessionAnalysisCounts;
 }
 
+interface SessionAnalysisCacheState {
+  cachePath: string;
+  entries: Map<string, SessionAnalysisCacheEntry>;
+  dirty: boolean;
+}
+
+interface PersistedSessionAnalysisCacheEntry {
+  stamp: string;
+  explicitSkills: Array<[string, number]>;
+  inferredSkills: Array<[string, number]>;
+  subagents: Array<[string, number]>;
+}
+
+interface PersistedSessionAnalysisCache {
+  version: 1;
+  entries: Record<string, PersistedSessionAnalysisCacheEntry>;
+}
+
 interface AnalysisBuildState {
   inventory: ReturnType<typeof inventoryConfiguredSkills>;
   configuredSkillSet: Set<string>;
@@ -75,7 +93,7 @@ interface AnalysisBuildState {
   topSessionLimit: number;
 }
 
-const sessionAnalysisCacheByIndex = new WeakMap<TraceIndex, Map<string, SessionAnalysisCacheEntry>>();
+const sessionAnalysisCacheByIndex = new WeakMap<TraceIndex, SessionAnalysisCacheState>();
 
 function detectorSupportForAgent(agent: AgentKind): AnalysisDetectorSupport {
   return SUPPORTED_DETECTOR_AGENTS.has(agent) ? "supported" : "unsupported";
@@ -395,12 +413,75 @@ function sessionAnalysisStamp(summary: TraceSummary, configuredSkills: string[])
   ].join("|");
 }
 
-function sessionAnalysisCache(traceIndex: TraceIndex): Map<string, SessionAnalysisCacheEntry> {
+function validCountRows(value: unknown): Array<[string, number]> {
+  if (!Array.isArray(value)) return [];
+  return value.filter((row): row is [string, number] => (
+    Array.isArray(row) &&
+    typeof row[0] === "string" &&
+    typeof row[1] === "number" &&
+    Number.isFinite(row[1])
+  ));
+}
+
+function countsFromPersisted(entry: PersistedSessionAnalysisCacheEntry): SessionAnalysisCounts {
+  return {
+    explicitSkills: new Map(validCountRows(entry.explicitSkills)),
+    inferredSkills: new Map(validCountRows(entry.inferredSkills)),
+    subagents: new Map(validCountRows(entry.subagents)),
+  };
+}
+
+function countsToPersisted(entry: SessionAnalysisCacheEntry): PersistedSessionAnalysisCacheEntry {
+  return {
+    stamp: entry.stamp,
+    explicitSkills: Array.from(entry.counts.explicitSkills.entries()),
+    inferredSkills: Array.from(entry.counts.inferredSkills.entries()),
+    subagents: Array.from(entry.counts.subagents.entries()),
+  };
+}
+
+function readPersistedSessionAnalysisCache(cachePath: string): Map<string, SessionAnalysisCacheEntry> {
+  if (!existsSync(cachePath)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<PersistedSessionAnalysisCache>;
+    if (parsed.version !== 1 || !parsed.entries || typeof parsed.entries !== "object") return new Map();
+    const entries = new Map<string, SessionAnalysisCacheEntry>();
+    for (const [traceId, entry] of Object.entries(parsed.entries)) {
+      if (!entry || typeof entry !== "object" || typeof entry.stamp !== "string") continue;
+      entries.set(traceId, { stamp: entry.stamp, counts: countsFromPersisted(entry) });
+    }
+    return entries;
+  } catch {
+    return new Map();
+  }
+}
+
+function sessionAnalysisCache(traceIndex: TraceIndex): SessionAnalysisCacheState {
   const existing = sessionAnalysisCacheByIndex.get(traceIndex);
   if (existing) return existing;
-  const created = new Map<string, SessionAnalysisCacheEntry>();
+  const cachePath = path.resolve(expandHome(traceIndex.getConfig().analysis.cachePath));
+  const created: SessionAnalysisCacheState = {
+    cachePath,
+    entries: readPersistedSessionAnalysisCache(cachePath),
+    dirty: false,
+  };
   sessionAnalysisCacheByIndex.set(traceIndex, created);
   return created;
+}
+
+function persistSessionAnalysisCache(traceIndex: TraceIndex): void {
+  const state = sessionAnalysisCache(traceIndex);
+  if (!state.dirty) return;
+  const entries = Object.fromEntries(
+    Array.from(state.entries.entries()).map(([traceId, entry]) => [traceId, countsToPersisted(entry)]),
+  );
+  try {
+    mkdirSync(path.dirname(state.cachePath), { recursive: true });
+    writeFileSync(state.cachePath, JSON.stringify({ version: 1, entries } satisfies PersistedSessionAnalysisCache), "utf8");
+    state.dirty = false;
+  } catch {
+    // Analysis remains correct without the persistent cache.
+  }
 }
 
 function getSessionAnalysis(
@@ -411,14 +492,15 @@ function getSessionAnalysis(
 ): SessionAnalysisCounts {
   const stamp = sessionAnalysisStamp(summary, configuredSkills);
   const cache = sessionAnalysisCache(traceIndex);
-  const cached = cache.get(summary.id);
+  const cached = cache.entries.get(summary.id);
   if (cached?.stamp === stamp) {
     return cached.counts;
   }
 
   const detail = traceIndex.getSessionDetailUncached(summary.id);
   const counts = analyzeSession(detail.events, detail.summary, matchers);
-  cache.set(summary.id, { stamp, counts });
+  cache.entries.set(summary.id, { stamp, counts });
+  cache.dirty = true;
   return counts;
 }
 
@@ -651,6 +733,7 @@ export function buildAnalysis(traceIndex: TraceIndex, options: BuildAnalysisOpti
   for (const summary of state.summaries) {
     processAnalysisSummary(state, traceIndex, summary, matchers);
   }
+  persistSessionAnalysisCache(traceIndex);
   return finalizeAnalysis(state);
 }
 
@@ -667,5 +750,6 @@ export async function buildAnalysisAsync(
       await yieldToEventLoop();
     }
   }
+  persistSessionAnalysisCache(traceIndex);
   return finalizeAnalysis(state);
 }

@@ -149,6 +149,7 @@ export interface RagDailySummaryConfig {
 export interface AnalysisConfig {
   skillRoots: string[];
   topSessionLimit: number;
+  cachePath: string;
 }
 
 export interface TokenTotals {

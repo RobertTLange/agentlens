@@ -164,5 +164,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   analysis: {
     skillRoots: ["~/.codex/skills", "~/.claude/skills"],
     topSessionLimit: 20,
+    cachePath: "~/.agentlens/analysis-cache.json",
   },
 };

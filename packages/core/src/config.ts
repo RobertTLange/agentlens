@@ -439,6 +439,7 @@ function mergeAnalysis(input?: Partial<AnalysisConfig>): AnalysisConfig {
   return {
     skillRoots: skillRoots.length > 0 ? skillRoots : defaults.skillRoots,
     topSessionLimit: Math.max(1, positiveIntOrDefault(input?.topSessionLimit, defaults.topSessionLimit)),
+    cachePath: nonEmptyStringOrDefault(input?.cachePath, defaults.cachePath),
   };
 }
 
