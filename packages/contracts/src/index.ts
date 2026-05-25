@@ -483,7 +483,7 @@ export interface AnalysisSummary {
   observedUnconfiguredSkillCount: number;
 }
 
-export type AnalysisCacheState = "hit" | "miss" | "inflight";
+export type AnalysisCacheState = "hit" | "miss" | "inflight" | "stale";
 
 export interface AnalysisRuntimeInfo {
   cache: AnalysisCacheState;

@@ -1403,6 +1403,16 @@ describe("server api", () => {
     });
     expect(response.json().runtime.buildDurationMs).toEqual(expect.any(Number));
 
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 31_000);
+    const stale = await server.inject({ method: "GET", url: "/api/analysis" });
+    expect(stale.statusCode).toBe(200);
+    expect(stale.json()).toMatchObject({
+      summary: { traceCount: 2, subagentSpawnCount: 2 },
+      runtime: { cache: "stale", sinceMs: null, traceCount: 2 },
+    });
+    expect(stale.json().runtime.cacheAgeMs).toBeGreaterThanOrEqual(31_000);
+    nowSpy.mockRestore();
+
     const codexOnly = await server.inject({ method: "GET", url: "/api/analysis?agent=codex" });
     expect(codexOnly.statusCode).toBe(200);
     expect(codexOnly.json()).toMatchObject({

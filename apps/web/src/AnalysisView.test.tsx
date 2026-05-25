@@ -210,4 +210,21 @@ describe("AnalysisView", () => {
     render(<AnalysisView onInspectTrace={() => {}} />);
     await waitFor(() => expect(document.body.textContent).toContain("bad filter"));
   });
+
+  it("labels stale cached analysis responses", async () => {
+    response = makeAnalysisResponse({
+      runtime: {
+        cache: "stale",
+        buildDurationMs: 0,
+        cacheAgeMs: 31_000,
+        traceCount: 2,
+        sinceMs: null,
+        agent: null,
+      },
+    });
+
+    render(<AnalysisView onInspectTrace={() => {}} />);
+
+    await waitFor(() => expect(document.body.textContent).toContain("refreshing cached data"));
+  });
 });

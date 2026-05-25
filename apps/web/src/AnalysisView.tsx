@@ -32,7 +32,9 @@ function fmtRuntime(analysis: AnalysisResponse | null): string {
   if (!analysis?.runtime) return `generated ${fmtTime(analysis?.summary.generatedAtMs ?? null)}`;
   const cacheLabel = analysis.runtime.cache === "hit"
     ? "cache hit"
-    : analysis.runtime.cache === "inflight"
+    : analysis.runtime.cache === "stale"
+      ? "refreshing cached data"
+      : analysis.runtime.cache === "inflight"
       ? "joined build"
       : `built in ${fmtDuration(analysis.runtime.buildDurationMs)}`;
   return `generated ${fmtTime(analysis.summary.generatedAtMs)} · ${cacheLabel}`;

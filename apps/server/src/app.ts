@@ -59,6 +59,7 @@ const DEFAULT_RECENT_TRACE_LIMIT = 50;
 const MAX_RECENT_TRACE_LIMIT = 5000;
 const MAX_TRACE_INPUT_TEXT_LENGTH = 2000;
 const DEFAULT_ANALYSIS_CACHE_TTL_MS = 30_000;
+const DEFAULT_ANALYSIS_STALE_TTL_MS = 5 * 60_000;
 const ANALYSIS_BUILD_YIELD_EVERY = 8;
 const ACTIVITY_HEATMAP_METRICS: ActivityHeatmapMetric[] = ["sessions", "output_tokens", "total_cost_usd"];
 const LIVE_STREAM_BATCH_FLUSH_MS = 64;
@@ -152,6 +153,7 @@ interface CurrentUserIdentity { username: string; uid: string }
 interface AnalysisCacheEntry {
   cachedAtMs: number;
   expiresAtMs: number;
+  staleExpiresAtMs: number;
   value: AnalysisResponse;
 }
 
@@ -2282,10 +2284,25 @@ function withAnalysisRuntime(analysis: AnalysisResponse, runtime: AnalysisRuntim
   return { ...analysis, runtime };
 }
 
+function storeAnalysisCache(
+  cache: Map<string, AnalysisCacheEntry>,
+  key: string,
+  analysis: AnalysisResponse,
+  cachedAtMs: number,
+): void {
+  cache.set(key, {
+    value: analysis,
+    cachedAtMs,
+    expiresAtMs: cachedAtMs + DEFAULT_ANALYSIS_CACHE_TTL_MS,
+    staleExpiresAtMs: cachedAtMs + DEFAULT_ANALYSIS_STALE_TTL_MS,
+  });
+  pruneAnalysisCache(cache, cachedAtMs);
+}
+
 function pruneAnalysisCache(cache: Map<string, AnalysisCacheEntry>, nowMsValue: number): void {
   if (cache.size < 64) return;
   for (const [key, entry] of cache) {
-    if (entry.expiresAtMs > nowMsValue) continue;
+    if (entry.staleExpiresAtMs > nowMsValue) continue;
     cache.delete(key);
   }
 }
@@ -2498,6 +2515,31 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 	          agent: agent ?? null,
 	        });
 	      }
+	      if (cached && cached.staleExpiresAtMs > nowMsValue) {
+	        if (!analysisInFlight.has(key)) {
+	          const refreshPromise = buildAnalysisAsync(traceIndex, {
+	            ...(agent ? { agent } : {}),
+	            ...(since !== undefined ? { since } : {}),
+	            yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
+	          })
+	            .then((analysis) => {
+	              storeAnalysisCache(analysisCache, key, analysis, Date.now());
+	              return analysis;
+	            })
+	            .finally(() => {
+	              analysisInFlight.delete(key);
+	            });
+	          analysisInFlight.set(key, refreshPromise);
+	        }
+	        return withAnalysisRuntime(cached.value, {
+	          cache: "stale",
+	          buildDurationMs: 0,
+	          cacheAgeMs: Math.max(0, nowMsValue - cached.cachedAtMs),
+	          traceCount: cached.value.summary.traceCount,
+	          sinceMs: since ?? null,
+	          agent: agent ?? null,
+	        });
+	      }
 
 	      const existing = analysisInFlight.get(key);
 	      if (existing) {
@@ -2520,13 +2562,7 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 	        yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
 	      })
 	        .then((analysis) => {
-	          const cachedAtMs = Date.now();
-	          analysisCache.set(key, {
-	            value: analysis,
-	            cachedAtMs,
-	            expiresAtMs: cachedAtMs + DEFAULT_ANALYSIS_CACHE_TTL_MS,
-	          });
-	          pruneAnalysisCache(analysisCache, cachedAtMs);
+	          storeAnalysisCache(analysisCache, key, analysis, Date.now());
 	          return analysis;
 	        })
         .finally(() => {
