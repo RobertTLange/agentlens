@@ -28,9 +28,11 @@ import type {
 import {
   buildAnalysisAsync,
   DEFAULT_CONFIG_PATH,
+  getDailyWorkSummary,
   getRagStatus,
   getRagProjection,
   getRagSummary,
+  listDailyWorkSummaries,
   listRagSummaries,
   mergeConfig,
   saveConfig,
@@ -2807,16 +2809,20 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
   });
 
   server.get("/api/rag/summaries", async (request, reply) => {
-    const query = request.query as { status?: string; agent?: string; since?: string; limit?: string };
+    const query = request.query as { status?: string; agent?: string; since?: string; limit?: string; summary_text?: string; summary?: string };
     try {
       const status = parseRagStatus(query.status);
       const agent = parseAgentKind(query.agent);
       const since = parseSinceWindow(query.since);
+      const includeSummaryText = query.summary_text === "0" || query.summary_text === "false" ? false : true;
+      const summaryMode = query.summary === "title" ? "title" : "full";
       return await listRagSummaries(traceIndex.getConfig(), {
         ...(status ? { status } : {}),
         ...(agent ? { agent } : {}),
         ...(since ? { since } : {}),
         limit: parseBoundedPositiveInt(query.limit, 5000, 5000),
+        includeSummaryText,
+        summaryMode,
       });
     } catch (error) {
       reply.code(400);
@@ -2838,6 +2844,38 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       reply.code(400);
       return { error: asErrorMessage(error) };
     }
+  });
+
+  server.get("/api/rag/daily/status", async () => {
+    const status = await getRagStatus(traceIndex.getConfig());
+    return status.daily;
+  });
+
+  server.get("/api/rag/daily/reports", async (request, reply) => {
+    const query = request.query as { limit?: string };
+    try {
+      return await listDailyWorkSummaries(traceIndex.getConfig(), {
+        limit: parseBoundedPositiveInt(query.limit, 30, 500),
+      });
+    } catch (error) {
+      reply.code(400);
+      return { error: asErrorMessage(error) };
+    }
+  });
+
+  server.get("/api/rag/daily/reports/:idOrLatest", async (request, reply) => {
+    const params = request.params as { idOrLatest: string };
+    const idOrLatest = params.idOrLatest.trim();
+    if (!idOrLatest) {
+      reply.code(400);
+      return { error: "report id is required" };
+    }
+    const report = await getDailyWorkSummary(traceIndex.getConfig(), idOrLatest);
+    if (!report) {
+      reply.code(404);
+      return { error: "daily report not found" };
+    }
+    return { report };
   });
 
   server.get("/api/rag/summaries/:traceId", async (request, reply) => {

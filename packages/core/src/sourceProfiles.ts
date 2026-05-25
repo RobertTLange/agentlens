@@ -153,6 +153,13 @@ export const DEFAULT_CONFIG: AppConfig = {
     embeddingBatchSize: 32,
     searchCandidateMultiplier: 8,
     rrfK: 60,
+    dailySummary: {
+      enabled: true,
+      scheduleHourLocal: 6,
+      windowHours: 24,
+      retryIntervalMs: 3_600_000,
+      maxPromptBytes: 1_500_000,
+    },
   },
   analysis: {
     skillRoots: ["~/.codex/skills", "~/.claude/skills"],

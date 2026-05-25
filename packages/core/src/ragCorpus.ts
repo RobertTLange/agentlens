@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
+  DailyWorkSummaryContent,
   NormalizedEvent,
   RagDocumentKind,
   RagTraceSummaryContent,
@@ -33,6 +34,19 @@ const SUMMARY_KEYS: Array<keyof RagTraceSummaryContent> = [
   "errorsOrBlockers",
   "decisions",
   "workflowObservations",
+  "followups",
+  "searchKeywords",
+];
+
+const DAILY_SUMMARY_KEYS: Array<keyof DailyWorkSummaryContent> = [
+  "title",
+  "windowLabel",
+  "overview",
+  "completedWork",
+  "notableSessions",
+  "filesOrProjects",
+  "toolsOrWorkflows",
+  "blockers",
   "followups",
   "searchKeywords",
 ];
@@ -97,8 +111,50 @@ export function parseRagTraceSummaryContent(raw: string): RagTraceSummaryContent
   return validateRagTraceSummaryContent(JSON.parse(jsonText));
 }
 
+export function validateDailyWorkSummaryContent(value: unknown): DailyWorkSummaryContent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("daily summary must be a JSON object");
+  }
+  const record = value as Record<string, unknown>;
+  const title = trimString(record.title);
+  const windowLabel = trimString(record.windowLabel);
+  const overview = trimString(record.overview);
+  if (!title || !windowLabel || !overview) {
+    throw new Error("daily summary title, windowLabel, and overview are required strings");
+  }
+  return {
+    title,
+    windowLabel,
+    overview,
+    completedWork: trimStringArray(record.completedWork),
+    notableSessions: trimStringArray(record.notableSessions),
+    filesOrProjects: trimStringArray(record.filesOrProjects),
+    toolsOrWorkflows: trimStringArray(record.toolsOrWorkflows),
+    blockers: trimStringArray(record.blockers),
+    followups: trimStringArray(record.followups),
+    searchKeywords: trimStringArray(record.searchKeywords),
+  };
+}
+
+export function parseDailyWorkSummaryContent(raw: string): DailyWorkSummaryContent {
+  const trimmed = raw.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const jsonText = fenced?.[1] ?? trimmed;
+  return validateDailyWorkSummaryContent(JSON.parse(jsonText));
+}
+
 export function flattenRagSummary(summary: RagTraceSummaryContent): string {
   return SUMMARY_KEYS.map((key) => {
+    const value = summary[key];
+    const text = Array.isArray(value) ? value.join("\n") : value;
+    return `${key}: ${text}`.trim();
+  })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function flattenDailyWorkSummary(summary: DailyWorkSummaryContent): string {
+  return DAILY_SUMMARY_KEYS.map((key) => {
     const value = summary[key];
     const text = Array.isArray(value) ? value.join("\n") : value;
     return `${key}: ${text}`.trim();

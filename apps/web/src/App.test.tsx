@@ -8,6 +8,7 @@ import type {
   ActivityHydrationProgress,
   ActivityUsageSummary,
   AnalysisResponse,
+  DailyWorkSummaryRecord,
   EventKind,
   NormalizedEvent,
   OverviewStats,
@@ -147,10 +148,48 @@ function makeRagStatus(): RagIndexStatus {
     dbPath: "/tmp/rag.db",
     daemon: { running: true, pid: 123, pidPath: "/tmp/rag.pid", logPath: "/tmp/rag.log" },
     sessions: { total: 1, complete: 1, pending: 0, stale: 0, failed: 0, skipped: 0 },
+    daily: {
+      enabled: true,
+      lastScheduledAtMs: 1_700_000_000_000,
+      lastStatus: "complete",
+      lastGeneratedAtMs: 1_700_000_001_000,
+      nextRunAtMs: 1_700_086_400_000,
+    },
     documents: 2,
     embeddings: { status: "unavailable", model: "sentence-transformers/all-MiniLM-L6-v2", dimension: null, count: 0 },
     lastRunAtMs: 1_700_000_000_000,
     lastRunError: "",
+  };
+}
+
+function makeDailyReport(id = "daily-1700000000000", overrides: Partial<DailyWorkSummaryRecord> = {}): DailyWorkSummaryRecord {
+  const contentOverrides = overrides.content ?? {};
+  return {
+    id,
+    windowStartMs: 1_699_913_600_000,
+    windowEndMs: 1_700_000_000_000,
+    scheduledAtMs: 1_700_000_000_000,
+    status: "complete",
+    summaryText: "Completed parser work",
+    model: "fake",
+    error: "",
+    internalSummarySessionIds: [],
+    createdAtMs: 1_700_000_001_000,
+    updatedAtMs: 1_700_000_001_000,
+    ...overrides,
+    content: overrides.content === null ? null : {
+      title: "Daily parser work",
+      windowLabel: "Feb 11 06:00 - Feb 12 06:00",
+      overview: "Parser work completed and verified.",
+      completedWork: ["Fixed parser behavior"],
+      notableSessions: ["trace-a"],
+      filesOrProjects: ["packages/core"],
+      toolsOrWorkflows: ["vitest"],
+      blockers: [],
+      followups: ["Watch CI"],
+      searchKeywords: ["parser"],
+      ...contentOverrides,
+    },
   };
 }
 
@@ -994,6 +1033,7 @@ let overview: OverviewStats;
 let rafQueue: FrameRequestCallback[];
 let requestedUrls: string[];
 let ragSummaries: RagSummaryRecord[];
+let dailyReports: DailyWorkSummaryRecord[];
 let ragProjectionSummaries: RagSummaryRecord[];
 let stopResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let openResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
@@ -1040,6 +1080,7 @@ beforeEach(() => {
       summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
     }),
   ];
+  dailyReports = [makeDailyReport()];
   ragProjectionSummaries = ragSummaries;
   stopResponsesByTraceId = {};
   openResponsesByTraceId = {};
@@ -1164,18 +1205,50 @@ beforeEach(() => {
           { status: 200 },
         );
       }
+      if (url.includes("/api/rag/daily/reports/")) {
+        const id = decodeURIComponent(url.match(/\/api\/rag\/daily\/reports\/([^?]+)/)?.[1] ?? "");
+        const report = id === "latest" ? dailyReports[0] : dailyReports.find((item) => item.id === id || String(item.scheduledAtMs) === id);
+        if (report) {
+          return new Response(JSON.stringify({ report }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "daily report not found" }), { status: 404 });
+      }
+      if (url.includes("/api/rag/daily/reports")) {
+        return new Response(JSON.stringify({ reports: dailyReports }), { status: 200 });
+      }
       if (url.includes("/api/rag/projection")) {
         return new Response(JSON.stringify(makeRagProjection(ragProjectionSummaries)), { status: 200 });
       }
       if (url.includes("/api/rag/summaries/")) {
         const traceId = decodeURIComponent(url.match(/\/api\/rag\/summaries\/([^?]+)/)?.[1] ?? "");
-        if (traceId === "trace-a") {
-          return new Response(JSON.stringify({ summary: makeRagSummary(traceId) }), { status: 200 });
+        const summary = ragSummaries.find((item) => item.traceId === traceId) ?? (traceId === "trace-a" ? makeRagSummary(traceId) : null);
+        if (summary) {
+          return new Response(JSON.stringify({ summary }), { status: 200 });
         }
         return new Response(JSON.stringify({ error: "summary not found" }), { status: 404 });
       }
       if (url.includes("/api/rag/summaries")) {
-        return new Response(JSON.stringify({ summaries: ragSummaries }), { status: 200 });
+        const params = new URL(url, "http://localhost").searchParams;
+        const limit = Number(params.get("limit") ?? ragSummaries.length);
+        const compact = params.get("summary") === "title";
+        const summaries = ragSummaries.slice(0, limit).map((summary) => compact && summary.summary ? {
+          ...summary,
+          summaryText: "",
+          summary: {
+            title: summary.summary.title,
+            userGoal: "",
+            outcome: summary.summary.outcome,
+            keySteps: [],
+            filesOrProjects: [],
+            toolsUsed: [],
+            errorsOrBlockers: [],
+            decisions: [],
+            workflowObservations: [],
+            followups: [],
+            searchKeywords: [],
+          },
+        } : summary);
+        return new Response(JSON.stringify({ summaries }), { status: 200 });
       }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
         const traceId = traceIdFromStopUrl(url);
@@ -1342,6 +1415,29 @@ describe("App sessions list live motion", () => {
     expect(document.body.textContent).toContain("orphan-only snippet");
   });
 
+  it("renders daily report list and detail without loading projection search", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelector(".rag-view")).toBeTruthy());
+    const dailyTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "daily");
+    if (!(dailyTab instanceof HTMLButtonElement)) throw new Error("missing daily tab");
+    fireEvent.click(dailyTab);
+
+    await waitFor(() => expect(document.body.textContent).toContain("Daily parser work"));
+    expect(document.body.textContent).toContain("Parser work completed and verified.");
+    expect(document.body.textContent).toContain("Completed Work");
+    expect(requestedUrls.some((url) => url.includes("/api/rag/daily/reports"))).toBe(true);
+    const dailyIndex = requestedUrls.findIndex((url) => url.includes("/api/rag/daily/reports"));
+    const projectionAfterDaily = requestedUrls.slice(dailyIndex).some((url) => url.includes("/api/rag/projection"));
+    expect(projectionAfterDaily).toBe(false);
+    expect(document.querySelector(".rag-search")).toBeNull();
+  });
+
   it("renders the summaries ToC by original trace time and syncs plot selection", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -1352,7 +1448,9 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(document.querySelectorAll(".rag-result-row").length).toBe(2));
     const summaryListRequest = requestedUrls.find((url) => url.includes("/api/rag/summaries?status=complete"));
-    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("5000");
+    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("100");
+    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("summary_text")).toBe("0");
+    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("summary")).toBe("title");
     const rows = Array.from(document.querySelectorAll(".rag-result-row"));
     expect(rows[0]?.textContent).toContain("Newer trace summary");
     expect(rows[1]?.textContent).toContain("Parser regression");
@@ -1361,7 +1459,13 @@ describe("App sessions list live motion", () => {
     expect(rowMetaLabels).toEqual([]);
     expect(rows[0]?.textContent).not.toContain("Second detail");
     expect(rows[0]?.textContent).not.toContain("/tmp/");
-    expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2);
+    expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(false);
+    expect(document.querySelector(".rag-detail-head")?.textContent).toContain("Newer trace summary");
+    expect(document.body.textContent).not.toContain("Find prior failed tests");
+    const loadMap = Array.from(document.querySelectorAll("button")).find((node) => node.textContent === "load map");
+    if (!(loadMap instanceof HTMLButtonElement)) throw new Error("missing load map button");
+    fireEvent.click(loadMap);
+    await waitFor(() => expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2));
 
     const parserPoint = Array.from(document.querySelectorAll(".rag-projection-point")).find(
       (node) => node.getAttribute("aria-label")?.startsWith("Parser regression,"),
@@ -1382,7 +1486,38 @@ describe("App sessions list live motion", () => {
     expect(document.body.textContent).toContain("Parser behavior fixed");
   });
 
-  it("windows the embedding map to seven session days without changing summaries or projection fetch shape", async () => {
+  it("bounds the initial summaries render and loads more on request", async () => {
+    const baseMs = Date.UTC(2026, 4, 24, 12);
+    ragSummaries = Array.from({ length: 260 }, (_, index) => makeRagSummary(`trace-page-${index}`, {
+      lastEventTs: baseMs - index,
+      mtimeMs: baseMs - index,
+      summary: { ...makeRagSummary(`trace-page-${index}`).summary!, title: `Paged summary ${index}` },
+    }));
+    ragProjectionSummaries = ragSummaries;
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(100));
+    const firstSummaryRequest = requestedUrls.find((url) => url.includes("/api/rag/summaries?status=complete"));
+    expect(new URL(firstSummaryRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("100");
+
+    const showMore = Array.from(document.querySelectorAll("button")).find((node) => node.textContent === "show more");
+    if (!(showMore instanceof HTMLButtonElement)) throw new Error("missing show more button");
+    fireEvent.click(showMore);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(200));
+    const summaryLimits = requestedUrls
+      .filter((url) => url.includes("/api/rag/summaries?status=complete"))
+      .map((url) => new URL(url, "http://localhost").searchParams.get("limit"));
+    expect(summaryLimits).toContain("200");
+  });
+
+  it("windows the embedding map to seven session days without changing summaries", async () => {
     const dayMs = 86_400_000;
     const latestMs = Date.UTC(2026, 4, 24, 12);
     ragSummaries = [
@@ -1417,9 +1552,13 @@ describe("App sessions list live motion", () => {
     fireEvent.click(summariesTab);
 
     await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(4));
+    const loadMap = Array.from(document.querySelectorAll("button")).find((node) => node.textContent === "load map");
+    if (!(loadMap instanceof HTMLButtonElement)) throw new Error("missing load map button");
+    fireEvent.click(loadMap);
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(true));
     const projectionRequest = requestedUrls.find((url) => url.includes("/api/rag/projection?"));
     expect(new URL(projectionRequest ?? "", "http://localhost").pathname).toBe("/api/rag/projection");
-    expect(new URL(projectionRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("5000");
+    expect(new URL(projectionRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("500");
 
     const visibleTitles = () =>
       Array.from(document.querySelectorAll(".rag-projection-point")).map((node) => node.getAttribute("aria-label")?.split(",")[0]);

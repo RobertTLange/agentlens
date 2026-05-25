@@ -5,11 +5,14 @@ import type { AnalysisResponse, AppConfig, NamedCount, TraceSummary } from "@age
 import {
   buildAnalysis,
   DEFAULT_CONFIG_PATH,
+  getDailyWorkSummary,
   getRagStatus,
   getRagSummary,
+  listDailyWorkSummaries,
   loadConfig,
   loadSnapshot,
   mergeConfig,
+  runDailyWorkSummaryIfDue,
   runRagIndexOnce,
   runRagWorker,
   runRagSupervisor,
@@ -958,13 +961,15 @@ rag
       const intervalMs = opts.interval ? toMsWindow(opts.interval) : config.rag.workerIntervalMs;
       if (opts.interval && intervalMs <= 0) throw new Error(`unsupported interval: ${opts.interval}`);
       do {
+        await runDailyWorkSummaryIfDue(config);
         const result = await runRagIndexOnce(config, {
           ...(limit !== undefined ? { limit } : {}),
           embeddingLimit: embeddingLimit ?? config.rag.embeddingBatchSize,
           ...(opts.lexicalOnly !== undefined ? { lexicalOnly: opts.lexicalOnly } : {}),
         });
+        const daily = await runDailyWorkSummaryIfDue(config);
         if (opts.json) console.log(JSON.stringify(result));
-        else console.log(`rag pass: summarized=${result.summarized} skipped=${result.skipped} failed=${result.failed} embedded=${result.embeddedDocuments} embeddings=${result.embeddingStatus.status}`);
+        else console.log(`rag pass: summarized=${result.summarized} skipped=${result.skipped} failed=${result.failed} embedded=${result.embeddedDocuments} embeddings=${result.embeddingStatus.status} daily=${daily.status}`);
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       } while (true);
     }
@@ -1031,7 +1036,7 @@ rag.command("status").option("--json", "JSON output").action(async (opts: { json
     return;
   }
   printTable([
-    ["enabled", "db", "daemon", "complete", "stale", "failed", "skipped", "docs", "embeddings", "last_run"],
+    ["enabled", "db", "daemon", "complete", "stale", "failed", "skipped", "docs", "embeddings", "daily", "next_daily", "last_run"],
     [
       String(status.enabled),
       status.dbPath,
@@ -1042,10 +1047,74 @@ rag.command("status").option("--json", "JSON output").action(async (opts: { json
       String(status.sessions.skipped),
       String(status.documents),
       status.embeddings.status,
+      status.daily.lastStatus ?? "-",
+      fmtTimeCompact(status.daily.nextRunAtMs),
       fmtTimeCompact(status.lastRunAtMs),
     ],
   ]);
   if (status.lastRunError) console.log(`last_error: ${status.lastRunError}`);
+});
+
+const ragDaily = rag.command("daily").description("Daily RAG work summaries");
+
+ragDaily.command("status").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const status = (await getRagStatus(config)).daily;
+  if (opts.json) {
+    console.log(JSON.stringify(status, null, 2));
+    return;
+  }
+  printTable([
+    ["enabled", "last_scheduled", "last_status", "last_generated", "next_run"],
+    [
+      String(status.enabled),
+      fmtTimeCompact(status.lastScheduledAtMs),
+      status.lastStatus ?? "-",
+      fmtTimeCompact(status.lastGeneratedAtMs),
+      fmtTimeCompact(status.nextRunAtMs),
+    ],
+  ]);
+});
+
+ragDaily
+  .command("list")
+  .option("--limit <n>", "Rows to show", "20")
+  .option("--json", "JSON output")
+  .action(async (opts: { limit?: string; json?: boolean }) => {
+    const config = await loadConfig(program.opts<{ config: string }>().config);
+    const response = await listDailyWorkSummaries(config, { limit: parseLimitOption(opts.limit, 20, 500) });
+    if (opts.json) {
+      console.log(JSON.stringify(response, null, 2));
+      return;
+    }
+    printTable([
+      ["scheduled", "status", "title", "overview"],
+      ...response.reports.map((report) => [
+        fmtTimeCompact(report.scheduledAtMs),
+        report.status,
+        report.content?.title ?? report.id,
+        normalizeInlineText(report.content?.overview ?? report.error),
+      ]),
+    ]);
+  });
+
+ragDaily.command("show <id_or_latest>").option("--json", "JSON output").action(async (idOrLatest: string, opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const report = await getDailyWorkSummary(config, idOrLatest);
+  if (!report) throw new Error(`unknown daily RAG summary: ${idOrLatest}`);
+  if (opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  printTable([
+    ["scheduled", "status", "title", "overview"],
+    [
+      fmtTimeCompact(report.scheduledAtMs),
+      report.status,
+      report.content?.title ?? report.id,
+      normalizeInlineText(report.content?.overview ?? report.error),
+    ],
+  ]);
 });
 
 rag.command("stop").action(async () => {

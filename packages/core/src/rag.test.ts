@@ -3,9 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
-import type { NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@agentlens/contracts";
+import type { DailyWorkSummaryContent, NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@agentlens/contracts";
 import { mergeConfig, saveConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
+import { computeDailySummarySchedule, runDailyWorkSummaryIfDue } from "./ragDailySummary.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
 import { ragWorkerNodeOptions, runRagIndexOnce, runRagSupervisor, runRagWorker, stopRagDaemon } from "./ragIndexer.js";
 import { assignAdaptiveClusters, getRagProjection } from "./ragProjection.js";
@@ -189,6 +190,21 @@ function content(): RagTraceSummaryContent {
   };
 }
 
+function dailyContent(): DailyWorkSummaryContent {
+  return {
+    title: "Daily AgentLens work",
+    windowLabel: "Feb 11 06:00 - Feb 12 06:00",
+    overview: "Parser work was completed and verified.",
+    completedWork: ["Fixed parser behavior"],
+    notableSessions: ["normal-session"],
+    filesOrProjects: ["packages/core"],
+    toolsOrWorkflows: ["vitest"],
+    blockers: [],
+    followups: ["Watch CI"],
+    searchKeywords: ["parser", "daily"],
+  };
+}
+
 function buildCodexTraceLog(sessionId: string, sequence: number, options: { cwd?: string } = {}): string {
   const firstTs = new Date(Date.UTC(2026, 1, 11, 10, 0, sequence)).toISOString();
   const secondTs = new Date(Date.UTC(2026, 1, 11, 10, 0, sequence + 1)).toISOString();
@@ -221,6 +237,17 @@ ${sessionRecord}console.log(JSON.stringify({ type: "result", result: out }));
 `,
     "utf8",
   );
+  await chmod(executable, 0o755);
+  return executable;
+}
+
+async function writeFakeDailyHeadless(dir: string, options: { sessionId?: string; fail?: boolean } = {}): Promise<string> {
+  const executable = path.join(dir, "fake-daily-headless.js");
+  const sessionRecord = options.sessionId ? `console.log(JSON.stringify({ session_id: ${JSON.stringify(options.sessionId)} }));\n` : "";
+  const body = options.fail
+    ? `${sessionRecord}console.error("daily failure");\nprocess.exit(1);\n`
+    : `const out = ${JSON.stringify(JSON.stringify(dailyContent()))};\n${sessionRecord}console.log(JSON.stringify({ type: "result", result: out }));\n`;
+  await writeFile(executable, `#!/usr/bin/env node\n${body}`, "utf8");
   await chmod(executable, 0o755);
   return executable;
 }
@@ -293,6 +320,27 @@ describe("rag corpus", () => {
 });
 
 describe("rag store", () => {
+  it("computes local daily summary schedule and 24 hour windows", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"), {
+      dailySummary: { scheduleHourLocal: 6, windowHours: 24 },
+    });
+    const afterSix = new Date(2026, 1, 12, 7, 30, 0).getTime();
+    const beforeSix = new Date(2026, 1, 12, 5, 30, 0).getTime();
+    const todaySix = new Date(2026, 1, 12, 6, 0, 0).getTime();
+    const yesterdaySix = new Date(2026, 1, 11, 6, 0, 0).getTime();
+
+    expect(computeDailySummarySchedule(config, afterSix)).toMatchObject({
+      scheduledAtMs: todaySix,
+      windowStartMs: yesterdaySix,
+    });
+    expect(computeDailySummarySchedule(config, beforeSix)).toMatchObject({
+      scheduledAtMs: yesterdaySix,
+      windowStartMs: new Date(2026, 1, 10, 6, 0, 0).getTime(),
+      nextRunAtMs: todaySix,
+    });
+  });
+
   it("keeps writer operations available while another connection is reading", async () => {
     const dir = await tempDir();
     const config = testConfig(path.join(dir, "rag.db"));
@@ -386,8 +434,42 @@ describe("rag store", () => {
     store.replaceDocuments("trace-1", corpus.documents, 3);
 
     expect(store.getStatus(config).sessions.complete).toBe(1);
+    expect(store.getStatus(config).daily).toMatchObject({ enabled: true, lastStatus: null });
     expect(store.getStatus(config).documents).toBeGreaterThan(0);
     expect(store.search({ query: "parser", mode: "lexical", limit: 5, candidateMultiplier: 4, rrfK: 60 })[0]?.traceId).toBe("trace-1");
+    store.close();
+  });
+
+  it("persists and lists daily work summaries by schedule time", async () => {
+    const dir = await tempDir();
+    const config = testConfig(path.join(dir, "rag.db"));
+    const store = new RagStore(config);
+
+    store.upsertDailyReport({
+      id: "daily-100",
+      windowStartMs: 0,
+      windowEndMs: 100,
+      scheduledAtMs: 100,
+      status: "complete",
+      content: dailyContent(),
+      summaryText: "daily summary",
+      model: "fake",
+      internalSummarySessionIds: ["internal-daily"],
+      nowMs: 200,
+    });
+
+    expect(store.getDailyReportByScheduledAt(100)).toMatchObject({
+      id: "daily-100",
+      status: "complete",
+      content: { title: "Daily AgentLens work" },
+      internalSummarySessionIds: ["internal-daily"],
+    });
+    expect(store.listDailyReports({ limit: 1 })[0]?.id).toBe("daily-100");
+    expect(store.getStatus(config).daily).toMatchObject({
+      lastScheduledAtMs: 100,
+      lastStatus: "complete",
+      lastGeneratedAtMs: 200,
+    });
     store.close();
   });
 
@@ -529,6 +611,93 @@ describe("rag store", () => {
 });
 
 describe("rag indexer", () => {
+  it("generates a due daily work summary and does not duplicate completed schedules", async () => {
+    const dir = await tempDir();
+    const tracesDir = path.join(dir, "traces");
+    await mkdir(tracesDir, { recursive: true });
+    await writeQuietTrace(path.join(tracesDir, "normal.jsonl"), buildCodexTraceLog("normal-session", 0));
+    const nowMs = new Date(2026, 1, 12, 7, 0, 0).getTime();
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [tracesDir],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 2,
+          agentHint: "codex",
+        },
+      },
+      rag: {
+        dbPath: path.join(dir, "rag.db"),
+        daemonPidPath: path.join(dir, "rag.pid"),
+        daemonLogPath: path.join(dir, "rag.log"),
+        embeddingBackend: "disabled",
+        headlessExecutable: await writeFakeDailyHeadless(dir, { sessionId: "daily-internal-session" }),
+        dailySummary: { scheduleHourLocal: 6, windowHours: 24, retryIntervalMs: 1000 },
+      },
+    });
+
+    const first = await runDailyWorkSummaryIfDue(config, { nowMs });
+    const second = await runDailyWorkSummaryIfDue(config, { nowMs: nowMs + 10_000 });
+    const store = new RagStore(config);
+    const report = store.getDailyReportByScheduledAt(new Date(2026, 1, 12, 6, 0, 0).getTime());
+
+    expect(first).toMatchObject({ due: true, status: "complete" });
+    expect(second).toMatchObject({ due: false, status: "already_complete" });
+    expect(report).toMatchObject({
+      status: "complete",
+      content: { title: "Daily AgentLens work" },
+      internalSummarySessionIds: ["daily-internal-session"],
+    });
+    expect(JSON.parse(store.getMeta("internal_summary_session_ids"))).toEqual(["daily-internal-session"]);
+    store.close();
+  });
+
+  it("throttles failed daily work summary retries until the retry interval passes", async () => {
+    const dir = await tempDir();
+    const tracesDir = path.join(dir, "traces");
+    await mkdir(tracesDir, { recursive: true });
+    await writeQuietTrace(path.join(tracesDir, "normal.jsonl"), buildCodexTraceLog("normal-session", 0));
+    const nowMs = new Date(2026, 1, 12, 7, 0, 0).getTime();
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [tracesDir],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 2,
+          agentHint: "codex",
+        },
+      },
+      rag: {
+        dbPath: path.join(dir, "rag.db"),
+        daemonPidPath: path.join(dir, "rag.pid"),
+        daemonLogPath: path.join(dir, "rag.log"),
+        embeddingBackend: "disabled",
+        headlessExecutable: await writeFakeDailyHeadless(dir, { fail: true }),
+        dailySummary: { scheduleHourLocal: 6, windowHours: 24, retryIntervalMs: 60_000 },
+      },
+    });
+
+    const first = await runDailyWorkSummaryIfDue(config, { nowMs });
+    const throttled = await runDailyWorkSummaryIfDue(config, { nowMs: nowMs + 30_000 });
+    const retried = await runDailyWorkSummaryIfDue(config, { nowMs: nowMs + 61_000 });
+    const store = new RagStore(config);
+
+    expect(first.status).toBe("failed");
+    expect(throttled.status).toBe("throttled");
+    expect(retried.status).toBe("failed");
+    expect(store.listDailyReports({ limit: 10 })).toHaveLength(1);
+    expect(store.getLatestDailyReport()?.error).toContain("headless exited");
+    store.close();
+  });
+
   it("skips traces from agentlens-rag work directories without summarizing them", async () => {
     const dir = await tempDir();
     const tracesDir = path.join(dir, "traces");
@@ -1049,7 +1218,11 @@ describe("rag indexer", () => {
 
   it("uses a bounded embedding pass by default in the worker loop", async () => {
     const dir = await tempDir();
-    const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local", embeddingBatchSize: 3 });
+    const config = testConfig(path.join(dir, "rag.db"), {
+      embeddingBackend: "local",
+      embeddingBatchSize: 3,
+      dailySummary: { enabled: false },
+    });
     const configPath = path.join(dir, "config.toml");
     await saveConfig(config, configPath);
     const store = new RagStore(config);
@@ -1092,7 +1265,11 @@ describe("rag indexer", () => {
 
   it("does not let the worker summary limit shrink the default embedding batch", async () => {
     const dir = await tempDir();
-    const config = testConfig(path.join(dir, "rag.db"), { embeddingBackend: "local", embeddingBatchSize: 3 });
+    const config = testConfig(path.join(dir, "rag.db"), {
+      embeddingBackend: "local",
+      embeddingBatchSize: 3,
+      dailySummary: { enabled: false },
+    });
     const configPath = path.join(dir, "config.toml");
     await saveConfig(config, configPath);
     const store = new RagStore(config);

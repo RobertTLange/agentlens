@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentKind,
+  DailyWorkSummaryRecord,
   RagIndexStatus,
   RagProjectionResponse,
   RagSearchMode,
@@ -10,7 +11,10 @@ import type {
 
 const SEARCH_DEBOUNCE_MS = 250;
 const SUMMARY_REFRESH_MS = 30_000;
-const SUMMARY_LIST_LIMIT = 5000;
+const SUMMARY_LIST_PAGE_SIZE = 100;
+const SUMMARY_LIST_MAX_LIMIT = 5000;
+const PROJECTION_LIMIT = 500;
+const DAILY_REPORT_LIMIT = 60;
 const PROJECTION_WINDOW_DAYS = 7;
 const DAY_MS = 86_400_000;
 const AGENT_OPTIONS: Array<AgentKind | ""> = ["", "codex", "claude", "cursor", "gemini", "opencode", "pi", "unknown"];
@@ -42,6 +46,10 @@ function sortSummariesByOriginalTraceTime(summaries: RagSummaryRecord[]): RagSum
     summaryAtMs(right) - summaryAtMs(left) ||
     left.traceId.localeCompare(right.traceId)
   ));
+}
+
+function sortDailyReports(reports: DailyWorkSummaryRecord[]): DailyWorkSummaryRecord[] {
+  return [...reports].sort((left, right) => right.scheduledAtMs - left.scheduledAtMs || left.id.localeCompare(right.id));
 }
 
 function clusterColor(clusterId: number): string {
@@ -225,19 +233,26 @@ function SummaryProjectionPlot({
 }
 
 export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceIdProp = "" }: SummariesViewProps): JSX.Element {
+  const [viewMode, setViewMode] = useState<"sessions" | "daily">("sessions");
   const [status, setStatus] = useState<RagIndexStatus | null>(null);
   const [summaries, setSummaries] = useState<RagSummaryRecord[]>([]);
+  const [dailyReports, setDailyReports] = useState<DailyWorkSummaryRecord[]>([]);
   const [projection, setProjection] = useState<RagProjectionResponse | null>(null);
+  const [projectionVisible, setProjectionVisible] = useState(false);
   const [projectionOffsetDays, setProjectionOffsetDays] = useState(0);
   const [results, setResults] = useState<RagSearchResult[]>([]);
   const [selectedTraceId, setSelectedTraceId] = useState("");
+  const [selectedDailyId, setSelectedDailyId] = useState("");
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<RagSearchMode>("hybrid");
   const [agent, setAgent] = useState<AgentKind | "">("");
   const [summaryStatus, setSummaryStatus] = useState<(typeof STATUS_OPTIONS)[number]>("complete");
+  const [summaryListLimit, setSummaryListLimit] = useState(SUMMARY_LIST_PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const userSelectedTraceRef = useRef(false);
+  const projectionRequestRef = useRef(0);
+  const detailRequestedTraceIdsRef = useRef<Set<string>>(new Set());
 
   const selectedSummary = useMemo(
     () => summaries.find((summary) => summary.traceId === selectedTraceId) ?? null,
@@ -248,45 +263,97 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     [selectedTraceId, results],
   );
   const tocSummaries = useMemo(() => sortSummariesByOriginalTraceTime(summaries), [summaries]);
+  const dailyToc = useMemo(() => sortDailyReports(dailyReports), [dailyReports]);
+  const selectedDailyReport = useMemo(
+    () => dailyReports.find((report) => report.id === selectedDailyId) ?? null,
+    [dailyReports, selectedDailyId],
+  );
   const projectionMaxOffsetDays = useMemo(
     () => projectionTimeline(projection?.items ?? [])?.maxOffsetDays ?? 0,
     [projection],
   );
   const isSearching = query.trim().length > 0;
-  const listTitle = isSearching ? "Search Results" : "Summaries";
-  const listCount = isSearching ? `${results.length} results` : `${tocSummaries.length} rows`;
+  const listTitle = viewMode === "daily" ? "Daily Reports" : isSearching ? "Search Results" : "Summaries";
+  const canLoadMoreSummaries = viewMode !== "daily" && !isSearching && tocSummaries.length >= summaryListLimit && summaryListLimit < SUMMARY_LIST_MAX_LIMIT;
+  const listCount = viewMode === "daily"
+    ? `${dailyToc.length} reports`
+    : isSearching
+      ? `${results.length} results`
+      : canLoadMoreSummaries
+        ? `${tocSummaries.length}+ rows`
+        : `${tocSummaries.length} rows`;
 
   function selectTraceFromUser(traceId: string): void {
     userSelectedTraceRef.current = true;
+    detailRequestedTraceIdsRef.current.add(traceId);
     setSelectedTraceId(traceId);
+  }
+
+  async function refreshProjectionData(requestId: number): Promise<void> {
+    const projectionParams = new URLSearchParams({ status: summaryStatus, limit: String(PROJECTION_LIMIT) });
+    if (agent) projectionParams.set("agent", agent);
+    try {
+      const projectionResponse = await fetch(`/api/rag/projection?${projectionParams.toString()}`);
+      if (!projectionResponse.ok) throw new Error("failed to load projection");
+      const projectionJson = (await projectionResponse.json()) as RagProjectionResponse;
+      if (projectionRequestRef.current === requestId) setProjection(projectionJson);
+    } catch {
+      if (projectionRequestRef.current === requestId) setProjection(null);
+    }
   }
 
   async function refreshBaseData(options: { showLoading?: boolean } = {}): Promise<void> {
     const showLoading = options.showLoading ?? true;
     if (showLoading) setLoading(true);
     setError("");
+    const projectionRequestId = projectionRequestRef.current + 1;
+    projectionRequestRef.current = projectionRequestId;
+    if (!projectionVisible) setProjection(null);
     try {
-      const statusResponse = await fetch("/api/rag/status");
-      const statusJson = (await statusResponse.json()) as RagIndexStatus;
-      setStatus(statusJson);
-      const params = new URLSearchParams({ status: summaryStatus, limit: String(SUMMARY_LIST_LIMIT) });
+      const params = new URLSearchParams({ status: summaryStatus, limit: String(summaryListLimit), summary_text: "0", summary: "title" });
       if (agent) params.set("agent", agent);
-      const projectionParams = new URLSearchParams({ status: summaryStatus, limit: "5000" });
-      if (agent) projectionParams.set("agent", agent);
-      const [summariesResponse, projectionResponse] = await Promise.all([
+      const [statusResponse, summariesResponse] = await Promise.all([
+        fetch("/api/rag/status"),
         fetch(`/api/rag/summaries?${params.toString()}`),
-        fetch(`/api/rag/projection?${projectionParams.toString()}`),
       ]);
+      if (!statusResponse.ok) throw new Error("failed to load RAG status");
       if (!summariesResponse.ok) throw new Error("failed to load summaries");
-      if (!projectionResponse.ok) throw new Error("failed to load projection");
+      const statusJson = (await statusResponse.json()) as RagIndexStatus;
       const summariesJson = (await summariesResponse.json()) as { summaries: RagSummaryRecord[] };
-      const projectionJson = (await projectionResponse.json()) as RagProjectionResponse;
       const sortedSummaries = sortSummariesByOriginalTraceTime(summariesJson.summaries);
+      setStatus(statusJson);
       setSummaries(sortedSummaries);
-      setProjection(projectionJson);
       setSelectedTraceId((current) => {
         if (current && sortedSummaries.some((summary) => summary.traceId === current)) return current;
-        return sortedSummaries[0]?.traceId || "";
+        if (selectedTraceIdProp && sortedSummaries.some((summary) => summary.traceId === selectedTraceIdProp)) return selectedTraceIdProp;
+        return "";
+      });
+      if (projectionVisible) void refreshProjectionData(projectionRequestId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (showLoading) setLoading(false);
+    }
+  }
+
+  async function refreshDailyData(options: { showLoading?: boolean } = {}): Promise<void> {
+    const showLoading = options.showLoading ?? true;
+    if (showLoading) setLoading(true);
+    setError("");
+    try {
+      const [statusResponse, reportsResponse] = await Promise.all([
+        fetch("/api/rag/status"),
+        fetch(`/api/rag/daily/reports?limit=${DAILY_REPORT_LIMIT}`),
+      ]);
+      if (!statusResponse.ok) throw new Error("failed to load RAG status");
+      if (!reportsResponse.ok) throw new Error("failed to load daily reports");
+      setStatus((await statusResponse.json()) as RagIndexStatus);
+      const reportsJson = (await reportsResponse.json()) as { reports: DailyWorkSummaryRecord[] };
+      const sortedReports = sortDailyReports(reportsJson.reports);
+      setDailyReports(sortedReports);
+      setSelectedDailyId((current) => {
+        if (current && sortedReports.some((report) => report.id === current)) return current;
+        return sortedReports[0]?.id || "";
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -296,8 +363,16 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
   }
 
   useEffect(() => {
-    void refreshBaseData();
-  }, [agent, summaryStatus]);
+    if (viewMode === "daily") void refreshDailyData();
+    else void refreshBaseData();
+  }, [agent, summaryStatus, summaryListLimit, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "sessions" || !projectionVisible) return;
+    const requestId = projectionRequestRef.current + 1;
+    projectionRequestRef.current = requestId;
+    void refreshProjectionData(requestId);
+  }, [agent, projectionVisible, summaryStatus, viewMode]);
 
   useEffect(() => {
     setProjectionOffsetDays(0);
@@ -309,10 +384,11 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void refreshBaseData({ showLoading: false });
+      if (viewMode === "daily") void refreshDailyData({ showLoading: false });
+      else void refreshBaseData({ showLoading: false });
     }, SUMMARY_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [agent, summaryStatus]);
+  }, [agent, summaryStatus, summaryListLimit, viewMode]);
 
   useEffect(() => {
     if (!selectedTraceIdProp) return;
@@ -322,6 +398,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
 
   useEffect(() => {
     const trimmed = query.trim();
+    if (viewMode === "daily") return;
     if (!trimmed) {
       setResults([]);
       setSelectedTraceId((current) => {
@@ -352,44 +429,95 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
         .finally(() => setLoading(false));
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [agent, mode, query, selectedTraceIdProp, summaries]);
+  }, [agent, mode, query, selectedTraceIdProp, summaries, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "sessions" || isSearching || !selectedTraceId) return;
+    if (!detailRequestedTraceIdsRef.current.has(selectedTraceId) && selectedTraceId !== selectedTraceIdProp) return;
+    const current = summaries.find((summary) => summary.traceId === selectedTraceId);
+    if (!current?.summary || current.summary.userGoal) return;
+    let cancelled = false;
+    fetch(`/api/rag/summaries/${encodeURIComponent(selectedTraceId)}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("failed to load summary detail");
+        return response.json() as Promise<{ summary: RagSummaryRecord }>;
+      })
+      .then((json) => {
+        if (cancelled) return;
+        setSummaries((existing) => existing.map((summary) => summary.traceId === json.summary.traceId ? json.summary : summary));
+      })
+      .catch(() => {
+        // Keep the compact row visible if the detail request fails.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isSearching, selectedTraceId, summaries, viewMode]);
 
   return (
     <div className="rag-view">
       <section className="rag-toolbar" aria-label="RAG summary controls">
-        <input
-          className="search rag-search"
-          placeholder="Search summaries and redacted trace text"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        <div className="rag-segmented" role="radiogroup" aria-label="Search mode">
-          {(["hybrid", "lexical", "semantic"] as RagSearchMode[]).map((item) => (
+        <div className="rag-segmented rag-view-toggle" role="tablist" aria-label="Summary view">
+          {(["sessions", "daily"] as const).map((item) => (
             <button
               key={item}
               type="button"
-              className={`mono rag-segment ${mode === item ? "active" : ""}`}
-              onClick={() => setMode(item)}
+              role="tab"
+              aria-selected={viewMode === item}
+              className={`mono rag-segment ${viewMode === item ? "active" : ""}`}
+              onClick={() => setViewMode(item)}
             >
               {item}
             </button>
           ))}
         </div>
-        <select className="mono rag-select" value={agent} onChange={(event) => setAgent(event.target.value as AgentKind | "")}>
-          {AGENT_OPTIONS.map((value) => (
-            <option key={value || "all"} value={value}>{value || "all agents"}</option>
-          ))}
-        </select>
-        <select
-          className="mono rag-select"
-          value={summaryStatus}
-          onChange={(event) => setSummaryStatus(event.target.value as (typeof STATUS_OPTIONS)[number])}
-        >
-          {STATUS_OPTIONS.map((value) => (
-            <option key={value} value={value}>{value}</option>
-          ))}
-        </select>
-        <button type="button" className="mono rag-refresh" onClick={() => void refreshBaseData()}>
+        {viewMode === "sessions" && (
+          <>
+            <input
+              className="search rag-search"
+              placeholder="Search summaries and redacted trace text"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <div className="rag-segmented rag-search-mode" role="radiogroup" aria-label="Search mode">
+              {(["hybrid", "lexical", "semantic"] as RagSearchMode[]).map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  className={`mono rag-segment ${mode === item ? "active" : ""}`}
+                  onClick={() => setMode(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+            <select
+              className="mono rag-select"
+              value={agent}
+              onChange={(event) => {
+                setAgent(event.target.value as AgentKind | "");
+                setSummaryListLimit(SUMMARY_LIST_PAGE_SIZE);
+              }}
+            >
+              {AGENT_OPTIONS.map((value) => (
+                <option key={value || "all"} value={value}>{value || "all agents"}</option>
+              ))}
+            </select>
+            <select
+              className="mono rag-select"
+              value={summaryStatus}
+              onChange={(event) => {
+                setSummaryStatus(event.target.value as (typeof STATUS_OPTIONS)[number]);
+                setSummaryListLimit(SUMMARY_LIST_PAGE_SIZE);
+              }}
+            >
+              {STATUS_OPTIONS.map((value) => (
+                <option key={value} value={value}>{value}</option>
+              ))}
+            </select>
+          </>
+        )}
+        <button type="button" className="mono rag-refresh" onClick={() => viewMode === "daily" ? void refreshDailyData() : void refreshBaseData()}>
           refresh
         </button>
       </section>
@@ -400,6 +528,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
         <span>{`stale ${status?.sessions.stale ?? 0}`}</span>
         <span>{`failed ${status?.sessions.failed ?? 0}`}</span>
         <span>{`embeddings ${status?.embeddings.status ?? "missing"}`}</span>
+        <span>{`daily ${status?.daily.lastStatus ?? "-"}`}</span>
         <span>{`last ${fmtTime(status?.lastRunAtMs ?? null)}`}</span>
       </section>
 
@@ -412,7 +541,22 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             <span className="mono rag-count">{loading ? "loading" : listCount}</span>
           </div>
           <div className="rag-results-list">
-            {isSearching ? (
+            {viewMode === "daily" ? (
+              dailyToc.map((report) => (
+                <button
+                  key={report.id}
+                  type="button"
+                  className={`rag-result-row ${selectedDailyId === report.id ? "active" : ""}`}
+                  onClick={() => setSelectedDailyId(report.id)}
+                >
+                  <span className="rag-result-main">
+                    <strong>{report.content?.title || report.id}</strong>
+                    <span>{report.status}</span>
+                  </span>
+                  <span className="mono rag-result-time">{fmtTime(report.scheduledAtMs)}</span>
+                </button>
+              ))
+            ) : isSearching ? (
               results.map((result) => (
                 <button
                   key={result.traceId}
@@ -442,25 +586,48 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
                 </button>
               ))
             )}
-            {isSearching && results.length === 0 && <div className="empty">No search results</div>}
-            {!isSearching && tocSummaries.length === 0 && <div className="empty">No summaries</div>}
+            {viewMode === "daily" && dailyToc.length === 0 && <div className="empty">No daily reports</div>}
+            {viewMode !== "daily" && isSearching && results.length === 0 && <div className="empty">No search results</div>}
+            {viewMode !== "daily" && !isSearching && tocSummaries.length === 0 && <div className="empty">No summaries</div>}
           </div>
-          <SummaryProjectionPlot
-            projection={projection}
-            projectionOffsetDays={projectionOffsetDays}
-            onProjectionOffsetDaysChange={setProjectionOffsetDays}
-            selectedTraceId={selectedTraceId}
-            onSelectTrace={selectTraceFromUser}
-          />
+          <div className="rag-result-actions">
+            {canLoadMoreSummaries && (
+              <button
+                type="button"
+                className="mono rag-refresh"
+                onClick={() => setSummaryListLimit((current) => Math.min(SUMMARY_LIST_MAX_LIMIT, current + SUMMARY_LIST_PAGE_SIZE))}
+              >
+                show more
+              </button>
+            )}
+            {viewMode !== "daily" && !projectionVisible && (
+              <button
+                type="button"
+                className="mono rag-refresh"
+                onClick={() => setProjectionVisible(true)}
+              >
+                load map
+              </button>
+            )}
+          </div>
+          {viewMode !== "daily" && projectionVisible && (
+            <SummaryProjectionPlot
+              projection={projection}
+              projectionOffsetDays={projectionOffsetDays}
+              onProjectionOffsetDaysChange={setProjectionOffsetDays}
+              selectedTraceId={selectedTraceId}
+              onSelectTrace={selectTraceFromUser}
+            />
+          )}
         </section>
 
         <section className="panel rag-detail-panel">
           <div className="panel-head rag-detail-head">
             <div>
-              <h2>{selectedSummary?.summary?.title || selectedResult?.title || "Summary detail"}</h2>
-              <div className="detail-head-meta mono">{selectedSummary?.traceId || selectedResult?.traceId || "-"}</div>
+              <h2>{viewMode === "daily" ? selectedDailyReport?.content?.title || "Daily detail" : selectedSummary?.summary?.title || selectedResult?.title || "Summary detail"}</h2>
+              <div className="detail-head-meta mono">{viewMode === "daily" ? selectedDailyReport?.id || "-" : selectedSummary?.traceId || selectedResult?.traceId || "-"}</div>
             </div>
-            {(selectedSummary || selectedResult) && (
+            {viewMode !== "daily" && (selectedSummary || selectedResult) && (
               <button
                 type="button"
                 className="mono rag-refresh"
@@ -470,7 +637,33 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
               </button>
             )}
           </div>
-          {selectedSummary?.summary ? (
+          {viewMode === "daily" && selectedDailyReport?.content ? (
+            <div className="rag-detail-scroll">
+              <section className="rag-detail-section">
+                <h3>Window</h3>
+                <p>{selectedDailyReport.content.windowLabel}</p>
+              </section>
+              <section className="rag-detail-section">
+                <h3>Overview</h3>
+                <p>{selectedDailyReport.content.overview}</p>
+              </section>
+              <SectionList title="Completed Work" values={selectedDailyReport.content.completedWork} />
+              <SectionList title="Notable Sessions" values={selectedDailyReport.content.notableSessions} />
+              <SectionList title="Files / Projects" values={selectedDailyReport.content.filesOrProjects} />
+              <SectionList title="Tools / Workflows" values={selectedDailyReport.content.toolsOrWorkflows} />
+              <SectionList title="Blockers" values={selectedDailyReport.content.blockers} />
+              <SectionList title="Followups" values={selectedDailyReport.content.followups} />
+            </div>
+          ) : viewMode === "daily" && selectedDailyReport ? (
+            <div className="rag-detail-scroll">
+              <section className="rag-detail-section">
+                <h3>Status</h3>
+                <p>{selectedDailyReport.error || selectedDailyReport.status}</p>
+              </section>
+            </div>
+          ) : viewMode === "daily" ? (
+            <div className="empty">Select a daily report.</div>
+          ) : selectedSummary?.summary ? (
             <div className="rag-detail-scroll">
               <section className="rag-detail-section">
                 <h3>Goal</h3>

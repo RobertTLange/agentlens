@@ -3,6 +3,8 @@ import path from "node:path";
 import type {
   AgentKind,
   AppConfig,
+  DailyWorkSummaryContent,
+  DailyWorkSummaryRecord,
   RagDocumentKind,
   RagRefreshStatus,
   RagSummaryRecord,
@@ -30,6 +32,21 @@ export interface RagSessionRow {
   summary_text: string | null;
   summary_model: string | null;
   summary_generated_at_ms: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface DailyWorkSummaryRow {
+  id: string;
+  window_start_ms: number;
+  window_end_ms: number;
+  scheduled_at_ms: number;
+  status: RagRefreshStatus;
+  content_json: string | null;
+  summary_text: string | null;
+  model: string | null;
+  error: string | null;
+  internal_summary_session_ids_json: string | null;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -117,6 +134,25 @@ function deserializeSummary(value: string | null): RagTraceSummaryContent | null
   }
 }
 
+function deserializeDailySummary(value: string | null): DailyWorkSummaryContent | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as DailyWorkSummaryContent;
+  } catch {
+    return null;
+  }
+}
+
+function deserializeStringArray(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function toSummaryRecord(row: RagSessionRow): RagSummaryRecord {
   return {
     traceId: row.trace_id,
@@ -138,6 +174,23 @@ export function toSummaryRecord(row: RagSessionRow): RagSummaryRecord {
     summaryText: row.summary_text ?? "",
     summaryModel: row.summary_model ?? "",
     summaryGeneratedAtMs: row.summary_generated_at_ms,
+    createdAtMs: row.created_at_ms,
+    updatedAtMs: row.updated_at_ms,
+  };
+}
+
+export function toDailySummaryRecord(row: DailyWorkSummaryRow): DailyWorkSummaryRecord {
+  return {
+    id: row.id,
+    windowStartMs: row.window_start_ms,
+    windowEndMs: row.window_end_ms,
+    scheduledAtMs: row.scheduled_at_ms,
+    status: row.status,
+    content: deserializeDailySummary(row.content_json),
+    summaryText: row.summary_text ?? "",
+    model: row.model ?? "",
+    error: row.error ?? "",
+    internalSummarySessionIds: deserializeStringArray(row.internal_summary_session_ids_json),
     createdAtMs: row.created_at_ms,
     updatedAtMs: row.updated_at_ms,
   };

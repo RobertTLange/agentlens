@@ -3116,23 +3116,35 @@ body {
 }
 
 .rag-toolbar {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto auto auto;
+  display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
   align-items: center;
+  min-width: 0;
 }
 
 .rag-search {
+  flex: 1 1 280px;
   min-width: 0;
+  height: 34px;
 }
 
 .rag-segmented {
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(72px, 1fr));
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
   background: var(--panel);
+  flex: 0 0 auto;
+}
+
+.rag-view-toggle {
+  grid-template-columns: repeat(2, minmax(84px, 1fr));
+  width: 220px;
+}
+
+.rag-search-mode {
+  grid-template-columns: repeat(3, minmax(68px, 1fr));
 }
 
 .rag-segment,
@@ -3163,6 +3175,7 @@ body {
 .rag-select {
   border-radius: 8px;
   padding: 0 10px;
+  flex: 0 0 auto;
 }
 
 .rag-status-strip {
@@ -3194,7 +3207,7 @@ body {
 
 .rag-results-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
 }
 
 .rag-results-list,
@@ -3243,6 +3256,15 @@ body {
   font-size: 0.68rem;
   white-space: nowrap;
   text-align: right;
+}
+
+.rag-result-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  min-height: 0;
 }
 
 .rag-result-main span {
@@ -3303,7 +3325,7 @@ body {
 .rag-projection {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  min-height: 0;
+  min-height: 240px;
   border-top: 1px solid var(--border);
   padding: 10px;
 }
@@ -3353,7 +3375,7 @@ body {
   position: relative;
   isolation: isolate;
   height: 100%;
-  min-height: 0;
+  min-height: 190px;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -3941,11 +3963,17 @@ body {
 
 @media (max-width: 900px) {
   .rag-toolbar {
+    display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .rag-segmented {
     grid-column: span 2;
+  }
+
+  .rag-view-toggle,
+  .rag-search-mode {
+    width: auto;
   }
 
   .rag-layout {
