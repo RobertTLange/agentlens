@@ -2276,8 +2276,31 @@ export function resolveDefaultWebDistPath(packagedWebDistPath: string, monorepoW
   return monorepoWebDistPath;
 }
 
-function analysisCacheKey(version: number, agent: string | undefined, since: number | undefined): string {
-  return `v=${version}|agent=${agent ?? ""}|since=${since ?? ""}`;
+function analysisSummaryFingerprint(traceIndex: TraceIndex, agent: string | undefined, since: number | undefined, nowMsValue: number): string {
+  const sinceCutoff = since && since > 0 ? nowMsValue - since : 0;
+  const hash = createHash("sha256");
+  const summaries = traceIndex
+    .getSummaries()
+    .filter((summary) => (agent ? summary.agent === agent : true))
+    .filter((summary) => (sinceCutoff > 0 ? (summary.lastEventTs ?? summary.mtimeMs) >= sinceCutoff : true));
+
+  for (const summary of summaries) {
+    hash.update([
+      summary.id,
+      summary.agent,
+      summary.sessionId,
+      summary.path,
+      summary.eventCount,
+      summary.mtimeMs,
+      summary.lastEventTs ?? "",
+    ].join("\0"));
+    hash.update("\n");
+  }
+  return hash.digest("hex").slice(0, 16);
+}
+
+function analysisCacheKey(fingerprint: string, agent: string | undefined, since: number | undefined): string {
+  return `fp=${fingerprint}|agent=${agent ?? ""}|since=${since ?? ""}`;
 }
 
 function withAnalysisRuntime(analysis: AnalysisResponse, runtime: AnalysisRuntimeInfo): AnalysisResponse {
@@ -2501,83 +2524,83 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     try {
       const agent = parseAgentKind(query.agent);
       const since = parseSinceWindowMs(query.since);
-      const version = traceIndex.getStreamVersion();
-      const key = analysisCacheKey(version, agent, since);
       const nowMsValue = Date.now();
-	      const cached = analysisCache.get(key);
-	      if (cached && cached.expiresAtMs > nowMsValue) {
-	        return withAnalysisRuntime(cached.value, {
-	          cache: "hit",
-	          buildDurationMs: 0,
-	          cacheAgeMs: Math.max(0, nowMsValue - cached.cachedAtMs),
-	          traceCount: cached.value.summary.traceCount,
-	          sinceMs: since ?? null,
-	          agent: agent ?? null,
-	        });
-	      }
-	      if (cached && cached.staleExpiresAtMs > nowMsValue) {
-	        if (!analysisInFlight.has(key)) {
-	          const refreshPromise = buildAnalysisAsync(traceIndex, {
-	            ...(agent ? { agent } : {}),
-	            ...(since !== undefined ? { since } : {}),
-	            yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
-	          })
-	            .then((analysis) => {
-	              storeAnalysisCache(analysisCache, key, analysis, Date.now());
-	              return analysis;
-	            })
-	            .finally(() => {
-	              analysisInFlight.delete(key);
-	            });
-	          analysisInFlight.set(key, refreshPromise);
-	        }
-	        return withAnalysisRuntime(cached.value, {
-	          cache: "stale",
-	          buildDurationMs: 0,
-	          cacheAgeMs: Math.max(0, nowMsValue - cached.cachedAtMs),
-	          traceCount: cached.value.summary.traceCount,
-	          sinceMs: since ?? null,
-	          agent: agent ?? null,
-	        });
-	      }
+      const fingerprint = analysisSummaryFingerprint(traceIndex, agent, since, nowMsValue);
+      const key = analysisCacheKey(fingerprint, agent, since);
+      const cached = analysisCache.get(key);
+      if (cached && cached.expiresAtMs > nowMsValue) {
+        return withAnalysisRuntime(cached.value, {
+          cache: "hit",
+          buildDurationMs: 0,
+          cacheAgeMs: Math.max(0, nowMsValue - cached.cachedAtMs),
+          traceCount: cached.value.summary.traceCount,
+          sinceMs: since ?? null,
+          agent: agent ?? null,
+        });
+      }
+      if (cached && cached.staleExpiresAtMs > nowMsValue) {
+        if (!analysisInFlight.has(key)) {
+          const refreshPromise = buildAnalysisAsync(traceIndex, {
+            ...(agent ? { agent } : {}),
+            ...(since !== undefined ? { since } : {}),
+            yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
+          })
+            .then((analysis) => {
+              storeAnalysisCache(analysisCache, key, analysis, Date.now());
+              return analysis;
+            })
+            .finally(() => {
+              analysisInFlight.delete(key);
+            });
+          analysisInFlight.set(key, refreshPromise);
+        }
+        return withAnalysisRuntime(cached.value, {
+          cache: "stale",
+          buildDurationMs: 0,
+          cacheAgeMs: Math.max(0, nowMsValue - cached.cachedAtMs),
+          traceCount: cached.value.summary.traceCount,
+          sinceMs: since ?? null,
+          agent: agent ?? null,
+        });
+      }
 
-	      const existing = analysisInFlight.get(key);
-	      if (existing) {
-	        const waitedAtMs = Date.now();
-	        const analysis = await existing;
-	        return withAnalysisRuntime(analysis, {
-	          cache: "inflight",
-	          buildDurationMs: Math.max(0, Date.now() - waitedAtMs),
-	          cacheAgeMs: null,
-	          traceCount: analysis.summary.traceCount,
-	          sinceMs: since ?? null,
-	          agent: agent ?? null,
-	        });
-	      }
+      const existing = analysisInFlight.get(key);
+      if (existing) {
+        const waitedAtMs = Date.now();
+        const analysis = await existing;
+        return withAnalysisRuntime(analysis, {
+          cache: "inflight",
+          buildDurationMs: Math.max(0, Date.now() - waitedAtMs),
+          cacheAgeMs: null,
+          traceCount: analysis.summary.traceCount,
+          sinceMs: since ?? null,
+          agent: agent ?? null,
+        });
+      }
 
-	      const buildStartedAtMs = Date.now();
-	      const buildPromise = buildAnalysisAsync(traceIndex, {
-	        ...(agent ? { agent } : {}),
-	        ...(since !== undefined ? { since } : {}),
-	        yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
-	      })
-	        .then((analysis) => {
-	          storeAnalysisCache(analysisCache, key, analysis, Date.now());
-	          return analysis;
-	        })
+      const buildStartedAtMs = Date.now();
+      const buildPromise = buildAnalysisAsync(traceIndex, {
+        ...(agent ? { agent } : {}),
+        ...(since !== undefined ? { since } : {}),
+        yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
+      })
+        .then((analysis) => {
+          storeAnalysisCache(analysisCache, key, analysis, Date.now());
+          return analysis;
+        })
         .finally(() => {
           analysisInFlight.delete(key);
         });
-	      analysisInFlight.set(key, buildPromise);
-	      const analysis = await buildPromise;
-	      return withAnalysisRuntime(analysis, {
-	        cache: "miss",
-	        buildDurationMs: Math.max(0, Date.now() - buildStartedAtMs),
-	        cacheAgeMs: null,
-	        traceCount: analysis.summary.traceCount,
-	        sinceMs: since ?? null,
-	        agent: agent ?? null,
-	      });
+      analysisInFlight.set(key, buildPromise);
+      const analysis = await buildPromise;
+      return withAnalysisRuntime(analysis, {
+        cache: "miss",
+        buildDurationMs: Math.max(0, Date.now() - buildStartedAtMs),
+        cacheAgeMs: null,
+        traceCount: analysis.summary.traceCount,
+        sinceMs: since ?? null,
+        agent: agent ?? null,
+      });
     } catch (error) {
       reply.code(400);
       return { error: asErrorMessage(error) };

@@ -1441,6 +1441,31 @@ describe("server api", () => {
     await server.close();
   });
 
+  it("reuses analysis cache across stream version-only changes", async () => {
+    const fixture = await buildAnalysisApiFixture();
+    const streamVersionSpy = vi
+      .spyOn(fixture.index, "getStreamVersion")
+      .mockReturnValueOnce(1)
+      .mockReturnValueOnce(2);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const first = await server.inject({ method: "GET", url: "/api/analysis?since=7d" });
+    const second = await server.inject({ method: "GET", url: "/api/analysis?since=7d" });
+
+    expect(first.statusCode).toBe(200);
+    expect(first.json().runtime.cache).toBe("miss");
+    expect(second.statusCode).toBe(200);
+    expect(second.json().runtime.cache).toBe("hit");
+    expect(streamVersionSpy).not.toHaveBeenCalled();
+
+    streamVersionSpy.mockRestore();
+    await server.close();
+  });
+
   it("returns a warming response for analysis before inspector readiness", async () => {
     const fixture = await buildAnalysisApiFixture();
     const startup: IndexStartupStatus = {
