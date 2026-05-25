@@ -1393,7 +1393,15 @@ describe("server api", () => {
       inventory: {
         configuredSkills: ["clean-code"],
       },
+      runtime: {
+        cache: "miss",
+        cacheAgeMs: null,
+        agent: null,
+        sinceMs: null,
+        traceCount: 2,
+      },
     });
+    expect(response.json().runtime.buildDurationMs).toEqual(expect.any(Number));
 
     const codexOnly = await server.inject({ method: "GET", url: "/api/analysis?agent=codex" });
     expect(codexOnly.statusCode).toBe(200);
@@ -1406,7 +1414,16 @@ describe("server api", () => {
     expect(recentOnly.statusCode).toBe(200);
     expect(recentOnly.json()).toMatchObject({
       summary: { traceCount: 1, subagentSpawnCount: 1 },
+      runtime: { cache: "miss", sinceMs: 604_800_000, traceCount: 1 },
     });
+
+    const cachedRecent = await server.inject({ method: "GET", url: "/api/analysis?since=7d" });
+    expect(cachedRecent.statusCode).toBe(200);
+    expect(cachedRecent.json()).toMatchObject({
+      summary: { traceCount: 1, subagentSpawnCount: 1 },
+      runtime: { cache: "hit", sinceMs: 604_800_000, traceCount: 1 },
+    });
+    expect(cachedRecent.json().runtime.cacheAgeMs).toEqual(expect.any(Number));
 
     const invalid = await server.inject({ method: "GET", url: "/api/analysis?agent=bad" });
     expect(invalid.statusCode).toBe(400);

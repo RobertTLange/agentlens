@@ -483,6 +483,17 @@ export interface AnalysisSummary {
   observedUnconfiguredSkillCount: number;
 }
 
+export type AnalysisCacheState = "hit" | "miss" | "inflight";
+
+export interface AnalysisRuntimeInfo {
+  cache: AnalysisCacheState;
+  buildDurationMs: number;
+  cacheAgeMs: number | null;
+  traceCount: number;
+  sinceMs: number | null;
+  agent: AgentKind | null;
+}
+
 export interface AnalysisResponse {
   summary: AnalysisSummary;
   inventory: AnalysisInventorySummary;
@@ -490,6 +501,7 @@ export interface AnalysisResponse {
   skills: AnalysisSkillUsageRow[];
   subagents: AnalysisSubagentUsageRow[];
   topSessions: AnalysisTopSessionRow[];
+  runtime?: AnalysisRuntimeInfo;
 }
 
 export interface TraceTocItem {

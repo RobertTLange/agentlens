@@ -23,6 +23,21 @@ function fmtTime(ms: number | null): string {
   return new Date(ms).toLocaleString();
 }
 
+function fmtDuration(ms: number): string {
+  if (ms < 1_000) return `${Math.max(0, Math.round(ms))}ms`;
+  return `${(ms / 1_000).toFixed(1)}s`;
+}
+
+function fmtRuntime(analysis: AnalysisResponse | null): string {
+  if (!analysis?.runtime) return `generated ${fmtTime(analysis?.summary.generatedAtMs ?? null)}`;
+  const cacheLabel = analysis.runtime.cache === "hit"
+    ? "cache hit"
+    : analysis.runtime.cache === "inflight"
+      ? "joined build"
+      : `built in ${fmtDuration(analysis.runtime.buildDurationMs)}`;
+  return `generated ${fmtTime(analysis.summary.generatedAtMs)} · ${cacheLabel}`;
+}
+
 function fmtNamedCounts(rows: NamedCount[]): string {
   if (rows.length === 0) return "-";
   return rows.map((row) => `${row.name} ${row.count}`).join(", ");
@@ -250,7 +265,7 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
             onChange={(event) => setCustomSince(event.target.value)}
           />
         )}
-        <span className="mono analysis-loading">{loading ? "loading" : `generated ${fmtTime(summary?.generatedAtMs ?? null)}`}</span>
+        <span className="mono analysis-loading">{loading ? "loading" : fmtRuntime(analysis)}</span>
       </section>
 
       {error && <div className="hero-warning mono">{error}</div>}

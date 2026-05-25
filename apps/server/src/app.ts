@@ -11,6 +11,7 @@ import type {
   ActivityHydrationProgress,
   ActivityHeatmapMetric,
   AnalysisResponse,
+  AnalysisRuntimeInfo,
   AppConfig,
   EventsAppendedLiveEnvelope,
   IndexStartupStatus,
@@ -149,6 +150,7 @@ interface RunningProcess {
 interface CurrentUserIdentity { username: string; uid: string }
 
 interface AnalysisCacheEntry {
+  cachedAtMs: number;
   expiresAtMs: number;
   value: AnalysisResponse;
 }
@@ -2276,6 +2278,10 @@ function analysisCacheKey(version: number, agent: string | undefined, since: num
   return `v=${version}|agent=${agent ?? ""}|since=${since ?? ""}`;
 }
 
+function withAnalysisRuntime(analysis: AnalysisResponse, runtime: AnalysisRuntimeInfo): AnalysisResponse {
+  return { ...analysis, runtime };
+}
+
 function pruneAnalysisCache(cache: Map<string, AnalysisCacheEntry>, nowMsValue: number): void {
   if (cache.size < 64) return;
   for (const [key, entry] of cache) {
@@ -2481,34 +2487,61 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
       const version = traceIndex.getStreamVersion();
       const key = analysisCacheKey(version, agent, since);
       const nowMsValue = Date.now();
-      const cached = analysisCache.get(key);
-      if (cached && cached.expiresAtMs > nowMsValue) {
-        return cached.value;
-      }
+	      const cached = analysisCache.get(key);
+	      if (cached && cached.expiresAtMs > nowMsValue) {
+	        return withAnalysisRuntime(cached.value, {
+	          cache: "hit",
+	          buildDurationMs: 0,
+	          cacheAgeMs: Math.max(0, nowMsValue - cached.cachedAtMs),
+	          traceCount: cached.value.summary.traceCount,
+	          sinceMs: since ?? null,
+	          agent: agent ?? null,
+	        });
+	      }
 
-      const existing = analysisInFlight.get(key);
-      if (existing) {
-        return await existing;
-      }
+	      const existing = analysisInFlight.get(key);
+	      if (existing) {
+	        const waitedAtMs = Date.now();
+	        const analysis = await existing;
+	        return withAnalysisRuntime(analysis, {
+	          cache: "inflight",
+	          buildDurationMs: Math.max(0, Date.now() - waitedAtMs),
+	          cacheAgeMs: null,
+	          traceCount: analysis.summary.traceCount,
+	          sinceMs: since ?? null,
+	          agent: agent ?? null,
+	        });
+	      }
 
-      const buildPromise = buildAnalysisAsync(traceIndex, {
-        ...(agent ? { agent } : {}),
-        ...(since !== undefined ? { since } : {}),
-        yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
-      })
-        .then((analysis) => {
-          analysisCache.set(key, {
-            value: analysis,
-            expiresAtMs: Date.now() + DEFAULT_ANALYSIS_CACHE_TTL_MS,
-          });
-          pruneAnalysisCache(analysisCache, Date.now());
-          return analysis;
-        })
+	      const buildStartedAtMs = Date.now();
+	      const buildPromise = buildAnalysisAsync(traceIndex, {
+	        ...(agent ? { agent } : {}),
+	        ...(since !== undefined ? { since } : {}),
+	        yieldEvery: ANALYSIS_BUILD_YIELD_EVERY,
+	      })
+	        .then((analysis) => {
+	          const cachedAtMs = Date.now();
+	          analysisCache.set(key, {
+	            value: analysis,
+	            cachedAtMs,
+	            expiresAtMs: cachedAtMs + DEFAULT_ANALYSIS_CACHE_TTL_MS,
+	          });
+	          pruneAnalysisCache(analysisCache, cachedAtMs);
+	          return analysis;
+	        })
         .finally(() => {
           analysisInFlight.delete(key);
         });
-      analysisInFlight.set(key, buildPromise);
-      return await buildPromise;
+	      analysisInFlight.set(key, buildPromise);
+	      const analysis = await buildPromise;
+	      return withAnalysisRuntime(analysis, {
+	        cache: "miss",
+	        buildDurationMs: Math.max(0, Date.now() - buildStartedAtMs),
+	        cacheAgeMs: null,
+	        traceCount: analysis.summary.traceCount,
+	        sinceMs: since ?? null,
+	        agent: agent ?? null,
+	      });
     } catch (error) {
       reply.code(400);
       return { error: asErrorMessage(error) };

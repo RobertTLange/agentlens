@@ -71,6 +71,14 @@ function makeAnalysisResponse(overrides: Partial<AnalysisResponse> = {}): Analys
         topSubagents: [{ name: "worker", count: 1 }],
       },
     ],
+    runtime: {
+      cache: "miss",
+      buildDurationMs: 42,
+      cacheAgeMs: null,
+      traceCount: 2,
+      sinceMs: 604_800_000,
+      agent: null,
+    },
   };
   return {
     ...base,
@@ -152,6 +160,7 @@ describe("AnalysisView", () => {
     expect(document.querySelector(".analysis-subagent-bar")).toBeTruthy();
     expect(document.querySelector(".analysis-session-card")).toBeTruthy();
     expect(document.body.textContent).toContain("2 total uses");
+    expect(document.body.textContent).toContain("built in 42ms");
     expect(document.body.textContent).toContain("explicit 1");
     expect(document.body.textContent).toContain("inferred 1");
     expect(document.body.textContent).toContain("unused-skill");
