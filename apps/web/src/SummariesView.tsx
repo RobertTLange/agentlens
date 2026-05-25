@@ -289,6 +289,15 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     setSelectedTraceId(traceId);
   }
 
+  function loadMoreSummariesNearBottom(scroller: HTMLDivElement): void {
+    if (viewMode === "daily" || isSearching) return;
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 96) return;
+    setSummaryListLimit((current) => {
+      if (tocSummaries.length < current || current >= SUMMARY_LIST_MAX_LIMIT) return current;
+      return Math.min(SUMMARY_LIST_MAX_LIMIT, current + SUMMARY_LIST_PAGE_SIZE);
+    });
+  }
+
   async function refreshProjectionData(requestId: number): Promise<void> {
     const projectionParams = new URLSearchParams({ status: summaryStatus, limit: String(PROJECTION_LIMIT) });
     if (agent) projectionParams.set("agent", agent);
@@ -540,7 +549,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             <h2>{listTitle}</h2>
             <span className="mono rag-count">{loading ? "loading" : listCount}</span>
           </div>
-          <div className="rag-results-list">
+          <div className="rag-results-list" onScroll={(event) => loadMoreSummariesNearBottom(event.currentTarget)}>
             {viewMode === "daily" ? (
               dailyToc.map((report) => (
                 <button
@@ -590,17 +599,8 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             {viewMode !== "daily" && isSearching && results.length === 0 && <div className="empty">No search results</div>}
             {viewMode !== "daily" && !isSearching && tocSummaries.length === 0 && <div className="empty">No summaries</div>}
           </div>
-          <div className="rag-result-actions">
-            {canLoadMoreSummaries && (
-              <button
-                type="button"
-                className="mono rag-refresh"
-                onClick={() => setSummaryListLimit((current) => Math.min(SUMMARY_LIST_MAX_LIMIT, current + SUMMARY_LIST_PAGE_SIZE))}
-              >
-                show more
-              </button>
-            )}
-            {viewMode !== "daily" && !projectionVisible && (
+          {viewMode !== "daily" && !projectionVisible && (
+            <div className="rag-result-actions">
               <button
                 type="button"
                 className="mono rag-refresh"
@@ -608,8 +608,8 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
               >
                 load map
               </button>
-            )}
-          </div>
+            </div>
+          )}
           {viewMode !== "daily" && projectionVisible && (
             <SummaryProjectionPlot
               projection={projection}

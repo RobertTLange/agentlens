@@ -1486,7 +1486,7 @@ describe("App sessions list live motion", () => {
     expect(document.body.textContent).toContain("Parser behavior fixed");
   });
 
-  it("bounds the initial summaries render and loads more on request", async () => {
+  it("bounds the initial summaries render and loads more while scrolling", async () => {
     const baseMs = Date.UTC(2026, 4, 24, 12);
     ragSummaries = Array.from({ length: 260 }, (_, index) => makeRagSummary(`trace-page-${index}`, {
       lastEventTs: baseMs - index,
@@ -1506,9 +1506,14 @@ describe("App sessions list live motion", () => {
     const firstSummaryRequest = requestedUrls.find((url) => url.includes("/api/rag/summaries?status=complete"));
     expect(new URL(firstSummaryRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("100");
 
-    const showMore = Array.from(document.querySelectorAll("button")).find((node) => node.textContent === "show more");
-    if (!(showMore instanceof HTMLButtonElement)) throw new Error("missing show more button");
-    fireEvent.click(showMore);
+    expect(Array.from(document.querySelectorAll("button")).some((node) => node.textContent === "show more")).toBe(false);
+
+    const summariesScroller = document.querySelector(".rag-results-list");
+    if (!(summariesScroller instanceof HTMLDivElement)) throw new Error("missing summaries scroller");
+    setEventsScrollMetrics(summariesScroller, { clientHeight: 240, scrollHeight: 2_400, scrollTop: 2_080 });
+    act(() => {
+      summariesScroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
 
     await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(200));
     const summaryLimits = requestedUrls
