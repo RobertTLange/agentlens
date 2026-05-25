@@ -135,6 +135,15 @@ export interface RagConfig {
   embeddingBatchSize: number;
   searchCandidateMultiplier: number;
   rrfK: number;
+  dailySummary: RagDailySummaryConfig;
+}
+
+export interface RagDailySummaryConfig {
+  enabled: boolean;
+  scheduleHourLocal: number;
+  windowHours: number;
+  retryIntervalMs: number;
+  maxPromptBytes: number;
 }
 
 export interface AnalysisConfig {
@@ -296,6 +305,34 @@ export interface RagSummaryRecord {
   updatedAtMs: number;
 }
 
+export interface DailyWorkSummaryContent {
+  title: string;
+  windowLabel: string;
+  overview: string;
+  completedWork: string[];
+  notableSessions: string[];
+  filesOrProjects: string[];
+  toolsOrWorkflows: string[];
+  blockers: string[];
+  followups: string[];
+  searchKeywords: string[];
+}
+
+export interface DailyWorkSummaryRecord {
+  id: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  scheduledAtMs: number;
+  status: RagRefreshStatus;
+  content: DailyWorkSummaryContent | null;
+  summaryText: string;
+  model: string;
+  error: string;
+  internalSummarySessionIds: string[];
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
 export interface RagSearchResult {
   traceId: string;
   sessionId: string;
@@ -318,6 +355,13 @@ export interface RagIndexStatus {
   dbPath: string;
   daemon: { running: boolean; pid: number | null; pidPath: string; logPath: string };
   sessions: { total: number; complete: number; pending: number; stale: number; failed: number; skipped: number };
+  daily: {
+    enabled: boolean;
+    lastScheduledAtMs: number | null;
+    lastStatus: RagRefreshStatus | null;
+    lastGeneratedAtMs: number | null;
+    nextRunAtMs: number | null;
+  };
   documents: number;
   embeddings: {
     status: RagEmbeddingStatus;
@@ -339,6 +383,10 @@ export interface RagSearchResponse {
 
 export interface RagSummaryListResponse {
   summaries: RagSummaryRecord[];
+}
+
+export interface DailyWorkSummaryListResponse {
+  reports: DailyWorkSummaryRecord[];
 }
 
 export interface RagProjectionItem {

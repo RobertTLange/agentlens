@@ -8,6 +8,7 @@ import type {
   ActivityHydrationProgress,
   ActivityUsageSummary,
   AnalysisResponse,
+  DailyWorkSummaryRecord,
   EventKind,
   NormalizedEvent,
   OverviewStats,
@@ -147,10 +148,48 @@ function makeRagStatus(): RagIndexStatus {
     dbPath: "/tmp/rag.db",
     daemon: { running: true, pid: 123, pidPath: "/tmp/rag.pid", logPath: "/tmp/rag.log" },
     sessions: { total: 1, complete: 1, pending: 0, stale: 0, failed: 0, skipped: 0 },
+    daily: {
+      enabled: true,
+      lastScheduledAtMs: 1_700_000_000_000,
+      lastStatus: "complete",
+      lastGeneratedAtMs: 1_700_000_001_000,
+      nextRunAtMs: 1_700_086_400_000,
+    },
     documents: 2,
     embeddings: { status: "unavailable", model: "sentence-transformers/all-MiniLM-L6-v2", dimension: null, count: 0 },
     lastRunAtMs: 1_700_000_000_000,
     lastRunError: "",
+  };
+}
+
+function makeDailyReport(id = "daily-1700000000000", overrides: Partial<DailyWorkSummaryRecord> = {}): DailyWorkSummaryRecord {
+  const contentOverrides = overrides.content ?? {};
+  return {
+    id,
+    windowStartMs: 1_699_913_600_000,
+    windowEndMs: 1_700_000_000_000,
+    scheduledAtMs: 1_700_000_000_000,
+    status: "complete",
+    summaryText: "Completed parser work",
+    model: "fake",
+    error: "",
+    internalSummarySessionIds: [],
+    createdAtMs: 1_700_000_001_000,
+    updatedAtMs: 1_700_000_001_000,
+    ...overrides,
+    content: overrides.content === null ? null : {
+      title: "Daily parser work",
+      windowLabel: "Feb 11 06:00 - Feb 12 06:00",
+      overview: "Parser work completed and verified.",
+      completedWork: ["Fixed parser behavior"],
+      notableSessions: ["trace-a"],
+      filesOrProjects: ["packages/core"],
+      toolsOrWorkflows: ["vitest"],
+      blockers: [],
+      followups: ["Watch CI"],
+      searchKeywords: ["parser"],
+      ...contentOverrides,
+    },
   };
 }
 
@@ -993,6 +1032,9 @@ let tracePagesById: Record<string, TracePage>;
 let overview: OverviewStats;
 let rafQueue: FrameRequestCallback[];
 let requestedUrls: string[];
+let ragSummaries: RagSummaryRecord[];
+let dailyReports: DailyWorkSummaryRecord[];
+let ragProjectionSummaries: RagSummaryRecord[];
 let stopResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let openResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
 let inputResponsesByTraceId: Record<string, { status: number; body: Record<string, unknown> }>;
@@ -1028,6 +1070,18 @@ beforeEach(() => {
   );
   rafQueue = [];
   requestedUrls = [];
+  ragSummaries = [
+    makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
+    makeRagSummary("trace-b", {
+      lastEventTs: 8_000,
+      mtimeMs: 7_900,
+      summaryGeneratedAtMs: 5_000,
+      updatedAtMs: 5_100,
+      summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
+    }),
+  ];
+  dailyReports = [makeDailyReport()];
+  ragProjectionSummaries = ragSummaries;
   stopResponsesByTraceId = {};
   openResponsesByTraceId = {};
   inputResponsesByTraceId = {};
@@ -1151,37 +1205,49 @@ beforeEach(() => {
           { status: 200 },
         );
       }
+      if (url.includes("/api/rag/daily/reports/")) {
+        const id = decodeURIComponent(url.match(/\/api\/rag\/daily\/reports\/([^?]+)/)?.[1] ?? "");
+        const report = id === "latest" ? dailyReports[0] : dailyReports.find((item) => item.id === id || String(item.scheduledAtMs) === id);
+        if (report) {
+          return new Response(JSON.stringify({ report }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "daily report not found" }), { status: 404 });
+      }
+      if (url.includes("/api/rag/daily/reports")) {
+        return new Response(JSON.stringify({ reports: dailyReports }), { status: 200 });
+      }
       if (url.includes("/api/rag/projection")) {
-        const summaries = [
-          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
-          makeRagSummary("trace-b", {
-            lastEventTs: 8_000,
-            mtimeMs: 7_900,
-            summaryGeneratedAtMs: 5_000,
-            updatedAtMs: 5_100,
-            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
-          }),
-        ];
-        return new Response(JSON.stringify(makeRagProjection(summaries)), { status: 200 });
+        return new Response(JSON.stringify(makeRagProjection(ragProjectionSummaries)), { status: 200 });
       }
       if (url.includes("/api/rag/summaries/")) {
         const traceId = decodeURIComponent(url.match(/\/api\/rag\/summaries\/([^?]+)/)?.[1] ?? "");
-        if (traceId === "trace-a") {
-          return new Response(JSON.stringify({ summary: makeRagSummary(traceId) }), { status: 200 });
+        const summary = ragSummaries.find((item) => item.traceId === traceId) ?? (traceId === "trace-a" ? makeRagSummary(traceId) : null);
+        if (summary) {
+          return new Response(JSON.stringify({ summary }), { status: 200 });
         }
         return new Response(JSON.stringify({ error: "summary not found" }), { status: 404 });
       }
       if (url.includes("/api/rag/summaries")) {
-        const summaries = [
-          makeRagSummary("trace-a", { lastEventTs: 4_000, mtimeMs: 3_900, summaryGeneratedAtMs: 6_000, updatedAtMs: 6_100 }),
-          makeRagSummary("trace-b", {
-            lastEventTs: 8_000,
-            mtimeMs: 7_900,
-            summaryGeneratedAtMs: 5_000,
-            updatedAtMs: 5_100,
-            summary: { ...makeRagSummary("trace-b").summary!, title: "Newer trace summary", outcome: "Second detail" },
-          }),
-        ];
+        const params = new URL(url, "http://localhost").searchParams;
+        const limit = Number(params.get("limit") ?? ragSummaries.length);
+        const compact = params.get("summary") === "title";
+        const summaries = ragSummaries.slice(0, limit).map((summary) => compact && summary.summary ? {
+          ...summary,
+          summaryText: "",
+          summary: {
+            title: summary.summary.title,
+            userGoal: "",
+            outcome: summary.summary.outcome,
+            keySteps: [],
+            filesOrProjects: [],
+            toolsUsed: [],
+            errorsOrBlockers: [],
+            decisions: [],
+            workflowObservations: [],
+            followups: [],
+            searchKeywords: [],
+          },
+        } : summary);
         return new Response(JSON.stringify({ summaries }), { status: 200 });
       }
       if (method === "POST" && url.includes("/api/trace/") && url.includes("/stop")) {
@@ -1349,6 +1415,29 @@ describe("App sessions list live motion", () => {
     expect(document.body.textContent).toContain("orphan-only snippet");
   });
 
+  it("renders daily report list and detail without loading projection search", async () => {
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelector(".rag-view")).toBeTruthy());
+    const dailyTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "daily");
+    if (!(dailyTab instanceof HTMLButtonElement)) throw new Error("missing daily tab");
+    fireEvent.click(dailyTab);
+
+    await waitFor(() => expect(document.body.textContent).toContain("Daily parser work"));
+    expect(document.body.textContent).toContain("Parser work completed and verified.");
+    expect(document.body.textContent).toContain("Completed Work");
+    expect(requestedUrls.some((url) => url.includes("/api/rag/daily/reports"))).toBe(true);
+    const dailyIndex = requestedUrls.findIndex((url) => url.includes("/api/rag/daily/reports"));
+    const projectionAfterDaily = requestedUrls.slice(dailyIndex).some((url) => url.includes("/api/rag/projection"));
+    expect(projectionAfterDaily).toBe(false);
+    expect(document.querySelector(".rag-search")).toBeNull();
+  });
+
   it("renders the summaries ToC by original trace time and syncs plot selection", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
@@ -1359,7 +1448,9 @@ describe("App sessions list live motion", () => {
 
     await waitFor(() => expect(document.querySelectorAll(".rag-result-row").length).toBe(2));
     const summaryListRequest = requestedUrls.find((url) => url.includes("/api/rag/summaries?status=complete"));
-    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("5000");
+    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("100");
+    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("summary_text")).toBe("0");
+    expect(new URL(summaryListRequest ?? "", "http://localhost").searchParams.get("summary")).toBe("title");
     const rows = Array.from(document.querySelectorAll(".rag-result-row"));
     expect(rows[0]?.textContent).toContain("Newer trace summary");
     expect(rows[1]?.textContent).toContain("Parser regression");
@@ -1368,10 +1459,14 @@ describe("App sessions list live motion", () => {
     expect(rowMetaLabels).toEqual([]);
     expect(rows[0]?.textContent).not.toContain("Second detail");
     expect(rows[0]?.textContent).not.toContain("/tmp/");
-    expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2);
+    expect(document.querySelector(".rag-detail-head")?.textContent).toContain("Newer trace summary");
+    expect(document.body.textContent).not.toContain("Find prior failed tests");
+    expect(Array.from(document.querySelectorAll("button")).some((node) => node.textContent === "load map")).toBe(false);
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(true));
+    await waitFor(() => expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2));
 
     const parserPoint = Array.from(document.querySelectorAll(".rag-projection-point")).find(
-      (node) => node.getAttribute("title") === "Parser regression",
+      (node) => node.getAttribute("aria-label")?.startsWith("Parser regression,"),
     );
     if (!(parserPoint instanceof HTMLButtonElement)) throw new Error("missing parser projection point");
     fireEvent.mouseEnter(parserPoint);
@@ -1387,6 +1482,153 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelector(".rag-result-row.active")?.textContent).toContain("Parser regression"));
     expect(parserPoint.getAttribute("aria-pressed")).toBe("true");
     expect(document.body.textContent).toContain("Parser behavior fixed");
+  });
+
+  it("keeps hydrated summary detail stable across compact refreshes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const baseFetch = fetch;
+    let detailRequestCount = 0;
+    let unmount: (() => void) | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+        if (url.includes("/api/rag/summaries/trace-a")) {
+          detailRequestCount += 1;
+          if (detailRequestCount > 1) {
+            return new Promise<Response>(() => undefined);
+          }
+        }
+        return baseFetch(input, init);
+      }) as typeof fetch,
+    );
+
+    try {
+      ({ unmount } = render(<App />));
+      await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+      const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+      if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+      fireEvent.click(summariesTab);
+
+      await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(2));
+      const parserRow = Array.from(document.querySelectorAll(".rag-result-row")).find((node) => node.textContent?.includes("Parser regression"));
+      if (!(parserRow instanceof HTMLButtonElement)) throw new Error("missing parser summary row");
+      fireEvent.click(parserRow);
+
+      await waitFor(() => expect(document.body.textContent).toContain("Find prior failed tests"));
+      expect(document.body.textContent).toContain("Opened trace");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(31_000);
+      });
+
+      expect(requestedUrls.filter((url) => url.includes("/api/rag/summaries?status=complete")).length).toBeGreaterThan(1);
+      expect(document.body.textContent).toContain("Find prior failed tests");
+      expect(document.body.textContent).toContain("Opened trace");
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds the initial summaries render and loads more while scrolling", async () => {
+    const baseMs = Date.UTC(2026, 4, 24, 12);
+    ragSummaries = Array.from({ length: 260 }, (_, index) => makeRagSummary(`trace-page-${index}`, {
+      lastEventTs: baseMs - index,
+      mtimeMs: baseMs - index,
+      summary: { ...makeRagSummary(`trace-page-${index}`).summary!, title: `Paged summary ${index}` },
+    }));
+    ragProjectionSummaries = ragSummaries;
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(100));
+    const firstSummaryRequest = requestedUrls.find((url) => url.includes("/api/rag/summaries?status=complete"));
+    expect(new URL(firstSummaryRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("100");
+
+    expect(Array.from(document.querySelectorAll("button")).some((node) => node.textContent === "show more")).toBe(false);
+
+    const summariesScroller = document.querySelector(".rag-results-list");
+    if (!(summariesScroller instanceof HTMLDivElement)) throw new Error("missing summaries scroller");
+    setEventsScrollMetrics(summariesScroller, { clientHeight: 240, scrollHeight: 2_400, scrollTop: 2_080 });
+    act(() => {
+      summariesScroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(200));
+    const summaryLimits = requestedUrls
+      .filter((url) => url.includes("/api/rag/summaries?status=complete"))
+      .map((url) => new URL(url, "http://localhost").searchParams.get("limit"));
+    expect(summaryLimits).toContain("200");
+  });
+
+  it("windows the embedding map to seven session days without changing summaries", async () => {
+    const dayMs = 86_400_000;
+    const latestMs = Date.UTC(2026, 4, 24, 12);
+    ragSummaries = [
+      makeRagSummary("trace-recent", {
+        lastEventTs: latestMs,
+        mtimeMs: latestMs,
+        summary: { ...makeRagSummary("trace-recent").summary!, title: "Recent window summary" },
+      }),
+      makeRagSummary("trace-within", {
+        lastEventTs: latestMs - 4 * dayMs,
+        mtimeMs: latestMs - 4 * dayMs,
+        summary: { ...makeRagSummary("trace-within").summary!, title: "Within week summary" },
+      }),
+      makeRagSummary("trace-older", {
+        lastEventTs: latestMs - 12 * dayMs,
+        mtimeMs: latestMs - 12 * dayMs,
+        summary: { ...makeRagSummary("trace-older").summary!, title: "Older window summary" },
+      }),
+      makeRagSummary("trace-oldest", {
+        lastEventTs: latestMs - 14 * dayMs,
+        mtimeMs: latestMs - 14 * dayMs,
+        summary: { ...makeRagSummary("trace-oldest").summary!, title: "Oldest window summary" },
+      }),
+    ];
+    ragProjectionSummaries = ragSummaries;
+
+    render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+    const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+    if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+    fireEvent.click(summariesTab);
+
+    await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(4));
+    expect(Array.from(document.querySelectorAll("button")).some((node) => node.textContent === "load map")).toBe(false);
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(true));
+    const projectionRequest = requestedUrls.find((url) => url.includes("/api/rag/projection?"));
+    expect(new URL(projectionRequest ?? "", "http://localhost").pathname).toBe("/api/rag/projection");
+    expect(new URL(projectionRequest ?? "", "http://localhost").searchParams.get("limit")).toBe("500");
+
+    const visibleTitles = () =>
+      Array.from(document.querySelectorAll(".rag-projection-point")).map((node) => node.getAttribute("aria-label")?.split(",")[0]);
+    const listTitles = () =>
+      Array.from(document.querySelectorAll(".rag-result-row strong")).map((node) => node.textContent);
+
+    expect(visibleTitles()).toEqual(["Recent window summary", "Within week summary"]);
+    expect(document.querySelector(".rag-projection-head")?.textContent).toContain("2/4 visible");
+
+    const rowsBefore = listTitles();
+    expect(rowsBefore).toEqual(["Recent window summary", "Within week summary", "Older window summary", "Oldest window summary"]);
+
+    const slider = document.querySelector('input[type="range"][aria-label="Projection time window"]') as HTMLInputElement | null;
+    if (!slider) throw new Error("missing projection window slider");
+    expect(slider.max).toBe("7");
+    fireEvent.change(slider, { target: { value: "7" } });
+
+    expect(visibleTitles()).toEqual(["Older window summary", "Oldest window summary"]);
+    expect(document.querySelector(".rag-projection-head")?.textContent).toContain("2/4 visible");
+    expect(listTitles()).toEqual(rowsBefore);
   });
 
   it("shows a trace summary shortcut only when the selected inspector trace has a summary", async () => {

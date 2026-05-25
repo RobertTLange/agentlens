@@ -799,6 +799,10 @@ describe("cli", () => {
     const ragIndexHelp = runCli(["rag", "index", "--help"]);
     expect(ragIndexHelp).toContain("--embedding-limit");
     expect(ragIndexHelp).toContain("Maximum trace documents to embed");
+    const ragDailyHelp = runCli(["rag", "daily", "--help"]);
+    expect(ragDailyHelp).toContain("status");
+    expect(ragDailyHelp).toContain("list");
+    expect(ragDailyHelp).toContain("show");
 
     const noArgsOutput = runCli([]);
     expect(noArgsOutput).toContain("Usage: agentlens");

@@ -17,6 +17,7 @@ import { loadConfig } from "./config.js";
 import { TraceIndex } from "./traceIndex.js";
 import { toMsWindow, expandHome } from "./utils.js";
 import { buildPromptInput, buildRagCorpus } from "./ragCorpus.js";
+import { runDailyWorkSummaryIfDue } from "./ragDailySummary.js";
 import { createEmbeddingProvider, unavailableEmbeddingStatus, type EmbeddingProvider } from "./ragEmbeddings.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
 import { missingRagStatus, RagStore } from "./ragStore.js";
@@ -429,7 +430,14 @@ export async function searchRag(config: AppConfig, request: RagSearchRequest): P
 
 export async function listRagSummaries(
   config: AppConfig,
-  options: { status?: RagRefreshStatus; agent?: AgentKind; since?: string; limit?: number } = {},
+  options: {
+    status?: RagRefreshStatus;
+    agent?: AgentKind;
+    since?: string;
+    limit?: number;
+    includeSummaryText?: boolean;
+    summaryMode?: "full" | "title";
+  } = {},
 ): Promise<RagSummaryListResponse> {
   const dbPath = path.resolve(expandHome(config.rag.dbPath));
   if (!existsSync(dbPath)) return { summaries: [] };
@@ -441,6 +449,8 @@ export async function listRagSummaries(
         ...(options.agent ? { agent: options.agent } : {}),
         ...(options.since ? { sinceMs: Date.now() - toMsWindow(options.since) } : {}),
         ...(options.limit !== undefined ? { limit: options.limit } : {}),
+        ...(options.includeSummaryText !== undefined ? { includeSummaryText: options.includeSummaryText } : {}),
+        ...(options.summaryMode !== undefined ? { summaryMode: options.summaryMode } : {}),
       }),
     };
   } finally {
@@ -465,11 +475,13 @@ export async function runRagWorker(
 ): Promise<void> {
   do {
     const config = await loadConfig(configPath);
+    await runDailyWorkSummaryIfDue(config);
     await runRagIndexOnce(config, {
       ...(options.limit !== undefined ? { limit: options.limit } : {}),
       embeddingLimit: options.embeddingLimit ?? config.rag.embeddingBatchSize,
       ...(options.lexicalOnly !== undefined ? { lexicalOnly: options.lexicalOnly } : {}),
     });
+    await runDailyWorkSummaryIfDue(config);
     if (options.once) break;
     await new Promise((resolve) => setTimeout(resolve, options.intervalMs ?? config.rag.workerIntervalMs));
   } while (true);

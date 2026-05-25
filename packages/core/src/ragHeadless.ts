@@ -2,11 +2,18 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { AppConfig, RagTraceSummaryContent } from "@agentlens/contracts";
-import { parseRagTraceSummaryContent } from "./ragCorpus.js";
+import type { AppConfig, DailyWorkSummaryContent, RagTraceSummaryContent } from "@agentlens/contracts";
+import { parseDailyWorkSummaryContent, parseRagTraceSummaryContent } from "./ragCorpus.js";
 
 export interface HeadlessSummaryResult {
   content: RagTraceSummaryContent;
+  model: string;
+  rawBytes: number;
+  internalSummarySessionIds: string[];
+}
+
+export interface HeadlessDailySummaryResult {
+  content: DailyWorkSummaryContent;
   model: string;
   rawBytes: number;
   internalSummarySessionIds: string[];
@@ -141,7 +148,16 @@ function extractJsonStdout(stdout: string): string {
   return trimmed;
 }
 
-export async function runHeadlessSummary(config: AppConfig, prompt: string): Promise<HeadlessSummaryResult> {
+async function runHeadlessJson<TContent>(
+  config: AppConfig,
+  prompt: string,
+  parseContent: (raw: string) => TContent,
+): Promise<{
+  content: TContent;
+  model: string;
+  rawBytes: number;
+  internalSummarySessionIds: string[];
+}> {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agentlens-rag-"));
   const promptPath = path.join(tmpDir, "prompt.md");
   await writeFile(promptPath, prompt, "utf8");
@@ -211,7 +227,7 @@ export async function runHeadlessSummary(config: AppConfig, prompt: string): Pro
     const raw = extractJsonStdout(stdout);
     try {
       return {
-        content: parseRagTraceSummaryContent(raw),
+        content: parseContent(raw),
         model: config.rag.summaryModel || config.rag.summaryAgent,
         rawBytes: Buffer.byteLength(stdout, "utf8"),
         internalSummarySessionIds: sessionIds,
@@ -222,4 +238,12 @@ export async function runHeadlessSummary(config: AppConfig, prompt: string): Pro
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+}
+
+export async function runHeadlessSummary(config: AppConfig, prompt: string): Promise<HeadlessSummaryResult> {
+  return runHeadlessJson(config, prompt, parseRagTraceSummaryContent);
+}
+
+export async function runHeadlessDailySummary(config: AppConfig, prompt: string): Promise<HeadlessDailySummaryResult> {
+  return runHeadlessJson(config, prompt, parseDailyWorkSummaryContent);
 }

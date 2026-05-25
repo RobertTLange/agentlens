@@ -14,6 +14,7 @@ import type {
   ModelContextWindow,
   PricingSyncConfig,
   RagConfig,
+  RagDailySummaryConfig,
   RetentionConfig,
   RedactionConfig,
   ScanConfig,
@@ -48,7 +49,7 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
 
 export type PartialAppConfigInput = Omit<Partial<AppConfig>, "analysis" | "rag"> & {
   analysis?: Partial<AnalysisConfig>;
-  rag?: Partial<RagConfig>;
+  rag?: Omit<Partial<RagConfig>, "dailySummary"> & { dailySummary?: Partial<RagDailySummaryConfig> };
   sessionJsonlDirectories?: string[];
 };
 
@@ -389,9 +390,22 @@ function nonEmptyStringOrDefault(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
-function mergeRag(input?: Partial<RagConfig>): RagConfig {
+function mergeRagDailySummary(input: Partial<RagDailySummaryConfig> | undefined, summaryMaxPromptBytes: number): RagDailySummaryConfig {
+  const defaults = DEFAULT_CONFIG.rag.dailySummary;
+  const scheduleHour = toFiniteNumber(input?.scheduleHourLocal);
+  return {
+    enabled: input?.enabled ?? defaults.enabled,
+    scheduleHourLocal: scheduleHour === null ? defaults.scheduleHourLocal : Math.max(0, Math.min(23, Math.round(scheduleHour))),
+    windowHours: Math.max(1, positiveIntOrDefault(input?.windowHours, defaults.windowHours)),
+    retryIntervalMs: positiveMsOrDefault(input?.retryIntervalMs, defaults.retryIntervalMs),
+    maxPromptBytes: positiveMsOrDefault(input?.maxPromptBytes, summaryMaxPromptBytes),
+  };
+}
+
+function mergeRag(input?: PartialAppConfigInput["rag"]): RagConfig {
   const defaults = DEFAULT_CONFIG.rag;
   const backend = input?.embeddingBackend === "disabled" ? "disabled" : defaults.embeddingBackend;
+  const summaryMaxPromptBytes = positiveMsOrDefault(input?.summaryMaxPromptBytes, defaults.summaryMaxPromptBytes);
   return {
     enabled: input?.enabled ?? defaults.enabled,
     dbPath: nonEmptyStringOrDefault(input?.dbPath, defaults.dbPath),
@@ -405,13 +419,14 @@ function mergeRag(input?: Partial<RagConfig>): RagConfig {
     summaryReasoningEffort: nonEmptyStringOrDefault(input?.summaryReasoningEffort, defaults.summaryReasoningEffort),
     summaryPermissionMode: nonEmptyStringOrDefault(input?.summaryPermissionMode, defaults.summaryPermissionMode),
     summaryTimeoutMs: positiveMsOrDefault(input?.summaryTimeoutMs, defaults.summaryTimeoutMs),
-    summaryMaxPromptBytes: positiveMsOrDefault(input?.summaryMaxPromptBytes, defaults.summaryMaxPromptBytes),
+    summaryMaxPromptBytes,
     embeddingBackend: backend,
     embeddingModel: nonEmptyStringOrDefault(input?.embeddingModel, defaults.embeddingModel),
     modelCacheDir: nonEmptyStringOrDefault(input?.modelCacheDir, defaults.modelCacheDir),
     embeddingBatchSize: Math.max(1, positiveIntOrDefault(input?.embeddingBatchSize, defaults.embeddingBatchSize)),
     searchCandidateMultiplier: Math.max(1, positiveIntOrDefault(input?.searchCandidateMultiplier, defaults.searchCandidateMultiplier)),
     rrfK: Math.max(1, positiveIntOrDefault(input?.rrfK, defaults.rrfK)),
+    dailySummary: mergeRagDailySummary(input?.dailySummary, summaryMaxPromptBytes),
   };
 }
 

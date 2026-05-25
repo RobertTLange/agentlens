@@ -4,6 +4,8 @@ import Database from "better-sqlite3";
 import type {
   AgentKind,
   AppConfig,
+  DailyWorkSummaryContent,
+  DailyWorkSummaryRecord,
   RagDocumentKind,
   RagEmbeddingStatus,
   RagIndexStatus,
@@ -25,8 +27,10 @@ import {
   pidIsRunning,
   readDaemonPid,
   snippet,
+  toDailySummaryRecord,
   toSummaryRecord,
   vectorToBuffer,
+  type DailyWorkSummaryRow,
   type RagSessionRow,
 } from "./ragStoreHelpers.js";
 
@@ -57,6 +61,20 @@ export interface RagSearchOptions {
   candidateMultiplier: number;
   rrfK: number;
   queryVector?: Float32Array;
+}
+
+export interface DailyWorkSummaryUpsert {
+  id: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  scheduledAtMs: number;
+  status: RagRefreshStatus;
+  content?: DailyWorkSummaryContent | null;
+  summaryText?: string;
+  model?: string;
+  error?: string;
+  internalSummarySessionIds?: string[];
+  nowMs: number;
 }
 
 interface DocumentRow {
@@ -112,6 +130,16 @@ function titleFromSummaryJson(value: string | null, fallback: string): string {
   } catch {
     return fallback;
   }
+}
+
+function nextLocalDailyRunAtMs(scheduleHourLocal: number, nowMs: number): number {
+  const hour = Math.max(0, Math.min(23, Math.round(scheduleHourLocal)));
+  const today = new Date(nowMs);
+  today.setHours(hour, 0, 0, 0);
+  if (nowMs < today.getTime()) return today.getTime();
+  const tomorrow = new Date(today.getTime());
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return tomorrow.getTime();
 }
 
 export class RagStore {
@@ -188,8 +216,106 @@ export class RagStore {
         kind UNINDEXED,
         content
       );
+      CREATE TABLE IF NOT EXISTS daily_work_summaries (
+        id TEXT PRIMARY KEY,
+        window_start_ms INTEGER NOT NULL,
+        window_end_ms INTEGER NOT NULL,
+        scheduled_at_ms INTEGER NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        content_json TEXT,
+        summary_text TEXT,
+        model TEXT,
+        error TEXT,
+        internal_summary_session_ids_json TEXT,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_work_summaries_scheduled_at_ms
+        ON daily_work_summaries(scheduled_at_ms DESC);
     `);
     this.setMeta("schema_version", RAG_SCHEMA_VERSION);
+  }
+
+  upsertDailyReport(input: DailyWorkSummaryUpsert): void {
+    const previous = this.getDailyReportByScheduledAt(input.scheduledAtMs);
+    const keepPreviousContent = input.status === "failed" || input.status === "running" || input.status === "pending";
+    const contentJson = input.content
+      ? JSON.stringify(input.content)
+      : keepPreviousContent && previous?.content
+        ? JSON.stringify(previous.content)
+        : null;
+    const summaryText = input.summaryText ?? (keepPreviousContent ? previous?.summaryText ?? "" : "");
+    const model = input.model ?? (keepPreviousContent ? previous?.model ?? "" : "");
+    const internalSummarySessionIds = input.internalSummarySessionIds ?? (keepPreviousContent ? previous?.internalSummarySessionIds ?? [] : []);
+
+    this.db.prepare(`
+      INSERT INTO daily_work_summaries (
+        id, window_start_ms, window_end_ms, scheduled_at_ms, status,
+        content_json, summary_text, model, error, internal_summary_session_ids_json,
+        created_at_ms, updated_at_ms
+      ) VALUES (
+        @id, @windowStartMs, @windowEndMs, @scheduledAtMs, @status,
+        @contentJson, @summaryText, @model, @error, @internalSummarySessionIdsJson,
+        @nowMs, @nowMs
+      )
+      ON CONFLICT(scheduled_at_ms) DO UPDATE SET
+        id = excluded.id,
+        window_start_ms = excluded.window_start_ms,
+        window_end_ms = excluded.window_end_ms,
+        status = excluded.status,
+        content_json = excluded.content_json,
+        summary_text = excluded.summary_text,
+        model = excluded.model,
+        error = excluded.error,
+        internal_summary_session_ids_json = excluded.internal_summary_session_ids_json,
+        updated_at_ms = excluded.updated_at_ms
+    `).run({
+      id: input.id,
+      windowStartMs: input.windowStartMs,
+      windowEndMs: input.windowEndMs,
+      scheduledAtMs: input.scheduledAtMs,
+      status: input.status,
+      contentJson,
+      summaryText,
+      model,
+      error: input.error ?? "",
+      internalSummarySessionIdsJson: JSON.stringify(internalSummarySessionIds),
+      nowMs: input.nowMs,
+    });
+  }
+
+  getDailyReport(id: string): DailyWorkSummaryRecord | null {
+    const row = this.db.prepare("SELECT * FROM daily_work_summaries WHERE id = ?").get(id) as DailyWorkSummaryRow | undefined;
+    return row ? toDailySummaryRecord(row) : null;
+  }
+
+  getDailyReportByScheduledAt(scheduledAtMs: number): DailyWorkSummaryRecord | null {
+    const row = this.db.prepare("SELECT * FROM daily_work_summaries WHERE scheduled_at_ms = ?").get(scheduledAtMs) as DailyWorkSummaryRow | undefined;
+    return row ? toDailySummaryRecord(row) : null;
+  }
+
+  getLatestDailyReport(): DailyWorkSummaryRecord | null {
+    const row = this.db.prepare("SELECT * FROM daily_work_summaries ORDER BY scheduled_at_ms DESC LIMIT 1").get() as DailyWorkSummaryRow | undefined;
+    return row ? toDailySummaryRecord(row) : null;
+  }
+
+  resolveDailyReport(idOrLatest: string): DailyWorkSummaryRecord | null {
+    const trimmed = idOrLatest.trim();
+    if (trimmed === "latest") return this.getLatestDailyReport();
+    const scheduledAtMs = Number.parseInt(trimmed, 10);
+    if (String(scheduledAtMs) === trimmed && Number.isSafeInteger(scheduledAtMs)) {
+      return this.getDailyReportByScheduledAt(scheduledAtMs);
+    }
+    return this.getDailyReport(trimmed);
+  }
+
+  listDailyReports(options: { limit?: number } = {}): DailyWorkSummaryRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM daily_work_summaries
+      ORDER BY scheduled_at_ms DESC
+      LIMIT ?
+    `).all(Math.max(1, Math.min(500, options.limit ?? 30))) as DailyWorkSummaryRow[];
+    return rows.map(toDailySummaryRecord);
   }
 
   setMeta(key: string, value: string): void {
@@ -351,7 +477,14 @@ export class RagStore {
     `).run(documentId, model, vector.length, vectorToBuffer(vector), nowMs);
   }
 
-  listSummaries(options: { status?: RagRefreshStatus; agent?: AgentKind; sinceMs?: number; limit?: number } = {}): RagSummaryRecord[] {
+  listSummaries(options: {
+    status?: RagRefreshStatus;
+    agent?: AgentKind;
+    sinceMs?: number;
+    limit?: number;
+    includeSummaryText?: boolean;
+    summaryMode?: "full" | "title";
+  } = {}): RagSummaryRecord[] {
     const rows = this.db.prepare(`
       SELECT * FROM rag_sessions
       WHERE (@status = '' OR status = @status)
@@ -365,7 +498,26 @@ export class RagStore {
       sinceMs: options.sinceMs ?? 0,
       limit: Math.max(1, Math.min(5000, options.limit ?? 5000)),
     }) as RagSessionRow[];
-    return rows.map(toSummaryRecord);
+    const records = rows.map(toSummaryRecord);
+    return records.map((record) => ({
+      ...record,
+      summaryText: options.includeSummaryText ?? true ? record.summaryText : "",
+      summary: options.summaryMode === "title" && record.summary
+        ? {
+            title: record.summary.title,
+            userGoal: "",
+            outcome: record.summary.outcome,
+            keySteps: [],
+            filesOrProjects: [],
+            toolsUsed: [],
+            errorsOrBlockers: [],
+            decisions: [],
+            workflowObservations: [],
+            followups: [],
+            searchKeywords: [],
+          }
+        : record.summary,
+    }));
   }
 
   listSummariesWithPathMarker(marker: string): RagSummaryRecord[] {
@@ -494,6 +646,7 @@ export class RagStore {
     `).get(config.rag.embeddingModel) as { count: number }).count;
     const defaultEmbeddingStatus: RagEmbeddingStatus =
       config.rag.embeddingBackend === "disabled" ? "disabled" : embedding.count === 0 ? "missing" : dirty > 0 ? "dirty" : "ready";
+    const latestDaily = this.getLatestDailyReport();
 
     return {
       enabled: config.rag.enabled,
@@ -511,6 +664,13 @@ export class RagStore {
         stale: counts.stale ?? 0,
         failed: counts.failed ?? 0,
         skipped: counts.skipped ?? 0,
+      },
+      daily: {
+        enabled: config.rag.dailySummary.enabled,
+        lastScheduledAtMs: latestDaily?.scheduledAtMs ?? null,
+        lastStatus: latestDaily?.status ?? null,
+        lastGeneratedAtMs: latestDaily?.status === "complete" ? latestDaily.updatedAtMs : null,
+        nextRunAtMs: config.rag.dailySummary.enabled ? nextLocalDailyRunAtMs(config.rag.dailySummary.scheduleHourLocal, Date.now()) : null,
       },
       documents,
       embeddings: {
@@ -644,6 +804,13 @@ export function missingRagStatus(config: AppConfig): RagIndexStatus {
       logPath: expandHome(config.rag.daemonLogPath),
     },
     sessions: { total: 0, complete: 0, pending: 0, stale: 0, failed: 0, skipped: 0 },
+    daily: {
+      enabled: config.rag.dailySummary.enabled,
+      lastScheduledAtMs: null,
+      lastStatus: null,
+      lastGeneratedAtMs: null,
+      nextRunAtMs: config.rag.dailySummary.enabled ? nextLocalDailyRunAtMs(config.rag.dailySummary.scheduleHourLocal, Date.now()) : null,
+    },
     documents: 0,
     embeddings: {
       status: config.rag.embeddingBackend === "disabled" ? "disabled" : "missing",

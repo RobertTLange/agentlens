@@ -7,6 +7,7 @@ import type {
   ActivityHydrationProgress,
   AgentActivityWeek,
   AgentActivityYear,
+  DailyWorkSummaryContent,
   IndexStartupStatus,
   RagTraceSummaryContent,
 } from "@agentlens/contracts";
@@ -198,6 +199,21 @@ function ragSummaryContent(): RagTraceSummaryContent {
   };
 }
 
+function dailySummaryContent(): DailyWorkSummaryContent {
+  return {
+    title: "Daily work",
+    windowLabel: "Feb 11 06:00 - Feb 12 06:00",
+    overview: "Parser work completed.",
+    completedWork: ["Fixed parser behavior"],
+    notableSessions: ["server-session-1"],
+    filesOrProjects: ["packages/core"],
+    toolsOrWorkflows: ["vitest"],
+    blockers: [],
+    followups: ["Watch CI"],
+    searchKeywords: ["parser"],
+  };
+}
+
 function seedRagSummaryForTrace(
   index: TraceIndex,
   traceId: string,
@@ -234,6 +250,25 @@ function seedRagSummaryForTrace(
 
 function seedRagSummary(index: TraceIndex): string {
   return seedRagSummaryForTrace(index, index.getSummaries()[0]?.id ?? "");
+}
+
+function seedDailySummary(index: TraceIndex, scheduledAtMs = 100): string {
+  const store = new RagStore(index.getConfig());
+  const id = `daily-${scheduledAtMs}`;
+  store.upsertDailyReport({
+    id,
+    windowStartMs: scheduledAtMs - 86_400_000,
+    windowEndMs: scheduledAtMs,
+    scheduledAtMs,
+    status: "complete",
+    content: dailySummaryContent(),
+    summaryText: "daily summary",
+    model: "fake",
+    internalSummarySessionIds: ["daily-internal"],
+    nowMs: scheduledAtMs + 1,
+  });
+  store.close();
+  return id;
 }
 
 async function buildFixtureWithCustomTrace(
@@ -2158,6 +2193,17 @@ describe("server api", () => {
     expect(summaries.statusCode).toBe(200);
     expect(summaries.json().summaries[0]).toMatchObject({ traceId, status: "complete" });
 
+    const compactSummaries = await server.inject({ method: "GET", url: "/api/rag/summaries?status=complete&summary_text=0" });
+    expect(compactSummaries.statusCode).toBe(200);
+    expect(compactSummaries.json().summaries[0]).toMatchObject({ traceId, summaryText: "" });
+    const titleSummaries = await server.inject({ method: "GET", url: "/api/rag/summaries?status=complete&summary_text=0&summary=title" });
+    expect(titleSummaries.statusCode).toBe(200);
+    expect(titleSummaries.json().summaries[0]).toMatchObject({
+      traceId,
+      summaryText: "",
+      summary: { title: "Parser regression", userGoal: "", keySteps: [] },
+    });
+
     const search = await server.inject({ method: "GET", url: "/api/rag/search?q=parser&mode=lexical&limit=5" });
     expect(search.statusCode).toBe(200);
     expect(search.json().results[0]).toMatchObject({ traceId, title: "Parser regression" });
@@ -2169,6 +2215,50 @@ describe("server api", () => {
     expect(missing.statusCode).toBe(404);
 
     await server.close();
+  });
+
+  it("serves daily RAG reports, latest lookup, invalid ids, and empty DB responses", async () => {
+    const fixture = await buildFixture();
+    const reportId = seedDailySummary(fixture.index, 1_700_000_000_000);
+    const server = await createServer({
+      traceIndex: fixture.index,
+      configPath: fixture.configPath,
+      enableStatic: false,
+    });
+
+    const dailyStatus = await server.inject({ method: "GET", url: "/api/rag/daily/status" });
+    expect(dailyStatus.statusCode).toBe(200);
+    expect(dailyStatus.json()).toMatchObject({ lastStatus: "complete", lastScheduledAtMs: 1_700_000_000_000 });
+
+    const reports = await server.inject({ method: "GET", url: "/api/rag/daily/reports?limit=5" });
+    expect(reports.statusCode).toBe(200);
+    expect(reports.json().reports[0]).toMatchObject({ id: reportId, status: "complete" });
+
+    const latest = await server.inject({ method: "GET", url: "/api/rag/daily/reports/latest" });
+    expect(latest.statusCode).toBe(200);
+    expect(latest.json().report).toMatchObject({ id: reportId, content: { title: "Daily work" } });
+
+    const numeric = await server.inject({ method: "GET", url: "/api/rag/daily/reports/1700000000000" });
+    expect(numeric.statusCode).toBe(200);
+    expect(numeric.json().report).toMatchObject({ id: reportId });
+
+    const invalid = await server.inject({ method: "GET", url: "/api/rag/daily/reports/missing" });
+    expect(invalid.statusCode).toBe(404);
+
+    await server.close();
+
+    const emptyFixture = await buildFixture();
+    const emptyServer = await createServer({
+      traceIndex: emptyFixture.index,
+      configPath: emptyFixture.configPath,
+      enableStatic: false,
+    });
+    const emptyReports = await emptyServer.inject({ method: "GET", url: "/api/rag/daily/reports" });
+    expect(emptyReports.statusCode).toBe(200);
+    expect(emptyReports.json()).toEqual({ reports: [] });
+    const emptyLatest = await emptyServer.inject({ method: "GET", url: "/api/rag/daily/reports/latest" });
+    expect(emptyLatest.statusCode).toBe(404);
+    await emptyServer.close();
   });
 
   it("serves filtered RAG summary projections without raw vectors", async () => {
