@@ -52,6 +52,33 @@ function sortDailyReports(reports: DailyWorkSummaryRecord[]): DailyWorkSummaryRe
   return [...reports].sort((left, right) => right.scheduledAtMs - left.scheduledAtMs || left.id.localeCompare(right.id));
 }
 
+function hasHydratedSummaryDetail(summary: RagSummaryRecord): boolean {
+  return Boolean(summary.summary?.userGoal || summary.summary?.keySteps.length || summary.summaryText);
+}
+
+function sameSummaryRevision(left: RagSummaryRecord, right: RagSummaryRecord): boolean {
+  return left.fingerprint === right.fingerprint && left.summaryGeneratedAtMs === right.summaryGeneratedAtMs;
+}
+
+function mergeHydratedSummaryDetails(existing: RagSummaryRecord[], incoming: RagSummaryRecord[]): RagSummaryRecord[] {
+  const existingByTraceId = new Map(existing.map((summary) => [summary.traceId, summary]));
+  return incoming.map((summary) => {
+    const hydrated = existingByTraceId.get(summary.traceId);
+    if (!hydrated || !hydrated.summary || !summary.summary) return summary;
+    if (!hasHydratedSummaryDetail(hydrated) || hasHydratedSummaryDetail(summary)) return summary;
+    if (!sameSummaryRevision(hydrated, summary)) return summary;
+    return {
+      ...summary,
+      summaryText: hydrated.summaryText,
+      summary: {
+        ...hydrated.summary,
+        title: summary.summary.title || hydrated.summary.title,
+        outcome: summary.summary.outcome || hydrated.summary.outcome,
+      },
+    };
+  });
+}
+
 function clusterColor(clusterId: number): string {
   const fixedColor = CLUSTER_COLORS[clusterId];
   if (fixedColor) return fixedColor;
@@ -329,7 +356,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       const summariesJson = (await summariesResponse.json()) as { summaries: RagSummaryRecord[] };
       const sortedSummaries = sortSummariesByOriginalTraceTime(summariesJson.summaries);
       setStatus(statusJson);
-      setSummaries(sortedSummaries);
+      setSummaries((existing) => mergeHydratedSummaryDetails(existing, sortedSummaries));
       setSelectedTraceId((current) => {
         if (current && sortedSummaries.some((summary) => summary.traceId === current)) return current;
         if (selectedTraceIdProp && sortedSummaries.some((summary) => summary.traceId === selectedTraceIdProp)) return selectedTraceIdProp;

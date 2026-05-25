@@ -1484,6 +1484,55 @@ describe("App sessions list live motion", () => {
     expect(document.body.textContent).toContain("Parser behavior fixed");
   });
 
+  it("keeps hydrated summary detail stable across compact refreshes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const baseFetch = fetch;
+    let detailRequestCount = 0;
+    let unmount: (() => void) | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+        if (url.includes("/api/rag/summaries/trace-a")) {
+          detailRequestCount += 1;
+          if (detailRequestCount > 1) {
+            return new Promise<Response>(() => undefined);
+          }
+        }
+        return baseFetch(input, init);
+      }) as typeof fetch,
+    );
+
+    try {
+      ({ unmount } = render(<App />));
+      await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+
+      const summariesTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Summaries");
+      if (!(summariesTab instanceof HTMLButtonElement)) throw new Error("missing summaries tab");
+      fireEvent.click(summariesTab);
+
+      await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(2));
+      const parserRow = Array.from(document.querySelectorAll(".rag-result-row")).find((node) => node.textContent?.includes("Parser regression"));
+      if (!(parserRow instanceof HTMLButtonElement)) throw new Error("missing parser summary row");
+      fireEvent.click(parserRow);
+
+      await waitFor(() => expect(document.body.textContent).toContain("Find prior failed tests"));
+      expect(document.body.textContent).toContain("Opened trace");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(31_000);
+      });
+
+      expect(requestedUrls.filter((url) => url.includes("/api/rag/summaries?status=complete")).length).toBeGreaterThan(1);
+      expect(document.body.textContent).toContain("Find prior failed tests");
+      expect(document.body.textContent).toContain("Opened trace");
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds the initial summaries render and loads more while scrolling", async () => {
     const baseMs = Date.UTC(2026, 4, 24, 12);
     ragSummaries = Array.from({ length: 260 }, (_, index) => makeRagSummary(`trace-page-${index}`, {
