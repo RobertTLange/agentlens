@@ -118,6 +118,11 @@ export interface RagSummaryEmbeddingList {
   rows: RagSummaryEmbeddingRow[];
 }
 
+export interface RagStoreOptions {
+  readonly?: boolean;
+  migrate?: boolean;
+}
+
 const RAG_SCHEMA_VERSION = "1";
 const INTERNAL_SUMMARY_SESSION_IDS_META_KEY = "internal_summary_session_ids";
 const SQLITE_BUSY_TIMEOUT_MS = 15_000;
@@ -146,18 +151,24 @@ export class RagStore {
   readonly dbPath: string;
   private readonly db: Database.Database;
 
-  constructor(config: AppConfig) {
+  constructor(config: AppConfig, options: RagStoreOptions = {}) {
     this.dbPath = dbPathFromConfig(config);
-    mkdirSync(path.dirname(this.dbPath), { recursive: true });
-    this.db = new Database(this.dbPath, { timeout: SQLITE_BUSY_TIMEOUT_MS });
-    this.configureConnection();
-    this.migrate();
+    if (!options.readonly) {
+      mkdirSync(path.dirname(this.dbPath), { recursive: true });
+    }
+    this.db = new Database(this.dbPath, { timeout: SQLITE_BUSY_TIMEOUT_MS, readonly: options.readonly ?? false });
+    this.configureConnection(options);
+    if (options.migrate !== false && !options.readonly) {
+      this.migrate();
+    }
   }
 
-  private configureConnection(): void {
+  private configureConnection(options: RagStoreOptions = {}): void {
     this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    if (!options.readonly) {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+    }
     this.db.pragma("foreign_keys = ON");
   }
 
@@ -233,7 +244,9 @@ export class RagStore {
       CREATE INDEX IF NOT EXISTS idx_daily_work_summaries_scheduled_at_ms
         ON daily_work_summaries(scheduled_at_ms DESC);
     `);
-    this.setMeta("schema_version", RAG_SCHEMA_VERSION);
+    if (this.getMeta("schema_version") !== RAG_SCHEMA_VERSION) {
+      this.setMeta("schema_version", RAG_SCHEMA_VERSION);
+    }
   }
 
   upsertDailyReport(input: DailyWorkSummaryUpsert): void {

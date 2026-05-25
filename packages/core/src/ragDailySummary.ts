@@ -147,7 +147,12 @@ export async function buildDailyWorkSummaryPrompt(
   const sessionBudget = Math.max(4_000, config.rag.dailySummary.maxPromptBytes - 5_000);
   let usedBytes = 0;
   for (const summary of summaries) {
-    const detail = traceIndex.getSessionDetailUncached(summary.id);
+    let detail: ReturnType<TraceIndex["getSessionDetailUncached"]>;
+    try {
+      detail = traceIndex.getSessionDetailUncached(summary.id);
+    } catch {
+      continue;
+    }
     traceIds.push(summary.id);
     const events = detail.events
       .filter((event) => !event.timestampMs || (event.timestampMs >= schedule.windowStartMs && event.timestampMs < schedule.windowEndMs))
@@ -274,7 +279,7 @@ export async function runDailyWorkSummaryIfDue(
 export async function listDailyWorkSummaries(config: AppConfig, options: { limit?: number } = {}): Promise<DailyWorkSummaryListResponse> {
   const dbPath = path.resolve(expandHome(config.rag.dbPath));
   if (!existsSync(dbPath)) return { reports: [] };
-  const store = new RagStore(config);
+  const store = new RagStore(config, { readonly: true, migrate: false });
   try {
     return {
       reports: store.listDailyReports({
@@ -289,7 +294,7 @@ export async function listDailyWorkSummaries(config: AppConfig, options: { limit
 export async function getDailyWorkSummary(config: AppConfig, idOrLatest: string): Promise<DailyWorkSummaryRecord | null> {
   const dbPath = path.resolve(expandHome(config.rag.dbPath));
   if (!existsSync(dbPath)) return null;
-  const store = new RagStore(config);
+  const store = new RagStore(config, { readonly: true, migrate: false });
   try {
     return store.resolveDailyReport(idOrLatest);
   } finally {

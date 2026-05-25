@@ -266,7 +266,7 @@ export async function getRagProjection(
       warnings: ["RAG database does not exist"],
     };
   }
-  const store = new RagStore(config);
+  const store = new RagStore(config, { readonly: true, migrate: false });
   try {
     const model = store.getMeta("embedding_model") || config.rag.embeddingModel;
     const projectionInput = store.listSummaryEmbeddings({

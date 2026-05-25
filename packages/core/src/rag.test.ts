@@ -1,14 +1,22 @@
 import { chmod, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import type { DailyWorkSummaryContent, NormalizedEvent, RagTraceSummaryContent, TraceSummary } from "@agentlens/contracts";
 import { mergeConfig, saveConfig } from "./config.js";
 import { buildPromptInput, buildRagCorpus, buildTraceDocuments } from "./ragCorpus.js";
 import { computeDailySummarySchedule, runDailyWorkSummaryIfDue } from "./ragDailySummary.js";
 import { runHeadlessSummary } from "./ragHeadless.js";
-import { ragWorkerNodeOptions, runRagIndexOnce, runRagSupervisor, runRagWorker, stopRagDaemon } from "./ragIndexer.js";
+import {
+  containsInternalRagMarker,
+  getRagSessionDetailOrNull,
+  ragWorkerNodeOptions,
+  runRagIndexOnce,
+  runRagSupervisor,
+  runRagWorker,
+  stopRagDaemon,
+} from "./ragIndexer.js";
 import { assignAdaptiveClusters, getRagProjection } from "./ragProjection.js";
 import { RagStore } from "./ragStore.js";
 import { readDaemonPid } from "./ragStoreHelpers.js";
@@ -611,6 +619,31 @@ describe("rag store", () => {
 });
 
 describe("rag indexer", () => {
+  it("detects internal RAG markers without lowercasing large transcript text", () => {
+    const originalToLowerCase = String.prototype.toLowerCase;
+    const spy = vi.spyOn(String.prototype, "toLowerCase").mockImplementation(function toLowerCaseGuard(this: string) {
+      if (this.length > 1024) throw new Error("large lower-case allocation");
+      return originalToLowerCase.call(this);
+    });
+    const largeTranscriptText = `${"x".repeat(10_000)}AGENTLENS-RAG-WORKDIR`;
+
+    try {
+      expect(containsInternalRagMarker(largeTranscriptText)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("treats disappearing trace detail files as a skipped detail read", () => {
+    const traceIndex = {
+      getSessionDetailUncached: () => {
+        throw new Error("ENOENT: no such file or directory, open '/tmp/missing.jsonl'");
+      },
+    };
+
+    expect(getRagSessionDetailOrNull(traceIndex, summary())).toBeNull();
+  });
+
   it("generates a due daily work summary and does not duplicate completed schedules", async () => {
     const dir = await tempDir();
     const tracesDir = path.join(dir, "traces");

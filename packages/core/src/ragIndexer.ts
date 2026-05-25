@@ -12,6 +12,7 @@ import type {
   RagSummaryListResponse,
   RagSummaryRecord,
   TraceSummary,
+  SessionDetail,
 } from "@agentlens/contracts";
 import { loadConfig } from "./config.js";
 import { TraceIndex } from "./traceIndex.js";
@@ -73,6 +74,7 @@ export interface RagSupervisorRuntimeOptions {
 }
 
 const INTERNAL_RAG_MARKER = "agentlens-rag-";
+const INTERNAL_RAG_MARKER_PATTERN = /agentlens-rag-/i;
 const INTERNAL_RAG_SKIP_REASON = "internal_rag_summary_trace";
 const DEFAULT_RAG_WORKER_HEAP_MB = 8192;
 const DEFAULT_RAG_WORKER_RESTART_DELAY_MS = 1_000;
@@ -99,8 +101,17 @@ function isCurrentTerminalRagSession(existing: RagSummaryRecord | null, fingerpr
   return existing.status === "complete" || existing.status === "skipped";
 }
 
-function containsInternalRagMarker(value: string): boolean {
-  return value.toLowerCase().includes(INTERNAL_RAG_MARKER);
+export function containsInternalRagMarker(value: string): boolean {
+  return INTERNAL_RAG_MARKER_PATTERN.test(value);
+}
+
+export function getRagSessionDetailOrNull(traceIndex: Pick<TraceIndex, "getSessionDetailUncached">, summary: TraceSummary): SessionDetail | null {
+  if (!summary.parseable) return null;
+  try {
+    return traceIndex.getSessionDetailUncached(summary.id);
+  } catch {
+    return null;
+  }
 }
 
 function eventContainsInternalRagMarker(event: ReturnType<TraceIndex["getSessionDetail"]>["events"][number]): boolean {
@@ -224,10 +235,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
     const discoveredTraceCount = traceIndex.getStartupStatus().discoveredTraceCount || summaries.length;
     const ignoredSessionIds = store.getInternalSummarySessionIds();
     const internalTraceIds = new Set<string>();
-    const getDetail = (summary: TraceSummary): ReturnType<TraceIndex["getSessionDetail"]> | null => {
-      if (!summary.parseable) return null;
-      return traceIndex.getSessionDetailUncached(summary.id);
-    };
+    const getDetail = (summary: TraceSummary): SessionDetail | null => getRagSessionDetailOrNull(traceIndex, summary);
 
     const markStoredInternalSummaries = (): void => {
       for (const existing of store.listSummariesWithPathMarker(INTERNAL_RAG_MARKER)) {
@@ -379,7 +387,7 @@ export async function runRagIndexOnce(config: AppConfig, options: RagIndexOption
 export async function getRagStatus(config: AppConfig): Promise<RagIndexStatus> {
   const dbPath = path.resolve(expandHome(config.rag.dbPath));
   if (!existsSync(dbPath)) return missingRagStatus(config);
-  const store = new RagStore(config);
+  const store = new RagStore(config, { readonly: true, migrate: false });
   try {
     return store.getStatus(config);
   } finally {
@@ -388,7 +396,7 @@ export async function getRagStatus(config: AppConfig): Promise<RagIndexStatus> {
 }
 
 export async function searchRag(config: AppConfig, request: RagSearchRequest): Promise<RagSearchResponse> {
-  const store = new RagStore(config);
+  const store = new RagStore(config, { readonly: true, migrate: false });
   try {
     const mode = request.mode ?? "hybrid";
     const limit = Math.max(1, Math.min(100, request.limit ?? 20));
@@ -399,7 +407,6 @@ export async function searchRag(config: AppConfig, request: RagSearchRequest): P
       const provider = createEmbeddingProvider(config);
       if (provider) {
         try {
-          store.setMeta("embedding_model", provider.model);
           queryVector = (await provider.embed([request.query]))[0];
         } catch (error) {
           embeddings = unavailableEmbeddingStatus(config, error);
@@ -441,7 +448,7 @@ export async function listRagSummaries(
 ): Promise<RagSummaryListResponse> {
   const dbPath = path.resolve(expandHome(config.rag.dbPath));
   if (!existsSync(dbPath)) return { summaries: [] };
-  const store = new RagStore(config);
+  const store = new RagStore(config, { readonly: true, migrate: false });
   try {
     return {
       summaries: store.listSummaries({
@@ -461,7 +468,7 @@ export async function listRagSummaries(
 export async function getRagSummary(config: AppConfig, traceId: string): Promise<RagSummaryRecord | null> {
   const dbPath = path.resolve(expandHome(config.rag.dbPath));
   if (!existsSync(dbPath)) return null;
-  const store = new RagStore(config);
+  const store = new RagStore(config, { readonly: true, migrate: false });
   try {
     return store.getSession(traceId);
   } finally {
