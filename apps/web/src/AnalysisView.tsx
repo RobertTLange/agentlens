@@ -12,6 +12,7 @@ import {
 
 const AGENT_OPTIONS: Array<AgentKind | ""> = ["", "codex", "claude", "cursor", "gemini", "opencode", "pi", "unknown"];
 const SINCE_OPTIONS = ["", "24h", "7d", "30d", "custom"] as const;
+const DEFAULT_SINCE_MODE: (typeof SINCE_OPTIONS)[number] = "7d";
 
 interface AnalysisViewProps {
   onInspectTrace: (traceId: string) => void;
@@ -43,6 +44,26 @@ function OverviewMetricCard({ metric }: { metric: AnalysisOverviewMetric }): JSX
       <span className="mono analysis-overview-value">{metric.value}</span>
       <span className="mono analysis-overview-detail">{metric.detail}</span>
     </div>
+  );
+}
+
+function loadingTitle(since: string): string {
+  return since ? "Building recent analysis" : "Building all-time analysis";
+}
+
+function LoadingPanel({ since }: { since: string }): JSX.Element {
+  return (
+    <section className="panel analysis-loading-panel" aria-label="Analysis loading">
+      <div className="analysis-loading-copy">
+        <h2>{loadingTitle(since)}</h2>
+        <p>Scanning sessions and skill signals.</p>
+      </div>
+      <div className="analysis-loading-grid" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+    </section>
   );
 }
 
@@ -155,7 +176,7 @@ function SessionCard({ row, onInspectTrace }: { row: AnalysisSessionCardRow; onI
 export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element {
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
   const [agent, setAgent] = useState<AgentKind | "">("");
-  const [sinceMode, setSinceMode] = useState<(typeof SINCE_OPTIONS)[number]>("");
+  const [sinceMode, setSinceMode] = useState<(typeof SINCE_OPTIONS)[number]>(DEFAULT_SINCE_MODE);
   const [customSince, setCustomSince] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -233,6 +254,7 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
       </section>
 
       {error && <div className="hero-warning mono">{error}</div>}
+      {loading && !analysis && !error && <LoadingPanel since={since} />}
       {noTraces && <div className="empty">No sessions indexed</div>}
       {noSupported && <div className="empty">No Codex or Claude sessions available for v1 analysis</div>}
       {noObserved && !noTraces && <div className="empty">No skills or subagents observed</div>}

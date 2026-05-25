@@ -107,6 +107,25 @@ afterEach(() => {
 });
 
 describe("AnalysisView", () => {
+  it("defaults to a recent range and shows a full loading panel before data arrives", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+        requestedUrls.push(url);
+        return new Promise<Response>(() => undefined);
+      }) as typeof fetch,
+    );
+
+    render(<AnalysisView onInspectTrace={() => {}} />);
+
+    expect(requestedUrls).toEqual(["/api/analysis?since=7d"]);
+    expect((document.querySelectorAll(".analysis-select")[1] as HTMLSelectElement | undefined)?.value).toBe("7d");
+    expect(document.querySelector(".analysis-loading-panel")).toBeTruthy();
+    expect(document.body.textContent).toContain("Building recent analysis");
+    expect(document.body.textContent).toContain("Scanning sessions and skill signals");
+  });
+
   it("renders dashboard visuals, detailed data, warnings, and inspect callback", async () => {
     response = makeAnalysisResponse({
       inventory: {
@@ -146,13 +165,13 @@ describe("AnalysisView", () => {
 
   it("updates request parameters from filters", async () => {
     render(<AnalysisView onInspectTrace={() => {}} />);
-    await waitFor(() => expect(requestedUrls).toContain("/api/analysis"));
+    await waitFor(() => expect(requestedUrls).toContain("/api/analysis?since=7d"));
 
     const selects = Array.from(document.querySelectorAll(".analysis-select"));
     fireEvent.change(selects[0] as HTMLSelectElement, { target: { value: "codex" } });
-    fireEvent.change(selects[1] as HTMLSelectElement, { target: { value: "7d" } });
+    fireEvent.change(selects[1] as HTMLSelectElement, { target: { value: "24h" } });
 
-    await waitFor(() => expect(requestedUrls.some((url) => url.includes("agent=codex") && url.includes("since=7d"))).toBe(true));
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("agent=codex") && url.includes("since=24h"))).toBe(true));
   });
 
   it("renders empty and error states", async () => {
