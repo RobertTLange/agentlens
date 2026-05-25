@@ -1459,12 +1459,10 @@ describe("App sessions list live motion", () => {
     expect(rowMetaLabels).toEqual([]);
     expect(rows[0]?.textContent).not.toContain("Second detail");
     expect(rows[0]?.textContent).not.toContain("/tmp/");
-    expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(false);
     expect(document.querySelector(".rag-detail-head")?.textContent).toContain("Newer trace summary");
     expect(document.body.textContent).not.toContain("Find prior failed tests");
-    const loadMap = Array.from(document.querySelectorAll("button")).find((node) => node.textContent === "load map");
-    if (!(loadMap instanceof HTMLButtonElement)) throw new Error("missing load map button");
-    fireEvent.click(loadMap);
+    expect(Array.from(document.querySelectorAll("button")).some((node) => node.textContent === "load map")).toBe(false);
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(true));
     await waitFor(() => expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2));
 
     const parserPoint = Array.from(document.querySelectorAll(".rag-projection-point")).find(
@@ -1557,9 +1555,7 @@ describe("App sessions list live motion", () => {
     fireEvent.click(summariesTab);
 
     await waitFor(() => expect(document.querySelectorAll(".rag-result-row")).toHaveLength(4));
-    const loadMap = Array.from(document.querySelectorAll("button")).find((node) => node.textContent === "load map");
-    if (!(loadMap instanceof HTMLButtonElement)) throw new Error("missing load map button");
-    fireEvent.click(loadMap);
+    expect(Array.from(document.querySelectorAll("button")).some((node) => node.textContent === "load map")).toBe(false);
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(true));
     const projectionRequest = requestedUrls.find((url) => url.includes("/api/rag/projection?"));
     expect(new URL(projectionRequest ?? "", "http://localhost").pathname).toBe("/api/rag/projection");

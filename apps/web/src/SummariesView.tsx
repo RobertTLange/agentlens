@@ -238,7 +238,6 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
   const [summaries, setSummaries] = useState<RagSummaryRecord[]>([]);
   const [dailyReports, setDailyReports] = useState<DailyWorkSummaryRecord[]>([]);
   const [projection, setProjection] = useState<RagProjectionResponse | null>(null);
-  const [projectionVisible, setProjectionVisible] = useState(false);
   const [projectionOffsetDays, setProjectionOffsetDays] = useState(0);
   const [results, setResults] = useState<RagSearchResult[]>([]);
   const [selectedTraceId, setSelectedTraceId] = useState("");
@@ -317,7 +316,6 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     setError("");
     const projectionRequestId = projectionRequestRef.current + 1;
     projectionRequestRef.current = projectionRequestId;
-    if (!projectionVisible) setProjection(null);
     try {
       const params = new URLSearchParams({ status: summaryStatus, limit: String(summaryListLimit), summary_text: "0", summary: "title" });
       if (agent) params.set("agent", agent);
@@ -337,7 +335,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
         if (selectedTraceIdProp && sortedSummaries.some((summary) => summary.traceId === selectedTraceIdProp)) return selectedTraceIdProp;
         return "";
       });
-      if (projectionVisible) void refreshProjectionData(projectionRequestId);
+      void refreshProjectionData(projectionRequestId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -375,13 +373,6 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
     if (viewMode === "daily") void refreshDailyData();
     else void refreshBaseData();
   }, [agent, summaryStatus, summaryListLimit, viewMode]);
-
-  useEffect(() => {
-    if (viewMode !== "sessions" || !projectionVisible) return;
-    const requestId = projectionRequestRef.current + 1;
-    projectionRequestRef.current = requestId;
-    void refreshProjectionData(requestId);
-  }, [agent, projectionVisible, summaryStatus, viewMode]);
 
   useEffect(() => {
     setProjectionOffsetDays(0);
@@ -599,18 +590,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             {viewMode !== "daily" && isSearching && results.length === 0 && <div className="empty">No search results</div>}
             {viewMode !== "daily" && !isSearching && tocSummaries.length === 0 && <div className="empty">No summaries</div>}
           </div>
-          {viewMode !== "daily" && !projectionVisible && (
-            <div className="rag-result-actions">
-              <button
-                type="button"
-                className="mono rag-refresh"
-                onClick={() => setProjectionVisible(true)}
-              >
-                load map
-              </button>
-            </div>
-          )}
-          {viewMode !== "daily" && projectionVisible && (
+          {viewMode !== "daily" && (
             <SummaryProjectionPlot
               projection={projection}
               projectionOffsetDays={projectionOffsetDays}

@@ -3258,15 +3258,6 @@ body {
   text-align: right;
 }
 
-.rag-result-actions {
-  display: flex;
-  justify-content: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border);
-  min-height: 0;
-}
-
 .rag-result-main span {
   color: var(--muted);
   font-size: 0.68rem;
