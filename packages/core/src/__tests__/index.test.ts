@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, mkdir, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -2932,6 +2932,103 @@ describe("trace index", () => {
     } finally {
       index.stop();
     }
+  });
+
+  it("does not crash when an appended hot trace disappears before it can be read", async () => {
+    const root = await createTempRoot();
+    const codexDir = path.join(root, ".codex", "sessions", "2026", "02", "13");
+    await mkdir(codexDir, { recursive: true });
+    const codexPath = path.join(codexDir, "rollout-disappearing.jsonl");
+
+    await writeFile(
+      codexPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "sess-disappearing", cwd: "/tmp/project", cli_version: "0.1.0" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-02-13T10:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "before delete" }],
+          },
+        }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: true,
+          roots: [path.join(root, ".codex", "sessions")],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    await appendFile(
+      codexPath,
+      `${JSON.stringify({
+        timestamp: "2026-02-13T10:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "after append" }],
+        },
+      })}\n`,
+      "utf8",
+    );
+    const fileStat = await stat(codexPath);
+    const discovered = (await discoverTraceFiles(config)).find((file) => file.path === codexPath);
+    expect(discovered).toBeTruthy();
+    await rm(codexPath);
+
+    const internal = index as unknown as {
+      upsertFile: (file: NonNullable<typeof discovered>, refreshNowMs: number) => Promise<boolean>;
+    };
+    await expect(internal.upsertFile({
+      ...discovered!,
+      sizeBytes: fileStat.size,
+      mtimeMs: fileStat.mtimeMs,
+      ino: Number(fileStat.ino),
+      dev: Number(fileStat.dev),
+    }, Date.now())).resolves.toBe(true);
+
+    const summary = index.getSummaries().find((item) => item.sessionId === "sess-disappearing" || item.path === codexPath);
+    expect(summary?.parseable).toBe(false);
+    expect(summary?.parseError).toContain("ENOENT");
   });
 
   it("serves activity artifacts for cold traces without materializing full events", async () => {

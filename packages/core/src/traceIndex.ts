@@ -1621,7 +1621,12 @@ export class TraceIndex extends EventEmitter {
     }
 
     if (current && !forceReparse) {
-      const appendApplied = await this.tryIncrementalAppend(current, file, refreshNowMs);
+      let appendApplied = false;
+      try {
+        appendApplied = await this.tryIncrementalAppend(current, file, refreshNowMs);
+      } catch {
+        appendApplied = false;
+      }
       if (appendApplied) {
         return true;
       }
