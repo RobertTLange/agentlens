@@ -446,6 +446,18 @@ describe("rag store", () => {
     expect(store.getStatus(config).documents).toBeGreaterThan(0);
     expect(store.search({ query: "parser", mode: "lexical", limit: 5, candidateMultiplier: 4, rrfK: 60 })[0]?.traceId).toBe("trace-1");
     store.close();
+
+    const db = new Database(config.rag.dbPath);
+    try {
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'rag_documents'")
+        .all() as Array<{ name: string }>;
+      expect(indexes.map((row) => row.name)).toEqual(
+        expect.arrayContaining(["idx_rag_documents_kind_updated", "idx_rag_documents_trace_kind_updated"]),
+      );
+    } finally {
+      db.close();
+    }
   });
 
   it("persists and lists daily work summaries by schedule time", async () => {
@@ -1591,14 +1603,23 @@ describe("headless summarization", () => {
     const executable = path.join(dir, "fake-headless.js");
     const argsPath = path.join(dir, "args.json");
     const previousToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const previousUser = process.env.USER;
+    const previousLogname = process.env.LOGNAME;
+    const previousShell = process.env.SHELL;
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token";
+    process.env.USER = "test-user";
+    process.env.LOGNAME = "test-logname";
+    process.env.SHELL = "/bin/test-shell";
     await writeFile(
       executable,
       `#!/usr/bin/env node
 const fs = require("fs");
 fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({
   args: process.argv.slice(2),
-  token: process.env.CLAUDE_CODE_OAUTH_TOKEN || ""
+  token: process.env.CLAUDE_CODE_OAUTH_TOKEN || "",
+  user: process.env.USER || "",
+  logname: process.env.LOGNAME || "",
+  shell: process.env.SHELL || ""
 }));
 const out = ${JSON.stringify(JSON.stringify(content()))};
 console.log(JSON.stringify({ type: "system", subtype: "init" }));
@@ -1614,16 +1635,28 @@ console.log(JSON.stringify({ type: "result", result: out }));
       const invocation = JSON.parse(await import("node:fs/promises").then(({ readFile }) => readFile(argsPath, "utf8"))) as {
         args: string[];
         token: string;
+        user: string;
+        logname: string;
+        shell: string;
       };
 
       expect(invocation.args).toContain("--prompt-file");
       expect(invocation.args).toContain("--allow");
       expect(invocation.args).toContain("read-only");
       expect(invocation.token).toBe("test-token");
+      expect(invocation.user).toBe("test-user");
+      expect(invocation.logname).toBe("test-logname");
+      expect(invocation.shell).toBe("/bin/test-shell");
       expect(result.content.title).toBe("Fixed failing tests");
     } finally {
       if (previousToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
       else process.env.CLAUDE_CODE_OAUTH_TOKEN = previousToken;
+      if (previousUser === undefined) delete process.env.USER;
+      else process.env.USER = previousUser;
+      if (previousLogname === undefined) delete process.env.LOGNAME;
+      else process.env.LOGNAME = previousLogname;
+      if (previousShell === undefined) delete process.env.SHELL;
+      else process.env.SHELL = previousShell;
     }
   });
 

@@ -227,6 +227,10 @@ export class RagStore {
         kind UNINDEXED,
         content
       );
+      CREATE INDEX IF NOT EXISTS idx_rag_documents_kind_updated
+        ON rag_documents(kind, updated_at_ms DESC, document_id);
+      CREATE INDEX IF NOT EXISTS idx_rag_documents_trace_kind_updated
+        ON rag_documents(trace_id, kind, updated_at_ms DESC, document_id);
       CREATE TABLE IF NOT EXISTS daily_work_summaries (
         id TEXT PRIMARY KEY,
         window_start_ms INTEGER NOT NULL,
@@ -455,16 +459,16 @@ export class RagStore {
     if (options.kind) params.push(options.kind);
     if (options.traceId) params.push(options.traceId);
     params.push(Math.max(1, limit));
+    const orderBy = options.kind
+      ? "d.updated_at_ms DESC, d.document_id"
+      : "CASE d.kind WHEN 'summary' THEN 0 ELSE 1 END, d.updated_at_ms DESC, d.document_id";
     const rows = this.db.prepare(`
       SELECT d.* FROM rag_documents d
       LEFT JOIN rag_embeddings e ON e.document_id = d.document_id AND e.model = ?
       WHERE e.document_id IS NULL
         ${kindFilter}
         ${traceFilter}
-      ORDER BY
-        CASE d.kind WHEN 'summary' THEN 0 ELSE 1 END,
-        d.updated_at_ms DESC,
-        d.document_id
+      ORDER BY ${orderBy}
       LIMIT ?
     `).all(...params) as DocumentRow[];
     return rows.map((row) => ({

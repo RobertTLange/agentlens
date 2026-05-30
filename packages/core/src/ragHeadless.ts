@@ -22,6 +22,9 @@ export interface HeadlessDailySummaryResult {
 const ENV_ALLOWLIST = new Set([
   "HOME",
   "PATH",
+  "USER",
+  "LOGNAME",
+  "SHELL",
   "LANG",
   "LC_ALL",
   "TMPDIR",
