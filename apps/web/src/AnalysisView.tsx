@@ -10,7 +10,7 @@ import {
   type AnalysisSubagentBarRow,
 } from "./analysis-view-model.js";
 
-const AGENT_OPTIONS: Array<AgentKind | ""> = ["", "codex", "claude", "cursor", "gemini", "opencode", "pi", "unknown"];
+const AGENT_OPTIONS: Array<AgentKind | ""> = ["", "codex", "claude", "cursor", "gemini", "antigravity", "opencode", "pi", "unknown"];
 const SINCE_OPTIONS = ["", "24h", "7d", "30d", "custom"] as const;
 const DEFAULT_SINCE_MODE: (typeof SINCE_OPTIONS)[number] = "7d";
 

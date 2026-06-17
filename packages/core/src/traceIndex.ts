@@ -23,7 +23,12 @@ import type {
   TraceTocItem,
   TraceSummary,
 } from "@agentlens/contracts";
-import { discoverTraceFiles, isInternalAgentLensTracePath, type DiscoveredTraceFile } from "./discovery.js";
+import {
+  discoverTraceFiles,
+  isAntigravityTranscriptFullPath,
+  isInternalAgentLensTracePath,
+  type DiscoveredTraceFile,
+} from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
 import { deriveSessionMetrics, type SessionUsagePoint } from "./metrics.js";
@@ -1218,10 +1223,14 @@ export class TraceIndex extends EventEmitter {
               ? hasPathSegment(baseRoot, "projects")
                 ? baseRoot
                 : path.join(baseRoot, "projects")
-            : entry.logType === "opencode"
-              ? hasPathSegment(baseRoot, "storage")
-                ? baseRoot
-                : path.join(baseRoot, "storage")
+              : entry.logType === "opencode"
+                ? hasPathSegment(baseRoot, "storage")
+                  ? baseRoot
+                  : path.join(baseRoot, "storage")
+              : entry.logType === "antigravity"
+                ? hasPathSegment(baseRoot, "brain")
+                  ? baseRoot
+                  : path.join(baseRoot, "brain")
               : entry.logType === "pi"
                 ? hasPathSegment(baseRoot, "sessions")
                   ? baseRoot
@@ -1526,6 +1535,9 @@ export class TraceIndex extends EventEmitter {
       if (entry.logType === "opencode" && !normalizedPath.includes("/storage/session/") && !normalizedPath.includes("/storage/session_diff/")) {
         continue;
       }
+      if (entry.logType === "antigravity" && !/\/brain\/[^/]+\/\.system_generated\/logs\/transcript\.jsonl$/.test(normalizedPath)) {
+        continue;
+      }
       if (entry.logType === "pi" && !normalizedPath.includes("/agent/sessions/")) {
         continue;
       }
@@ -1557,6 +1569,7 @@ export class TraceIndex extends EventEmitter {
 
   private async discoverSingleTraceFile(filePath: string, existingId?: string): Promise<DiscoveredTraceFile | null> {
     if (isInternalAgentLensTracePath(filePath)) return null;
+    if (isAntigravityTranscriptFullPath(filePath)) return null;
     const normalizedPath = filePath.toLowerCase();
     const isJsonl = normalizedPath.endsWith(".jsonl");
     const isJson = normalizedPath.endsWith(".json");
@@ -1586,6 +1599,8 @@ export class TraceIndex extends EventEmitter {
             ? isCursorTranscript
             : inferred.agentHint === "gemini"
               ? isJsonl || isGeminiSessionJson
+              : inferred.agentHint === "antigravity"
+                ? isJsonl && /\/brain\/[^/]+\/\.system_generated\/logs\/transcript\.jsonl$/.test(normalizedPath)
               : inferred.agentHint === "pi"
                 ? isJsonl && normalizedPath.includes("/agent/sessions/")
               : isJsonl;

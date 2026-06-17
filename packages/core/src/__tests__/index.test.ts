@@ -59,6 +59,7 @@ describe("trace index", () => {
       { directory: "~/.claude", logType: "claude" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.gemini/antigravity-cli", logType: "antigravity" },
       { directory: "~/.pi", logType: "pi" },
       { directory: "~/.local/share/opencode", logType: "opencode" },
     ]);
@@ -76,6 +77,7 @@ describe("trace index", () => {
       { directory: "~/custom-logs", logType: "unknown" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.gemini/antigravity-cli", logType: "antigravity" },
       { directory: "~/.pi", logType: "pi" },
     ]);
   });
@@ -92,6 +94,7 @@ describe("trace index", () => {
       { directory: "~/.claude", logType: "claude" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.gemini/antigravity-cli", logType: "antigravity" },
       { directory: "~/.pi", logType: "pi" },
     ]);
   });
@@ -796,6 +799,180 @@ describe("trace index", () => {
     } finally {
       index.stop();
     }
+  });
+
+  it("indexes antigravity brain transcripts and ignores transcript_full duplicates", async () => {
+    const root = await createTempRoot();
+    const antigravityHome = path.join(root, ".gemini", "antigravity-cli");
+    const conversationId = "02f74a92-74be-4701-a2b0-3d3dc4f2e13f";
+    const logsDir = path.join(antigravityHome, "brain", conversationId, ".system_generated", "logs");
+    await mkdir(logsDir, { recursive: true });
+
+    const transcript = [
+      {
+        step_index: 0,
+        source: "USER_EXPLICIT",
+        type: "USER_INPUT",
+        status: "DONE",
+        created_at: "2026-06-17T18:49:10.000Z",
+        content: "inspect the repo",
+      },
+      {
+        step_index: 1,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "2026-06-17T18:49:13.000Z",
+        content: "I will inspect the files.",
+      },
+      {
+        step_index: 2,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "2026-06-17T18:49:14.000Z",
+        tool_calls: [{ id: "tool-1", name: "LIST_DIRECTORY", arguments: { path: "." } }],
+      },
+      {
+        step_index: 3,
+        source: "MODEL",
+        type: "LIST_DIRECTORY",
+        status: "DONE",
+        created_at: "2026-06-17T18:49:15.000Z",
+        content: "package.json\npackages",
+      },
+    ]
+      .map((row) => JSON.stringify(row))
+      .join("\n");
+
+    await writeFile(path.join(logsDir, "transcript.jsonl"), transcript, "utf8");
+    await writeFile(path.join(logsDir, "transcript_full.jsonl"), transcript, "utf8");
+
+    const config = mergeConfig({
+      sessionLogDirectories: [{ directory: antigravityHome, logType: "antigravity" }],
+      sources: {
+        codex_home: {
+          name: "codex_home",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "codex",
+        },
+        claude_projects: {
+          name: "claude_projects",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        claude_history: {
+          name: "claude_history",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["history.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "claude",
+        },
+        cursor_agent_transcripts: {
+          name: "cursor_agent_transcripts",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/agent-transcripts/*.txt", "**/agent-transcripts/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "cursor",
+        },
+        opencode_storage_session: {
+          name: "opencode_storage_session",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/*.json"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "opencode",
+        },
+        gemini_tmp: {
+          name: "gemini_tmp",
+          enabled: false,
+          roots: [],
+          includeGlobs: ["**/chats/session-*.json", "**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "gemini",
+        },
+      },
+    });
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summaries = index.getSummaries();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.agent).toBe("antigravity");
+    expect(summaries[0]?.parser).toBe("antigravity");
+    expect(summaries[0]?.sessionId).toBe(conversationId);
+    expect(summaries[0]?.eventCount).toBe(4);
+    expect(summaries[0]?.toolUseCount).toBe(1);
+    expect(summaries[0]?.toolResultCount).toBe(1);
+
+    const detail = index.getSessionDetail(summaries[0]!.id);
+    expect(detail.events.map((event) => event.eventKind)).toEqual(["user", "assistant", "tool_use", "tool_result"]);
+    expect(detail.events.at(-1)?.toolResultText).toContain("package.json");
+  });
+
+  it("keeps broad explicit gemini source profiles on the gemini parser", async () => {
+    const root = await createTempRoot();
+    const geminiHome = path.join(root, ".gemini");
+    const conversationId = "02f74a92-74be-4701-a2b0-3d3dc4f2e13f";
+    const logsDir = path.join(geminiHome, "antigravity-cli", "brain", conversationId, ".system_generated", "logs");
+    await mkdir(logsDir, { recursive: true });
+    await writeFile(
+      path.join(logsDir, "transcript.jsonl"),
+      [
+        JSON.stringify({
+          step_index: 0,
+          source: "USER_EXPLICIT",
+          type: "USER_INPUT",
+          status: "DONE",
+          created_at: "2026-06-17T18:49:10.000Z",
+          content: "inspect the repo",
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = mergeConfig({
+      sessionLogDirectories: [],
+      sources: {
+        gemini_broad: {
+          name: "gemini_broad",
+          enabled: true,
+          roots: [geminiHome],
+          includeGlobs: ["**/*.jsonl"],
+          excludeGlobs: [],
+          maxDepth: 8,
+          agentHint: "gemini",
+        },
+      },
+    });
+
+    const discovered = await discoverTraceFiles(config);
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0]?.agentHint).toBe("gemini");
+    expect(discovered[0]?.parserHint).toBe("gemini");
+
+    const index = new TraceIndex(config);
+    await index.refresh();
+
+    const summaries = index.getSummaries();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.agent).toBe("gemini");
+    expect(summaries[0]?.parser).toBe("gemini");
   });
 
   it("indexes pi sessions via dirty refresh and derives pi metrics from usage", async () => {

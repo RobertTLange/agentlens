@@ -53,10 +53,11 @@ const AGENT_LEGEND_ITEMS: Array<{ label: string; className: string }> = [
   { label: "cursor", className: "agent-border-cursor" },
   { label: "opencode", className: "agent-border-opencode" },
   { label: "gemini", className: "agent-border-gemini" },
+  { label: "antigravity", className: "agent-border-antigravity" },
   { label: "pi", className: "agent-border-pi" },
   { label: "unknown", className: "agent-border-unknown" },
 ];
-const AGENT_TOOLTIP_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "pi", "unknown"];
+const AGENT_TOOLTIP_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"];
 const HEATMAP_METRIC_OPTIONS: Array<{ value: ActivityHeatmapMetric; label: string }> = [
   { value: "sessions", label: "Sessions" },
   { value: "output_tokens", label: "Output Tokens" },

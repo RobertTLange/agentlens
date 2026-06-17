@@ -65,7 +65,7 @@ const ACTIVITY_HEATMAP_METRICS: ActivityHeatmapMetric[] = ["sessions", "output_t
 const LIVE_STREAM_BATCH_FLUSH_MS = 64;
 const RAG_SEARCH_MODES = ["hybrid", "lexical", "semantic"] as const;
 const RAG_STATUSES = ["pending", "running", "complete", "stale", "failed", "skipped"] as const;
-const AGENT_KINDS = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"] as const;
+const AGENT_KINDS = ["claude", "codex", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"] as const;
 
 type StopSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
 
@@ -1031,6 +1031,7 @@ function commandMatchesAgent(command: string, agent: TraceSummary["agent"]): boo
   if (agent === "claude") return /\bclaude\b/.test(normalized);
   if (agent === "cursor") return /\bcursor\b/.test(normalized);
   if (agent === "gemini") return /\bgemini\b/.test(normalized);
+  if (agent === "antigravity") return /\bagy\b|\bantigravity\b/.test(normalized);
   if (agent === "pi") return isPiCommand(normalized);
   if (agent === "opencode") return /\bopencode\b/.test(normalized);
   return false;

@@ -17,7 +17,7 @@ import type {
 import type { TraceIndex } from "@agentlens/core";
 import type { ActivityResponseCache } from "./activity-cache.js";
 
-const AGENT_KIND_KEYS: AgentKind[] = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"];
+const AGENT_KIND_KEYS: AgentKind[] = ["claude", "codex", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"];
 const EVENT_KIND_KEYS: EventKind[] = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"];
 const DEFAULT_BIN_MINUTES = 5;
 const DEFAULT_BREAK_MINUTES = 10;
@@ -190,6 +190,7 @@ function createEmptyAgentCounts(): Record<AgentKind, number> {
     cursor: 0,
     opencode: 0,
     gemini: 0,
+    antigravity: 0,
     pi: 0,
     unknown: 0,
   };

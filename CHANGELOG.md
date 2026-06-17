@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Added `agentlens --version` to print the published CLI package version.
 - Added an Analysis tab, `/api/analysis`, and `agentlens analysis` for skill and subagent usage across indexed traces.
+- Added first-class Antigravity CLI trace discovery and parsing for `~/.gemini/antigravity-cli` brain transcripts.
 - Added a read-only RAG summary projection API that exposes PCA coordinates and adaptive cluster ids without returning raw embedding vectors.
 - Added a clickable Summaries embedding map with hover/focus title previews and synchronized summary selection.
 

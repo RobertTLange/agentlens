@@ -16,7 +16,7 @@ import type {
 import type { TraceIndex } from "./traceIndex.js";
 import { asArray, asRecord, asString, expandHome, nowMs } from "./utils.js";
 
-const AGENT_ORDER: AgentKind[] = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"];
+const AGENT_ORDER: AgentKind[] = ["claude", "codex", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"];
 const SUPPORTED_DETECTOR_AGENTS = new Set<AgentKind>(["codex", "claude"]);
 const SKILL_PATH_PATTERN = /(?:^|[\\/])skills[\\/](?:(?!SKILL\.md\b)[^\\/]+[\\/])*([^\\/]+)[\\/]SKILL\.md\b/g;
 

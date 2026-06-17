@@ -9,7 +9,7 @@ import type {
 const MINUTES_PER_DAY = 24 * 60;
 const HEATMAP_LEVEL_COUNT = 4;
 const SCALE_STEP_MINUTES = 4 * 60;
-const AGENT_KIND_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "pi", "unknown"];
+const AGENT_KIND_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"];
 
 export interface ActivityWeekHeatmapCellModel {
   key: string;

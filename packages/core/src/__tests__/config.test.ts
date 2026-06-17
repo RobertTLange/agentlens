@@ -70,6 +70,10 @@ describe("config", () => {
     expect(sonnet46Rate?.cachedCreate5mPer1MUsd).toBe(3.75);
     expect(sonnet46Rate?.cachedCreate1hPer1MUsd).toBe(6);
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.gemini", logType: "gemini" });
+    expect(config.sessionLogDirectories).toContainEqual({
+      directory: "~/.gemini/antigravity-cli",
+      logType: "antigravity",
+    });
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.pi", logType: "pi" });
     expect(config.analysis.skillRoots).toEqual(["~/.codex/skills", "~/.claude/skills"]);
     expect(config.analysis.topSessionLimit).toBe(20);
@@ -80,6 +84,7 @@ describe("config", () => {
       "cursor_agent_transcripts",
       "opencode_storage_session",
       "gemini_tmp",
+      "antigravity_brain",
       "pi_agent_sessions",
     ] as const;
     for (const sourceName of defaultEnabledSources) {
@@ -98,6 +103,16 @@ describe("config", () => {
     ]);
   });
 
+  it("infers antigravity log type from legacy sessionJsonlDirectories paths", () => {
+    const config = mergeConfig({
+      sessionJsonlDirectories: ["~/.gemini/antigravity-cli", "~/logs/other"],
+    });
+    expect(config.sessionLogDirectories).toEqual([
+      { directory: "~/.gemini/antigravity-cli", logType: "antigravity" },
+      { directory: "~/logs/other", logType: "unknown" },
+    ]);
+  });
+
   it("infers pi log type from legacy sessionJsonlDirectories paths", () => {
     const config = mergeConfig({
       sessionJsonlDirectories: ["~/.pi/agent/sessions", "~/logs/other"],
@@ -108,7 +123,7 @@ describe("config", () => {
     ]);
   });
 
-  it("auto-injects gemini and pi directories for legacy typed sessionLogDirectories", () => {
+  it("auto-injects gemini, antigravity, and pi directories for legacy typed sessionLogDirectories", () => {
     const config = mergeConfig({
       sessionLogDirectories: [
         { directory: "~/.codex", logType: "codex" },
@@ -121,6 +136,7 @@ describe("config", () => {
       { directory: "~/.claude", logType: "claude" },
       { directory: "~/.cursor", logType: "cursor" },
       { directory: "~/.gemini", logType: "gemini" },
+      { directory: "~/.gemini/antigravity-cli", logType: "antigravity" },
       { directory: "~/.pi", logType: "pi" },
     ]);
   });
@@ -145,6 +161,7 @@ describe("config", () => {
     expect(config.sources.cursor_agent_transcripts?.enabled).toBe(false);
     expect(config.sources.opencode_storage_session?.enabled).toBe(false);
     expect(config.sources.gemini_tmp?.enabled).toBe(false);
+    expect(config.sources.antigravity_brain?.enabled).toBe(false);
     expect(config.sources.pi_agent_sessions?.enabled).toBe(false);
   });
 

@@ -81,7 +81,7 @@ Keep this as a utilitarian analysis surface, not a marketing page. Use dense tab
 
 Initial filters:
 
-- Source agent: all, `codex`, `claude`, `cursor`, `gemini`, `opencode`, `pi`, `unknown`
+- Source agent: all, `codex`, `claude`, `cursor`, `gemini`, `antigravity`, `opencode`, `pi`, `unknown`
 - Since window: all, `24h`, `7d`, `30d`, custom text matching CLI `toMsWindow`
 
 Default filter is all agents and all indexed traces.
@@ -299,7 +299,7 @@ Avoid double-counting the same event.
 
 #### Other Agents
 
-For `cursor`, `gemini`, `opencode`, `pi`, and `unknown`:
+For `cursor`, `gemini`, `antigravity`, `opencode`, `pi`, and `unknown`:
 
 - Include sessions in `traceCount`.
 - Mark source-agent row `detectorSupport: "unsupported"`.

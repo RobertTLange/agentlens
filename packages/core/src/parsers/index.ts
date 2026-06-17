@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import type { ParseOutput, TraceParser } from "./types.js";
 import type { DiscoveredTraceFile } from "../discovery.js";
+import { AntigravityParser } from "./antigravity.js";
 import { ClaudeParser } from "./claude.js";
 import { CodexParser } from "./codex.js";
 import { CursorParser } from "./cursor.js";
@@ -20,6 +21,7 @@ export class ParserRegistry {
       new CursorParser(),
       new OpencodeParser(),
       new GeminiParser(),
+      new AntigravityParser(),
       new PiParser(),
       new GenericParser(),
     ];
