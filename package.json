@@ -22,6 +22,7 @@
   "overrides": {
     "@huggingface/transformers": {
       "onnxruntime-node": "1.22.0"
-    }
+    },
+    "protobufjs": "^7.6.4"
   }
 }

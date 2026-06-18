@@ -151,7 +151,10 @@ await removePreviousBundle();
 
 const internalPackageJsons = [];
 for (const target of internalBundleTargets) {
-  internalPackageJsons.push(await bundleInternalPackage(target));
+  internalPackageJsons.push({
+    sourceDir: target.sourceDir,
+    packageJson: await bundleInternalPackage(target),
+  });
 }
 
 const cliPackageJson = await readJson(cliPackageJsonPath);
@@ -163,13 +166,13 @@ for (const dependencyName of directDependencies) {
   await bundleExternalDependencyTree(dependencyName);
 }
 
-for (const packageJson of internalPackageJsons) {
+for (const { sourceDir, packageJson } of internalPackageJsons) {
   const internalDependencyEntries = [
     ...Object.keys(packageJson.dependencies ?? {}).map((name) => ({ name, optional: false })),
     ...Object.keys(packageJson.optionalDependencies ?? {}).map((name) => ({ name, optional: true })),
   ].filter((dependency) => !dependency.name.startsWith("@agentlens/"));
   for (const dependency of internalDependencyEntries) {
-    await bundleExternalDependencyTree(dependency.name, repoRoot, { optional: dependency.optional });
+    await bundleExternalDependencyTree(dependency.name, sourceDir, { optional: dependency.optional });
   }
 }
 

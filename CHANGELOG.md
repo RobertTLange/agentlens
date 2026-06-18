@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [TBD]
+
+## [0.4.0] - 2026-06-18
 ### Added
 - Added `agentlens --version` to print the published CLI package version.
 - Added an Analysis tab, `/api/analysis`, and `agentlens analysis` for skill and subagent usage across indexed traces.
