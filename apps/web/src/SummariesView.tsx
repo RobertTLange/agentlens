@@ -278,7 +278,6 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
   const [error, setError] = useState("");
   const userSelectedTraceRef = useRef(false);
   const projectionRequestRef = useRef(0);
-  const detailRequestedTraceIdsRef = useRef<Set<string>>(new Set());
 
   const selectedSummary = useMemo(
     () => summaries.find((summary) => summary.traceId === selectedTraceId) ?? null,
@@ -311,7 +310,6 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
 
   function selectTraceFromUser(traceId: string): void {
     userSelectedTraceRef.current = true;
-    detailRequestedTraceIdsRef.current.add(traceId);
     setSelectedTraceId(traceId);
   }
 
@@ -460,9 +458,8 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
 
   useEffect(() => {
     if (viewMode !== "sessions" || isSearching || !selectedTraceId) return;
-    if (!detailRequestedTraceIdsRef.current.has(selectedTraceId) && selectedTraceId !== selectedTraceIdProp) return;
     const current = summaries.find((summary) => summary.traceId === selectedTraceId);
-    if (!current?.summary || current.summary.userGoal) return;
+    if (!current?.summary || hasHydratedSummaryDetail(current)) return;
     let cancelled = false;
     fetch(`/api/rag/summaries/${encodeURIComponent(selectedTraceId)}`)
       .then(async (response) => {

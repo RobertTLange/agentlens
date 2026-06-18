@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Trace Inspector now requests compact event payloads for collapsed cards and lazy-loads full raw JSON only when an event is expanded.
 
 ### Fixed
+- Hydrated the initially selected Summaries detail panel so compact table-of-contents rows no longer show partial summaries until clicked again.
 - Prioritized summary-document embeddings, refreshed the Summaries projection periodically, and decoupled `rag watch --limit` from the default embedding batch so the embedding map catches up in the same daemon pass as summaries arrive.
 - Bounded RAG worker trace-document embedding refresh per pass and exposed `--embedding-limit` / `--lexical-only` controls so daemon passes are less likely to OOM.
 - Stabilized RAG daemon passes by enabling SQLite WAL/busy timeout handling, avoiding full-history hydration during bounded indexing, and embedding all missing summary documents before trace chunks.

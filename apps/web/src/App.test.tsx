@@ -1462,7 +1462,9 @@ describe("App sessions list live motion", () => {
     expect(rows[0]?.textContent).not.toContain("Second detail");
     expect(rows[0]?.textContent).not.toContain("/tmp/");
     expect(document.querySelector(".rag-detail-head")?.textContent).toContain("Newer trace summary");
-    expect(document.body.textContent).not.toContain("Find prior failed tests");
+    await waitFor(() => expect(document.body.textContent).toContain("Find prior failed tests"));
+    expect(document.body.textContent).toContain("Ran tests");
+    expect(requestedUrls.some((url) => url.includes("/api/rag/summaries/trace-b"))).toBe(true);
     expect(Array.from(document.querySelectorAll("button")).some((node) => node.textContent === "load map")).toBe(false);
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/rag/projection?"))).toBe(true));
     await waitFor(() => expect(document.querySelectorAll(".rag-projection-point")).toHaveLength(2));
