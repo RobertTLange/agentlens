@@ -32,6 +32,7 @@
   --agent-border-cursor: #16a34a;
   --agent-border-opencode: #7c3aed;
   --agent-border-gemini: #db2777;
+  --agent-border-antigravity: #dc2626;
   --agent-border-pi: #0f766e;
   --agent-border-unknown: #64748b;
   --agent-border-none: #94a3b8;
@@ -2430,6 +2431,7 @@ body {
 .activity-legend-swatch.agent-border-cursor { border-color: var(--agent-border-cursor); }
 .activity-legend-swatch.agent-border-opencode { border-color: var(--agent-border-opencode); }
 .activity-legend-swatch.agent-border-gemini { border-color: var(--agent-border-gemini); }
+.activity-legend-swatch.agent-border-antigravity { border-color: var(--agent-border-antigravity); }
 .activity-legend-swatch.agent-border-pi { border-color: var(--agent-border-pi); }
 .activity-legend-swatch.agent-border-unknown { border-color: var(--agent-border-unknown); }
 
@@ -2616,6 +2618,10 @@ body {
 
 .activity-session-segment.agent-border-gemini {
   border-color: var(--agent-border-gemini);
+}
+
+.activity-session-segment.agent-border-antigravity {
+  border-color: var(--agent-border-antigravity);
 }
 
 .activity-session-segment.agent-border-pi {
@@ -3781,6 +3787,10 @@ body {
 
 .analysis-agent-card.kind-gemini {
   border-top-color: var(--agent-border-gemini);
+}
+
+.analysis-agent-card.kind-antigravity {
+  border-top-color: var(--agent-border-antigravity);
 }
 
 .analysis-agent-card.kind-opencode {

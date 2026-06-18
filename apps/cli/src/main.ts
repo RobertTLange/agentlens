@@ -31,7 +31,7 @@ const cliPackageJson = require("../package.json") as { version: string };
 const LATEST_KEYWORD = "latest";
 const DEFAULT_HISTORY_LIMIT = 50;
 const STATUS_ORDER: TraceSummary["activityStatus"][] = ["running", "waiting_input", "idle"];
-const AGENT_KINDS = ["claude", "codex", "cursor", "opencode", "gemini", "pi", "unknown"] as const;
+const AGENT_KINDS = ["claude", "codex", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"] as const;
 const SEARCH_MODES = ["hybrid", "lexical", "semantic"] as const;
 
 function printTable(rows: string[][]): void {

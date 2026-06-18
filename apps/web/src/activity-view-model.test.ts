@@ -9,6 +9,7 @@ function makeAgentCounts(overrides: Partial<Record<AgentKind, number>> = {}): Re
     cursor: overrides.cursor ?? 0,
     opencode: overrides.opencode ?? 0,
     gemini: overrides.gemini ?? 0,
+    antigravity: overrides.antigravity ?? 0,
     pi: overrides.pi ?? 0,
     unknown: overrides.unknown ?? 0,
   };

@@ -26,6 +26,7 @@ sessionLogDirectories = [
   { directory = "~/.claude", logType = "claude" },
   { directory = "~/.cursor", logType = "cursor" },
   { directory = "~/.gemini", logType = "gemini" },
+  { directory = "~/.gemini/antigravity-cli", logType = "antigravity" },
   { directory = "~/.pi", logType = "pi" },
   { directory = "~/.local/share/opencode", logType = "opencode" }
 ]
@@ -83,6 +84,15 @@ includeGlobs = ["**/chats/session-*.json", "**/*.jsonl"]
 excludeGlobs = []
 maxDepth = 8
 agentHint = "gemini"
+
+[sources.antigravity_brain]
+name = "antigravity_brain"
+enabled = true
+roots = ["~/.gemini/antigravity-cli/brain"]
+includeGlobs = ["*/.system_generated/logs/transcript.jsonl"]
+excludeGlobs = ["**/transcript_full.jsonl"]
+maxDepth = 6
+agentHint = "antigravity"
 
 [sources.pi_agent_sessions]
 name = "pi_agent_sessions"

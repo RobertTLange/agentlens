@@ -1,4 +1,4 @@
-export type AgentKind = "claude" | "codex" | "cursor" | "opencode" | "gemini" | "pi" | "unknown";
+export type AgentKind = "claude" | "codex" | "cursor" | "opencode" | "gemini" | "antigravity" | "pi" | "unknown";
 
 export type EventKind =
   | "system"

@@ -20,6 +20,7 @@ Design goals:
 - Claude
 - Cursor
 - Gemini
+- Antigravity
 - Pi
 - OpenCode
 
@@ -31,6 +32,7 @@ Design goals:
 | Claude | `sources.claude_projects`, `sources.claude_history` | `~/.claude/projects/**/*.jsonl`, `~/.claude/history.jsonl` |
 | Cursor | `sources.cursor_agent_transcripts` | `~/.cursor/projects/**/agent-transcripts/*.txt` |
 | Gemini | `sources.gemini_tmp` | `~/.gemini/tmp/**/chats/session-*.json`, `~/.gemini/tmp/**/*.jsonl` |
+| Antigravity | `sources.antigravity_brain` | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl` |
 | Pi | `sources.pi_agent_sessions` | `~/.pi/agent/sessions/**/*.jsonl` |
 | OpenCode | `sources.opencode_storage_session` + fallback discovery | `~/.local/share/opencode/storage/session/**/*.json`, `~/.local/share/opencode/storage/session_diff/**/*.json`, `~/.local/share/opencode/storage/opencode.db` |
 

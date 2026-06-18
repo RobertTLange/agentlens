@@ -1,7 +1,7 @@
 import type { AgentActivityBin, AgentActivityDay, AgentKind } from "@agentlens/contracts";
 import { kindClassSuffix } from "./view-model.js";
 
-const AGENT_KIND_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "pi", "unknown"];
+const AGENT_KIND_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"];
 const EVENT_KIND_ORDER = ["system", "assistant", "user", "tool_use", "tool_result", "reasoning", "compaction", "meta"] as const;
 type EventKindKey = (typeof EVENT_KIND_ORDER)[number];
 const EVENT_KIND_PASTEL_BY_KIND: Record<EventKindKey, string> = {

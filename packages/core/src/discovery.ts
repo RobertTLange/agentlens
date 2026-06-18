@@ -20,6 +20,11 @@ export function isInternalAgentLensTracePath(filePath: string): boolean {
   return filePath.replace(/\\/g, "/").toLowerCase().includes("agentlens-rag-");
 }
 
+export function isAntigravityTranscriptFullPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return normalized.includes("/.gemini/antigravity-cli/brain/") && normalized.endsWith("/transcript_full.jsonl");
+}
+
 async function discoverProfile(config: AppConfig, profileName: string): Promise<DiscoveredTraceFile[]> {
   const profile = config.sources[profileName];
   if (!profile || !profile.enabled) {
@@ -43,14 +48,17 @@ async function discoverProfile(config: AppConfig, profileName: string): Promise<
 
     for (const filePath of matches) {
       if (isInternalAgentLensTracePath(filePath)) continue;
+      if (isAntigravityTranscriptFullPath(filePath)) continue;
       try {
         const fileStat = await stat(filePath);
         const id = stableId([filePath, String(fileStat.dev), String(fileStat.ino)]);
+        const agentHint = profile.agentHint ?? "unknown";
         files.push({
           id,
           path: path.resolve(filePath),
           sourceProfile: profileName,
-          agentHint: profile.agentHint ?? "unknown",
+          agentHint,
+          ...(agentHint !== "unknown" ? { parserHint: agentHint } : {}),
           sizeBytes: fileStat.size,
           mtimeMs: fileStat.mtimeMs,
           ino: Number(fileStat.ino),
@@ -100,6 +108,15 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
         return ["**/chats/session-*.json", "**/*.jsonl"];
       }
       return ["tmp/**/chats/session-*.json", "tmp/**/*.jsonl"];
+    }
+    if (logType === "antigravity") {
+      if (hasPathSegment(root, "logs")) {
+        return ["transcript.jsonl"];
+      }
+      if (hasPathSegment(root, "brain")) {
+        return ["*/.system_generated/logs/transcript.jsonl"];
+      }
+      return ["brain/*/.system_generated/logs/transcript.jsonl"];
     }
     if (logType === "opencode") {
       if (hasPathSegment(root, "storage")) {
@@ -174,6 +191,7 @@ async function discoverSessionLogDirectories(config: AppConfig): Promise<Discove
 
     for (const filePath of matches) {
       if (isInternalAgentLensTracePath(filePath)) continue;
+      if (isAntigravityTranscriptFullPath(filePath)) continue;
       if (entry.logType === "claude" && isClaudeCompactionSidechainFile(filePath)) {
         continue;
       }

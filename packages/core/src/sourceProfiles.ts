@@ -6,6 +6,7 @@ export const DEFAULT_SESSION_LOG_DIRECTORIES: SessionLogDirectoryConfig[] = [
   { directory: "~/.claude", logType: "claude" },
   { directory: "~/.cursor", logType: "cursor" },
   { directory: "~/.gemini", logType: "gemini" },
+  { directory: "~/.gemini/antigravity-cli", logType: "antigravity" },
   { directory: "~/.pi", logType: "pi" },
   { directory: "~/.local/share/opencode", logType: "opencode" },
 ];
@@ -64,6 +65,15 @@ export const DEFAULT_SOURCE_PROFILES: Record<string, SourceProfileConfig> = {
     excludeGlobs: [],
     maxDepth: 8,
     agentHint: "gemini",
+  },
+  antigravity_brain: {
+    name: "antigravity_brain",
+    enabled: true,
+    roots: ["~/.gemini/antigravity-cli/brain"],
+    includeGlobs: ["*/.system_generated/logs/transcript.jsonl"],
+    excludeGlobs: ["**/transcript_full.jsonl"],
+    maxDepth: 6,
+    agentHint: "antigravity",
   },
   pi_agent_sessions: {
     name: "pi_agent_sessions",
