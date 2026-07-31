@@ -58,6 +58,8 @@ forcePathStyle = true
 
 Generate an RSA public/private key pair yourself; configure only the public key on upload machines. Run `agentlens sync once` for a one-shot archive or `agentlens sync watch` for the 60-second daemon. The remote archive is append-only: local deletion never deletes remote objects. For Garage or another self-hosted S3 service, supply its HTTPS endpoint and use path-style access as above.
 
+For a single-node local Garage development setup, see [the Garage recipe](examples/garage/README.md). It intentionally does not manage production TLS, credentials, backups, or upgrades.
+
 ### From source
 
 ```bash
