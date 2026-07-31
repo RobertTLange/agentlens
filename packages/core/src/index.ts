@@ -12,4 +12,5 @@ export * from "./ragStore.js";
 export * from "./discovery.js";
 export * from "./traceIndex.js";
 export * from "./snapshot.js";
+export * from "./remoteArchive.js";
 export { toMsWindow } from "./utils.js";
