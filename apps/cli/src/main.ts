@@ -17,6 +17,8 @@ import {
   runRagWorker,
   runRagSupervisor,
   RemoteSyncService,
+  createRemoteObjectStore,
+  listRemoteManifests,
   searchRag,
   saveConfig,
   startRagDaemon,
@@ -916,6 +918,16 @@ sync.command("watch").option("--json", "JSON output").action(async (opts: { json
   await run();
   setInterval(() => { void run().catch((error: unknown) => console.error(error)); }, config.remoteArchive.flushIntervalMs);
   await new Promise<void>(() => undefined);
+});
+
+sync.command("sessions").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const manifests = await listRemoteManifests(createRemoteObjectStore(config));
+  const latestBySession = new Map<string, (typeof manifests)[number]>();
+  for (const manifest of manifests) if (!latestBySession.has(manifest.sessionUid)) latestBySession.set(manifest.sessionUid, manifest);
+  const sessions = Array.from(latestBySession.values());
+  if (opts.json) console.log(JSON.stringify(sessions, null, 2));
+  else printTable([["session", "agent", "provider", "events", "updated"], ...sessions.map((item) => [item.sessionUid, item.agent, item.provider, String(item.chunks.reduce((count, chunk) => count + chunk.eventCount, 0)), fmtTimeCompact(item.createdAtMs)])]);
 });
 
 const rag = program.command("rag").description("Persistent RAG summaries and search");
