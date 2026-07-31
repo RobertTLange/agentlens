@@ -54,8 +54,10 @@ export interface ArchiveManifest {
   revisionSha256: string;
   createdAtMs: number;
   chunks: ArchiveChunkDescriptor[];
-  raw?: { key: string; sha256: string; encryption: "rsa-oaep-sha256" };
+  raw?: { key: string; sha256: string; encryption: "hybrid-rsa-oaep-sha256" };
 }
+
+export type ArchiveManifestInput = Omit<ArchiveManifest, "schemaVersion" | "recordType" | "revisionSha256">;
 
 function sha256(parts: string[]): string {
   const hash = createHash("sha256");
@@ -170,4 +172,18 @@ export function archiveObjectKey(kind: ArchiveObjectKind, digest: string, compre
   const sha = requireSha256(digest);
   const suffix = compression === "zstd" ? ".jsonl.zst" : ".jsonl";
   return `objects/${kind}/${sha.slice(0, 2)}/${sha}${suffix}`;
+}
+
+export function createArchiveManifest(input: ArchiveManifestInput): ArchiveManifest {
+  const canonical = {
+    ...input,
+    originIds: [...new Set(input.originIds)].sort(),
+    chunks: [...input.chunks],
+  };
+  const revisionSha256 = createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+  return { schemaVersion: REMOTE_ARCHIVE_SCHEMA_VERSION, recordType: "manifest", revisionSha256, ...canonical };
+}
+
+export function archiveManifestKey(sessionUid: string, revisionSha256: string): string {
+  return `manifests/${requireIdentifier(sessionUid, "session UID")}/${requireSha256(revisionSha256)}.json`;
 }

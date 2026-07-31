@@ -243,7 +243,8 @@ export class S3ObjectStore implements ObjectStore {
     const endpoint = options.endpoint?.trim();
     if (endpoint) {
       const url = new URL(endpoint);
-      if (url.protocol !== "https:" && !(url.protocol === "http:" && options.allowInsecureHttpEndpoint)) {
+      const localHost = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && options.allowInsecureHttpEndpoint && localHost)) {
         throw new Error("S3 endpoint must use HTTPS; allowInsecureHttpEndpoint is only for local development");
       }
     }

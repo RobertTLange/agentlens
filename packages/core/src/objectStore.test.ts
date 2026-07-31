@@ -99,6 +99,9 @@ describe("S3ObjectStore", () => {
     expect(
       () => new S3ObjectStore({ bucket: "archive", endpoint: "http://localhost:3900", allowInsecureHttpEndpoint: true }),
     ).not.toThrow();
+    expect(
+      () => new S3ObjectStore({ bucket: "archive", endpoint: "http://garage.example.test", allowInsecureHttpEndpoint: true }),
+    ).toThrow("HTTPS");
   });
 
   it("retries a conditional conflict and paginates lists", async () => {

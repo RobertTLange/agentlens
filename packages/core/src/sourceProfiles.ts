@@ -176,4 +176,15 @@ export const DEFAULT_CONFIG: AppConfig = {
     topSessionLimit: 20,
     cachePath: "~/.agentlens/analysis-cache.json",
   },
+  remoteArchive: {
+    enabled: false,
+    namespace: "",
+    originId: "",
+    flushIntervalMs: 60_000,
+    idleFlushMs: 120_000,
+    statePath: "~/.agentlens/remote-archive-state.db",
+    cachePath: "~/.agentlens/remote-cache",
+    rawPublicKeyPath: "",
+    store: { kind: "filesystem", directory: "~/.agentlens/remote-archive" },
+  },
 };

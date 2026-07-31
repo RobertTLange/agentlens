@@ -16,4 +16,5 @@ export * from "./remoteArchive.js";
 export * from "./archiveCodec.js";
 export * from "./archiveEncryption.js";
 export * from "./objectStore.js";
+export * from "./remoteSync.js";
 export { toMsWindow } from "./utils.js";
