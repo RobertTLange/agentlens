@@ -10,6 +10,7 @@ import { redactEvents } from "./redaction.js";
 import { encodeZstd } from "./archiveCodec.js";
 import { encryptRawArchive } from "./archiveEncryption.js";
 import { FileSystemObjectStore, S3ObjectStore, type ObjectStore } from "./objectStore.js";
+import { CachedObjectStore } from "./objectStoreCache.js";
 import {
   archiveManifestKey,
   archiveObjectKey,
@@ -35,6 +36,10 @@ export function createRemoteObjectStore(config: AppConfig): ObjectStore {
     forcePathStyle: store.forcePathStyle,
     allowInsecureHttpEndpoint: store.allowInsecureHttpEndpoint,
   });
+}
+
+export function createCachedRemoteObjectStore(config: AppConfig): ObjectStore {
+  return new CachedObjectStore(createRemoteObjectStore(config), expandHome(config.remoteArchive.cachePath));
 }
 
 export function validateRemoteArchiveConfig(config: AppConfig): void {

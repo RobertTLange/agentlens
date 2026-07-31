@@ -17,7 +17,7 @@ import {
   runRagWorker,
   runRagSupervisor,
   RemoteSyncService,
-  createRemoteObjectStore,
+  createCachedRemoteObjectStore,
   listRemoteManifests,
   searchRag,
   saveConfig,
@@ -922,7 +922,7 @@ sync.command("watch").option("--json", "JSON output").action(async (opts: { json
 
 sync.command("sessions").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
   const config = await loadConfig(program.opts<{ config: string }>().config);
-  const manifests = await listRemoteManifests(createRemoteObjectStore(config));
+  const manifests = await listRemoteManifests(createCachedRemoteObjectStore(config));
   const latestBySession = new Map<string, (typeof manifests)[number]>();
   for (const manifest of manifests) if (!latestBySession.has(manifest.sessionUid)) latestBySession.set(manifest.sessionUid, manifest);
   const sessions = Array.from(latestBySession.values());
