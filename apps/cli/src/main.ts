@@ -16,6 +16,7 @@ import {
   runRagIndexOnce,
   runRagWorker,
   runRagSupervisor,
+  RemoteSyncService,
   searchRag,
   saveConfig,
   startRagDaemon,
@@ -893,6 +894,28 @@ configCmd.command("set <key> <value>").action(async (key: string, value: string)
   const merged = mergeConfig(mutable as Partial<AppConfig>);
   await saveConfig(merged, configPath);
   console.log(`updated ${key}`);
+});
+
+const sync = program.command("sync").description("Encrypted remote trace archive synchronization");
+
+sync.command("once").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const result = await new RemoteSyncService(config).syncOnce();
+  if (opts.json) console.log(JSON.stringify(result, null, 2));
+  else console.log(`scanned ${result.scanned}; uploaded ${result.uploaded}; skipped ${result.skipped}; failures ${result.failures.length}`);
+  if (result.failures.length > 0) process.exitCode = 1;
+});
+
+sync.command("watch").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const service = new RemoteSyncService(config);
+  const run = async (): Promise<void> => {
+    const result = await service.syncOnce();
+    console.log(opts.json ? JSON.stringify(result) : `sync: uploaded ${result.uploaded}; skipped ${result.skipped}; failures ${result.failures.length}`);
+  };
+  await run();
+  setInterval(() => { void run().catch((error: unknown) => console.error(error)); }, config.remoteArchive.flushIntervalMs);
+  await new Promise<void>(() => undefined);
 });
 
 const rag = program.command("rag").description("Persistent RAG summaries and search");
