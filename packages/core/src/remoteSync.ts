@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "@agentlens/contracts";
+import type { NormalizedEvent } from "@agentlens/contracts";
 import { expandHome } from "./utils.js";
 import { discoverTraceFiles, type DiscoveredTraceFile } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
@@ -58,6 +59,13 @@ export function validateRemoteArchiveConfig(config: AppConfig): void {
 
 function rawContext(sessionUid: string, originId: string): string { return `${sessionUid}\u0000${originId}\u0000raw`; }
 
+export function canonicalizeRemoteEvents(config: AppConfig, sessionUid: string, events: NormalizedEvent[], observedAtMs: number) {
+  const redaction = { ...config.redaction, mode: "strict" as const, alwaysOn: true };
+  return redactEvents(events, redaction).map((event, sequence) =>
+    createArchiveEvent({ sessionUid, originId: config.remoteArchive.originId, sequence, observedAtMs: event.timestampMs ?? observedAtMs, event }),
+  );
+}
+
 async function loadState(filePath: string): Promise<SyncState> {
   try {
     const parsed = JSON.parse(await readFile(filePath, "utf8")) as Partial<SyncState>;
@@ -110,10 +118,7 @@ export class RemoteSyncService {
     const parsed = this.parser.parseText(file, raw.toString("utf8"));
     const provider = parsed.agent;
     const sessionUid = createSessionUid({ namespace: this.config.remoteArchive.namespace, provider, providerSessionId: parsed.sessionId, fallbackFingerprint: fallbackFingerprint(raw) });
-    const redaction = { ...this.config.redaction, mode: "strict" as const, alwaysOn: true };
-    const events = redactEvents(parsed.events, redaction).map((event, sequence) => createArchiveEvent({
-      sessionUid, originId: this.config.remoteArchive.originId, sequence, observedAtMs: event.timestampMs ?? file.mtimeMs, event,
-    }));
+    const events = canonicalizeRemoteEvents(this.config, sessionUid, parsed.events, file.mtimeMs);
     if (events.length === 0) return;
     const encoded = encodeArchiveEvents(events);
     const compressed = await encodeZstd(encoded);
