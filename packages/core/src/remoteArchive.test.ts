@@ -78,6 +78,7 @@ describe("remote archive", () => {
       sessionUid: "session-uid",
       originId: "machine-a",
       sequence: 4,
+      observedAtMs: 1_700_000_000_000,
       event: event(),
     });
 
@@ -86,6 +87,8 @@ describe("remote archive", () => {
     expect(decoded).toEqual([archiveEvent]);
     expect(decoded[0]?.event.traceId).toBe("session-uid");
     expect(decoded[0]?.event.eventId).not.toContain("local-trace");
+    expect(decoded[0]?.event.raw).toEqual({});
+    expect(decoded[0]?.observedAtMs).toBe(1_700_000_000_000);
   });
 
   it("creates immutable content-addressed object keys", () => {

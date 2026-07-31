@@ -14,5 +14,6 @@ export * from "./traceIndex.js";
 export * from "./snapshot.js";
 export * from "./remoteArchive.js";
 export * from "./archiveCodec.js";
+export * from "./archiveEncryption.js";
 export * from "./objectStore.js";
 export { toMsWindow } from "./utils.js";

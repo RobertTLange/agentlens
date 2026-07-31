@@ -17,6 +17,7 @@ export interface ArchiveEventInput {
   sessionUid: string;
   originId: string;
   sequence: number;
+  observedAtMs?: number;
   event: NormalizedEvent;
 }
 
@@ -101,6 +102,7 @@ function canonicalEvent(sessionUid: string, sequence: number, input: NormalizedE
     eventId: normalizedEventId(sessionUid, sequence, input),
     index: sequence,
     offset: sequence,
+    raw: {},
   };
 }
 
@@ -122,7 +124,7 @@ export function createArchiveEvent(input: ArchiveEventInput): ArchiveEvent {
     sessionUid,
     originId: requireIdentifier(input.originId, "origin ID"),
     sequence: input.sequence,
-    observedAtMs: Date.now(),
+    observedAtMs: input.observedAtMs ?? input.event.timestampMs ?? Date.now(),
     event: canonicalEvent(sessionUid, input.sequence, input.event),
   };
 }
