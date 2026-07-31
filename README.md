@@ -35,6 +35,31 @@ npm install -g @roberttlange/agentlens
 agentlens --browser
 ```
 
+## Encrypted Remote Trace Archive
+
+AgentLens can push redacted canonical traces plus lossless, client-side-encrypted provider files to a filesystem or S3-compatible bucket. Credentials stay in the standard AWS credential chain; never put access keys in `config.toml`.
+
+```toml
+[remoteArchive]
+enabled = true
+namespace = "personal"
+originId = "laptop"
+rawPublicKeyPath = "~/.agentlens/keys/archive-public.pem"
+flushIntervalMs = 60000
+
+[remoteArchive.store]
+kind = "s3"
+bucket = "agentlens"
+endpoint = "https://garage.example.com"
+region = "garage"
+prefix = "traces"
+forcePathStyle = true
+```
+
+Generate an RSA public/private key pair yourself; configure only the public key on upload machines. Run `agentlens sync once` for a one-shot archive or `agentlens sync watch` for the 60-second daemon. The remote archive is append-only: local deletion never deletes remote objects. For Garage or another self-hosted S3 service, supply its HTTPS endpoint and use path-style access as above.
+
+For a single-node local Garage development setup, see [the Garage recipe](examples/garage/README.md). It intentionally does not manage production TLS, credentials, backups, or upgrades.
+
 ### From source
 
 ```bash

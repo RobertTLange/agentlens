@@ -15,6 +15,8 @@ import type {
   PricingSyncConfig,
   RagConfig,
   RagDailySummaryConfig,
+  RemoteArchiveConfig,
+  RemoteArchiveStoreConfig,
   RetentionConfig,
   RedactionConfig,
   ScanConfig,
@@ -47,9 +49,10 @@ function mergeProfile(defaultProfile: SourceProfileConfig, input?: Partial<Sourc
   return merged;
 }
 
-export type PartialAppConfigInput = Omit<Partial<AppConfig>, "analysis" | "rag"> & {
+export type PartialAppConfigInput = Omit<Partial<AppConfig>, "analysis" | "rag" | "remoteArchive"> & {
   analysis?: Partial<AnalysisConfig>;
   rag?: Omit<Partial<RagConfig>, "dailySummary"> & { dailySummary?: Partial<RagDailySummaryConfig> };
+  remoteArchive?: Partial<RemoteArchiveConfig>;
   sessionJsonlDirectories?: string[];
 };
 
@@ -453,6 +456,46 @@ function mergeAnalysis(input?: Partial<AnalysisConfig>): AnalysisConfig {
   };
 }
 
+function mergeRemoteArchiveStore(input: Partial<RemoteArchiveStoreConfig> | undefined): RemoteArchiveStoreConfig {
+  const defaults = DEFAULT_CONFIG.remoteArchive.store;
+  if (input?.kind !== undefined && input.kind !== "filesystem" && input.kind !== "s3") {
+    throw new Error("remote archive store kind must be filesystem or s3");
+  }
+  if (input?.kind === "s3") {
+    return {
+      kind: "s3",
+      bucket: nonEmptyStringOrDefault(input.bucket, ""),
+      prefix: typeof input.prefix === "string" ? input.prefix.trim() : "",
+      region: typeof input.region === "string" ? input.region.trim() : "",
+      endpoint: typeof input.endpoint === "string" ? input.endpoint.trim() : "",
+      forcePathStyle: input.forcePathStyle ?? Boolean(input.endpoint),
+      allowInsecureHttpEndpoint: input.allowInsecureHttpEndpoint === true,
+    };
+  }
+  return {
+    kind: "filesystem",
+    directory: nonEmptyStringOrDefault(
+      input && "directory" in input ? input.directory : undefined,
+      defaults.kind === "filesystem" ? defaults.directory : "~/.agentlens/remote-archive",
+    ),
+  };
+}
+
+function mergeRemoteArchive(input?: Partial<RemoteArchiveConfig>): RemoteArchiveConfig {
+  const defaults = DEFAULT_CONFIG.remoteArchive;
+  return {
+    enabled: typeof input?.enabled === "boolean" ? input.enabled : defaults.enabled,
+    namespace: typeof input?.namespace === "string" ? input.namespace.trim() : defaults.namespace,
+    originId: typeof input?.originId === "string" ? input.originId.trim() : defaults.originId,
+    flushIntervalMs: positiveMsOrDefault(input?.flushIntervalMs, defaults.flushIntervalMs),
+    idleFlushMs: positiveMsOrDefault(input?.idleFlushMs, defaults.idleFlushMs),
+    statePath: nonEmptyStringOrDefault(input?.statePath, defaults.statePath),
+    cachePath: nonEmptyStringOrDefault(input?.cachePath, defaults.cachePath),
+    rawPublicKeyPath: typeof input?.rawPublicKeyPath === "string" ? input.rawPublicKeyPath.trim() : defaults.rawPublicKeyPath,
+    store: mergeRemoteArchiveStore(input?.store),
+  };
+}
+
 export function mergeConfigWithPricingDefaults(
   input?: PartialAppConfigInput,
   pricingDefaults?: PricingDefaultsOverride,
@@ -504,6 +547,7 @@ export function mergeConfigWithPricingDefaults(
     models: mergeModels(input?.models, pricingDefaults?.contextWindows),
     rag: mergeRag(input?.rag),
     analysis: mergeAnalysis(input?.analysis),
+    remoteArchive: mergeRemoteArchive(input?.remoteArchive),
   };
 }
 

@@ -16,6 +16,9 @@ import {
   runRagIndexOnce,
   runRagWorker,
   runRagSupervisor,
+  RemoteSyncService,
+  createCachedRemoteObjectStore,
+  listRemoteManifests,
   searchRag,
   saveConfig,
   startRagDaemon,
@@ -893,6 +896,38 @@ configCmd.command("set <key> <value>").action(async (key: string, value: string)
   const merged = mergeConfig(mutable as Partial<AppConfig>);
   await saveConfig(merged, configPath);
   console.log(`updated ${key}`);
+});
+
+const sync = program.command("sync").description("Encrypted remote trace archive synchronization");
+
+sync.command("once").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const result = await new RemoteSyncService(config).syncOnce();
+  if (opts.json) console.log(JSON.stringify(result, null, 2));
+  else console.log(`scanned ${result.scanned}; uploaded ${result.uploaded}; skipped ${result.skipped}; failures ${result.failures.length}`);
+  if (result.failures.length > 0) process.exitCode = 1;
+});
+
+sync.command("watch").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const service = new RemoteSyncService(config);
+  const run = async (): Promise<void> => {
+    const result = await service.syncOnce();
+    console.log(opts.json ? JSON.stringify(result) : `sync: uploaded ${result.uploaded}; skipped ${result.skipped}; failures ${result.failures.length}`);
+  };
+  await run();
+  setInterval(() => { void run().catch((error: unknown) => console.error(error)); }, config.remoteArchive.flushIntervalMs);
+  await new Promise<void>(() => undefined);
+});
+
+sync.command("sessions").option("--json", "JSON output").action(async (opts: { json?: boolean }) => {
+  const config = await loadConfig(program.opts<{ config: string }>().config);
+  const manifests = await listRemoteManifests(createCachedRemoteObjectStore(config));
+  const latestBySession = new Map<string, (typeof manifests)[number]>();
+  for (const manifest of manifests) if (!latestBySession.has(manifest.sessionUid)) latestBySession.set(manifest.sessionUid, manifest);
+  const sessions = Array.from(latestBySession.values());
+  if (opts.json) console.log(JSON.stringify(sessions, null, 2));
+  else printTable([["session", "agent", "provider", "events", "updated"], ...sessions.map((item) => [item.sessionUid, item.agent, item.provider, String(item.chunks.reduce((count, chunk) => count + chunk.eventCount, 0)), fmtTimeCompact(item.createdAtMs)])]);
 });
 
 const rag = program.command("rag").description("Persistent RAG summaries and search");
