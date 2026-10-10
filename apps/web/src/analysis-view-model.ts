@@ -6,7 +6,7 @@ import type {
   AnalysisSubagentUsageRow,
   AnalysisTopSessionRow,
 } from "@agentlens/contracts";
-import { formatCompactNumber, iconForAgent, kindClassSuffix } from "./view-model.js";
+import { formatCompactNumber, formatPercent, iconForAgent, kindClassSuffix } from "./view-model.js";
 
 export interface AnalysisOverviewMetric {
   label: string;
@@ -95,10 +95,26 @@ export function buildAnalysisDashboardModel(analysis: AnalysisResponse): Analysi
         tone: "subagents",
       },
       {
-        label: "Inventory health",
+        label: "Configured skills",
         value: formatCompactNumber(analysis.summary.configuredSkillCount),
         detail: `${formatCompactNumber(analysis.summary.unusedConfiguredSkillCount)} unused / ${formatCompactNumber(analysis.summary.observedUnconfiguredSkillCount)} unconfigured`,
         tone: "inventory",
+      },
+      {
+        label: "Detection coverage",
+        value: analysis.summary.traceCount > 0
+          ? formatPercent(percent(analysis.summary.supportedTraceCount, analysis.summary.traceCount), 0)
+          : "—",
+        detail: "Sessions with Codex or Claude skill detectors",
+        tone: "sessions",
+      },
+      {
+        label: "Explicit skill signals",
+        value: analysis.summary.totalSkillCount > 0
+          ? formatPercent(percent(analysis.summary.explicitSkillCount, analysis.summary.totalSkillCount), 0)
+          : "—",
+        detail: "Share of uses recorded directly in traces",
+        tone: "skills",
       },
     ],
     skillBars: analysis.skills.slice(0, 8).map((row) => ({
@@ -108,7 +124,7 @@ export function buildAnalysisDashboardModel(analysis: AnalysisResponse): Analysi
       inferredPct: percent(row.inferredCount, row.totalCount),
       byAgentLabel: byAgentLabel(row.byAgent),
     })),
-    agentCards: analysis.byAgent.map((row) => ({
+    agentCards: [...analysis.byAgent].sort((left, right) => right.sessionCount - left.sessionCount).map((row) => ({
       ...row,
       icon: iconForAgent(row.agent),
       kindClass: `kind-${kindClassSuffix(row.agent)}`,

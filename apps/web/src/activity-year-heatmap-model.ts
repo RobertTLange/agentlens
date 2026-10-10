@@ -76,16 +76,6 @@ function formatMonthLabel(dateLocal: string): string {
   });
 }
 
-function formatYearRangeLabel(startDateLocal: string, endDateLocal: string): string {
-  const startDate = parseDateLocal(startDateLocal);
-  const endDate = parseDateLocal(endDateLocal);
-  if (!startDate || !endDate) return `${startDateLocal}-${endDateLocal}`;
-  if (startDate.getUTCFullYear() === endDate.getUTCFullYear()) {
-    return String(startDate.getUTCFullYear());
-  }
-  return `${startDate.toLocaleDateString([], { month: "short", year: "numeric", timeZone: "UTC" })}-${endDate.toLocaleDateString([], { month: "short", year: "numeric", timeZone: "UTC" })}`;
-}
-
 function formatDayLabel(dateLocal: string): string {
   const date = parseDateLocal(dateLocal);
   if (!date) return dateLocal;
@@ -98,8 +88,8 @@ function formatDayLabel(dateLocal: string): string {
 }
 
 export function buildActivityYearHeatmapModel(year: AgentActivityYear): ActivityYearHeatmapModel {
-  const startDate = parseDateLocal(year.startDateLocal);
-  const endDate = parseDateLocal(year.endDateLocal);
+  let startDate = parseDateLocal(year.startDateLocal);
+  let endDate = parseDateLocal(year.endDateLocal);
   if (!startDate || !endDate) {
     return {
       presentation: year.presentation,
@@ -116,6 +106,11 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
     };
   }
 
+  const calendarYear = endDate.getUTCFullYear();
+  startDate = new Date(Date.UTC(calendarYear, 0, 1));
+  endDate = new Date(Date.UTC(calendarYear, 11, 31));
+  const dayCount = dayDiff(startDate, endDate) + 1;
+  const daysByDate = new Map(year.days.map((day) => [day.dateLocal, day]));
   const startCalendarDate = new Date(startDate.getTime() - startDate.getUTCDay() * MS_PER_DAY);
   const endCalendarDate = new Date(endDate.getTime() + (6 - endDate.getUTCDay()) * MS_PER_DAY);
   const weekCount = Math.max(1, Math.floor(dayDiff(startCalendarDate, endCalendarDate) / 7) + 1);
@@ -123,9 +118,10 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
   const maxHeatmapValue = year.days.reduce((max, day) => Math.max(max, day.heatmapValue), 0);
   const cells: ActivityYearHeatmapCellModel[] = [];
 
-  for (const day of year.days) {
-    const dayDate = parseDateLocal(day.dateLocal);
-    if (!dayDate) continue;
+  for (let dayIndex = 0; dayIndex < dayCount; dayIndex += 1) {
+    const dayDate = new Date(startDate.getTime() + dayIndex * MS_PER_DAY);
+    const dateLocal = dayDate.toISOString().slice(0, 10);
+    const day = daysByDate.get(dateLocal);
     const offsetDays = dayDiff(startCalendarDate, dayDate);
     if (offsetDays < 0) continue;
     const weekIndex = Math.floor(offsetDays / 7);
@@ -133,17 +129,17 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
     if (weekdayIndex < 0 || weekdayIndex >= WEEKDAY_LABELS.length) continue;
 
     cells.push({
-      key: day.dateLocal,
-      dateLocal: day.dateLocal,
-      dayLabel: formatDayLabel(day.dateLocal),
+      key: dateLocal,
+      dateLocal,
+      dayLabel: formatDayLabel(dateLocal),
       dayOfMonth: dayDate.getUTCDate(),
       weekIndex,
       weekdayIndex,
-      totalSessionsInWindow: day.totalSessionsInWindow,
-      heatmapValue: day.heatmapValue,
-      totalEventCount: day.totalEventCount,
-      peakConcurrentSessions: day.peakConcurrentSessions,
-      level: levelForCount(day.heatmapValue, maxHeatmapValue),
+      totalSessionsInWindow: day?.totalSessionsInWindow ?? 0,
+      heatmapValue: day?.heatmapValue ?? 0,
+      totalEventCount: day?.totalEventCount ?? 0,
+      peakConcurrentSessions: day?.peakConcurrentSessions ?? 0,
+      level: levelForCount(day?.heatmapValue ?? 0, maxHeatmapValue),
     });
   }
 
@@ -170,11 +166,11 @@ export function buildActivityYearHeatmapModel(year: AgentActivityYear): Activity
 
   return {
     presentation: year.presentation,
-    dayCount: year.dayCount,
+    dayCount,
     weekCount,
-    startDateLabel: formatRangeDateLabel(year.startDateLocal),
-    endDateLabel: formatRangeDateLabel(year.endDateLocal),
-    yearLabel: formatYearRangeLabel(year.startDateLocal, year.endDateLocal),
+    startDateLabel: formatRangeDateLabel(startDate.toISOString().slice(0, 10)),
+    endDateLabel: formatRangeDateLabel(endDate.toISOString().slice(0, 10)),
+    yearLabel: String(calendarYear),
     maxDailySessions,
     maxHeatmapValue,
     weekLabels,

@@ -197,7 +197,19 @@ export interface AppConfig {
   analysis: AnalysisConfig;
 }
 
+export interface ModelCallUsage {
+  agent: AgentKind;
+  model: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+}
+
 export interface NormalizedEvent {
+  consumedTokens?: number;
+  modelUsage?: ModelCallUsage;
   eventId: string;
   traceId: string;
   index: number;

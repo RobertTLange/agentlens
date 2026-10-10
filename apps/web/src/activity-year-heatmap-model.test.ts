@@ -105,18 +105,32 @@ describe("activity year heatmap model", () => {
     const model = buildActivityYearHeatmapModel(year);
     const cells = model.cells;
 
-    expect(model.dayCount).toBe(7);
-    expect(model.weekCount).toBeGreaterThanOrEqual(2);
+    expect(model.dayCount).toBe(365);
+    expect(model.weekCount).toBe(53);
     expect(model.yearLabel).toContain("2026");
     expect(model.presentation.metric).toBe("sessions");
-    expect(cells).toHaveLength(7);
-    expect(model.weekLabels.length).toBeGreaterThan(0);
+    expect(cells).toHaveLength(365);
+    expect(model.weekLabels).toHaveLength(12);
+    expect(cells[0]).toMatchObject({ dateLocal: "2026-01-01", level: 0, totalSessionsInWindow: 0 });
+    expect(cells.at(-1)).toMatchObject({ dateLocal: "2026-12-31", level: 0 });
 
     const marchFirst = cells.find((cell) => cell?.dateLocal === "2026-03-01");
     expect(marchFirst).toBeTruthy();
     expect(marchFirst?.totalSessionsInWindow).toBe(4);
     expect(marchFirst?.totalEventCount).toBeGreaterThan(0);
     expect(marchFirst?.level).toBe(4);
+  });
+
+  it("includes February 29 in leap years even without activity", () => {
+    const year = makeYearFixture();
+    year.startDateLocal = "2024-08-15";
+    year.endDateLocal = "2024-10-10";
+    year.days = [];
+    const model = buildActivityYearHeatmapModel(year);
+    expect(model.cells).toHaveLength(366);
+    expect(model.dayCount).toBe(366);
+    expect(model.cells.find((cell) => cell.dateLocal === "2024-02-29")).toMatchObject({ level: 0 });
+    expect(model.weekLabels).toHaveLength(12);
   });
 
   it("uses daily heatmap values for yearly intensity", () => {

@@ -2,28 +2,32 @@
 
 ## Local Dev Loop
 
+Use Node.js 24+ and pnpm 11.21.0 (pinned in `package.json`).
+
 ```bash
-npm install
-npm run dev:server
-npm run dev:web
+pnpm install
+pnpm run dev:server
+pnpm run dev:web
 ```
 
 Frontend URL: `http://127.0.0.1:5173` (Vite proxies `/api` to `http://127.0.0.1:8787`).
 
+`pnpm run dev:server` builds the CLI, starts (or reuses) the background RAG worker, then starts the API. Summary generation uses your configured AI agent and consumes tokens. The worker stays running when the server stops; stop it with `node apps/cli/dist/main.js rag stop`.
+
 ## Build + Test Gate
 
 ```bash
-npm run typecheck
-npm test
-npm run build
+pnpm run typecheck
+pnpm test
+pnpm run build
 ```
 
 ## Workspace Commands
 
 ```bash
-npm -w apps/server run dev
-npm -w apps/web run dev
-npm -w apps/cli run dev -- summary --json
+pnpm --filter ./apps/server dev
+pnpm --filter ./apps/web dev
+pnpm --filter ./apps/cli dev summary --json
 ```
 
 ## Local CLI Link Workflow

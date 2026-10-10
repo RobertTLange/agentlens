@@ -15,9 +15,9 @@ Get reliable trace intelligence from local Codex/Claude logs via `agentlens` CLI
 # What to do
 1. Confirm CLI availability and command surface:
 - `agentlens --help`
-- If local dev needed: `npm -w apps/cli run dev -- --help`
+- If local dev needed: `pnpm --filter ./apps/cli dev --help`
 - If `agentlens` is missing or conflicting on PATH, use local entrypoint:
-- `npm -w apps/cli run dev -- <command...>`
+- `pnpm --filter ./apps/cli dev <command...>`
 
 2. Start with high-signal summary:
 - LLM-first:

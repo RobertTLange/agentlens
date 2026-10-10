@@ -117,7 +117,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   activityHeatmap: {
     metric: "sessions",
-    color: "#dc2626",
+    color: "#16a34a",
   },
   redaction: {
     mode: "strict",

@@ -121,6 +121,8 @@ function extractJsonStdout(stdout: string): string {
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         const record = parsed as Record<string, unknown>;
         if (record.type === "result" && typeof record.result === "string") return record.result;
+        const item = asRecord(record.item);
+        if (record.type === "item.completed" && item?.type === "agent_message" && typeof item.text === "string") return item.text;
         const message = record.message;
         if (message && typeof message === "object" && !Array.isArray(message)) {
           const content = (message as Record<string, unknown>).content;

@@ -1,8 +1,9 @@
-import type { AgentKind, AppConfig, ModelTokenShare, NormalizedEvent, TokenTotals } from "@agentlens/contracts";
+import type { AgentKind, AppConfig, ModelCallUsage, ModelTokenShare, NormalizedEvent, TokenTotals } from "@agentlens/contracts";
 import { estimateUsageCost, resolveContextWindowTokens } from "./pricing.js";
 import { asRecord, asString } from "./utils.js";
 
 export interface SessionUsagePoint {
+  eventId?: string;
   timestampMs: number;
   agent: AgentKind;
   model: string;
@@ -13,6 +14,8 @@ export interface SessionUsagePoint {
   reasoningOutputTokens: number;
   totalTokens: number;
   costUsd: number;
+  costKnown?: boolean;
+  modelUsage?: ModelCallUsage | null;
 }
 
 interface SessionMetrics {
@@ -245,6 +248,7 @@ function usagePointFromTotals(
 ): SessionUsagePoint | null {
   if (event.timestampMs === null || event.timestampMs <= 0) return null;
   return {
+    eventId: event.eventId,
     timestampMs: event.timestampMs,
     agent,
     model,
@@ -255,6 +259,12 @@ function usagePointFromTotals(
     reasoningOutputTokens: totals.reasoningOutputTokens,
     totalTokens: totals.totalTokens,
     costUsd: costUsd === null ? 0 : Number(costUsd.toFixed(6)),
+    costKnown: costUsd !== null,
+    modelUsage: agent === "cursor" ? null : {
+      agent, model, inputTokens: totals.inputTokens + totals.cachedReadTokens + totals.cachedCreateTokens,
+      cachedInputTokens: totals.cachedReadTokens, outputTokens: totals.outputTokens + totals.reasoningOutputTokens,
+      totalTokens: totals.totalTokens, costUsd,
+    },
   };
 }
 
@@ -352,6 +362,7 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
   let currentModel = "";
   let latestTotals = emptyTokenTotals();
   let prevTotalTokens: number | null = null;
+  let previousCallUsage: Record<string, unknown> | undefined;
   let maxContextPct: number | null = null;
   let costTotal = 0;
   let costKnown = config.cost.enabled;
@@ -375,6 +386,18 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
     const totalUsage = asRecord(info.total_token_usage);
     const lastUsage = asRecord(info.last_token_usage);
     latestTotals = tokenTotalsFromCodexUsageRecord(totalUsage);
+
+    const repeatedUsage = prevTotalTokens !== null && latestTotals.totalTokens === prevTotalTokens;
+    const callUsage = Object.keys(lastUsage).length > 0 ? lastUsage : previousCallUsage
+      ? Object.fromEntries(Object.entries(totalUsage).map(([key, value]) => [key, Math.max(0, toNumber(value) - toNumber(previousCallUsage![key]))]))
+      : null;
+    previousCallUsage = totalUsage;
+    const markCallUsage = (point: SessionUsagePoint): SessionUsagePoint => ({ ...point, modelUsage: repeatedUsage || !callUsage ? null : {
+      agent: "codex", model: currentModel || "<unknown>", inputTokens: codexPromptTokens(callUsage),
+      cachedInputTokens: toNumber(callUsage.cached_input_tokens), outputTokens: toNumber(callUsage.output_tokens),
+      totalTokens: tokenTotalsFromCodexUsageRecord(callUsage).totalTokens,
+      costUsd: Object.keys(lastUsage).length && point.costKnown ? point.costUsd : null,
+    } });
 
     const deltaTotal = prevTotalTokens === null ? latestTotals.totalTokens : Math.max(0, latestTotals.totalTokens - prevTotalTokens);
     if (deltaTotal > 0) {
@@ -413,11 +436,11 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
       }
       const usageTotals = tokenTotalsFromCodexUsageRecord(pricedUsage);
       const usagePoint = usagePointFromTotals(event, "codex", currentModel, usageTotals, cost);
-      if (usagePoint) usagePoints.push(usagePoint);
+      if (usagePoint) usagePoints.push(markCallUsage(usagePoint));
     } else {
       const usageTotals = tokenTotalsFromCodexUsageRecord(pricedUsage);
       const usagePoint = usagePointFromTotals(event, "codex", "<unknown>", usageTotals, null);
-      if (usagePoint) usagePoints.push(usagePoint);
+      if (usagePoint) usagePoints.push(markCallUsage(usagePoint));
     }
   }
 
@@ -781,6 +804,17 @@ function derivePiMetrics(events: NormalizedEvent[], config: AppConfig): SessionM
       : finalizeCostTotal(estimatedCostKnown, estimatedCostTotal),
     usagePoints,
   };
+}
+
+export function attachEventTokenUsage(events: NormalizedEvent[], usagePoints: SessionUsagePoint[]): NormalizedEvent[] {
+  const usageById = new Map(usagePoints.filter(point => point.eventId && point.agent !== "cursor").map(point => [point.eventId!, point]));
+  return events.map(event => {
+    const modelUsage = usageById.get(event.eventId)?.modelUsage;
+    if (!modelUsage || !Number.isFinite(modelUsage.totalTokens) || modelUsage.totalTokens < 0) return event;
+    return { ...event, consumedTokens: modelUsage.totalTokens, modelUsage,
+      ...(event.eventKind === "meta" ? { eventKind: "system" as const, preview: "Model call usage", tocLabel: "Model call usage" } : {}),
+    };
+  });
 }
 
 export function deriveSessionMetrics(events: NormalizedEvent[], agent: AgentKind, config: AppConfig): SessionMetrics {

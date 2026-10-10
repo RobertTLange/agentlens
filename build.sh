@@ -101,11 +101,11 @@ npm uninstall -g agentlens >/dev/null 2>&1 || true
 stop_existing_server
 
 echo "Building AgentLens workspace..."
-npm run build
+pnpm run build
 
 echo "Linking AgentLens CLI globally..."
 cd "$ROOT_DIR/apps/cli"
-npm link
+pnpm link --global
 
 echo "Launching AgentLens..."
 if [[ "${AGENTLENS_SKIP_OPEN:-0}" == "1" ]]; then

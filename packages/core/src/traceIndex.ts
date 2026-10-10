@@ -31,7 +31,7 @@ import {
 } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
 import { loadConfig } from "./config.js";
-import { deriveSessionMetrics, type SessionUsagePoint } from "./metrics.js";
+import { attachEventTokenUsage, deriveSessionMetrics, type SessionUsagePoint } from "./metrics.js";
 import { redactEvents } from "./redaction.js";
 import { asRecord, asString, expandHome, nowMs, stableId } from "./utils.js";
 
@@ -1687,7 +1687,7 @@ export class TraceIndex extends EventEmitter {
         this.emitStream("events_appended", {
           id: file.id,
           appended,
-          latestEvents: redactedEvents.slice(-Math.min(40, appended)),
+          latestEvents: attachEventTokenUsage(redactedEvents, this.getSessionUsageArtifacts(file.id).usagePoints).slice(-Math.min(40, appended)),
         });
       }
       return true;
@@ -1812,7 +1812,7 @@ export class TraceIndex extends EventEmitter {
     this.emitStream("events_appended", {
       id: file.id,
       appended: rebasedEvents.length,
-      latestEvents: rebasedEvents.slice(-Math.min(40, rebasedEvents.length)),
+      latestEvents: attachEventTokenUsage(mergedEvents, this.getSessionUsageArtifacts(file.id).usagePoints).slice(-Math.min(40, rebasedEvents.length)),
     });
     return true;
   }
@@ -2064,7 +2064,8 @@ export class TraceIndex extends EventEmitter {
   getTracePage(id: string, options: TracePageOptions = {}): TracePage {
     const detail = this.getSessionDetail(id);
     const includeMeta = options.includeMeta ?? this.config.scan.includeMetaDefault;
-    const filtered = includeMeta ? detail.events : detail.events.filter((event) => event.eventKind !== "meta");
+    const measuredEvents = attachEventTokenUsage(detail.events, this.getSessionUsageArtifacts(id).usagePoints);
+    const filtered = includeMeta ? measuredEvents : measuredEvents.filter((event) => event.eventKind !== "meta");
     const eventPayload = options.eventPayload ?? "full";
 
     const limit = Math.max(1, Math.min(5000, options.limit ?? this.config.scan.recentEventWindow));
@@ -2086,7 +2087,7 @@ export class TraceIndex extends EventEmitter {
   getTraceEvent(id: string, eventId: string, options: Pick<TracePageOptions, "includeMeta"> = {}): NormalizedEvent {
     const detail = this.getSessionDetail(id);
     const includeMeta = options.includeMeta ?? this.config.scan.includeMetaDefault;
-    const found = detail.events.find((event) => event.eventId === eventId);
+    const found = attachEventTokenUsage(detail.events, this.getSessionUsageArtifacts(id).usagePoints).find((event) => event.eventId === eventId);
     if (!found || (!includeMeta && found.eventKind === "meta")) {
       throw new Error(`unknown trace event: ${eventId}`);
     }

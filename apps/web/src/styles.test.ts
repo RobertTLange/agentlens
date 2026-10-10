@@ -66,6 +66,23 @@ function computedStyle(document: ReturnType<typeof renderResponsiveInspector>) {
 }
 
 describe("responsive inspector layout styles", () => {
+  it("reserves space for desktop navigation and moves it into the header on mobile", () => {
+    for (const width of [1440, 390]) {
+      const window = new Window({ width, height: 844 });
+      window.document.head.innerHTML = `<style>${styles}</style>`;
+      window.document.body.innerHTML = '<main class="shell"><nav class="hero-actions"><div class="workspace-brand">AgentLens</div></nav></main>';
+      const nav = window.document.querySelector("nav")!;
+      const shell = window.document.querySelector("main")!;
+      const brand = window.document.querySelector(".workspace-brand")!;
+      expect(window.getComputedStyle(nav).position).toBe(width === 1440 ? "fixed" : "static");
+      expect(window.getComputedStyle(shell).paddingLeft).toBe(width === 1440 ? "236px" : "12px");
+      expect(window.getComputedStyle(brand).display).toBe(width === 1440 ? "flex" : "none");
+      shell.classList.add("sidebar-collapsed");
+      expect(window.getComputedStyle(shell).paddingLeft).toBe(width === 1440 ? "96px" : "12px");
+      if (width === 1440) expect(window.getComputedStyle(nav).width).toBe("72px");
+    }
+  });
+
   it("hides the timeline toc and keeps a two-pane inspector layout at narrow desktop widths", () => {
     const block = mediaBlock(960);
 
@@ -78,7 +95,7 @@ describe("responsive inspector layout styles", () => {
     const block = mediaBlock(520);
 
     expect(block).toMatch(/\.grid\s*{[^}]*grid-template-columns:\s*1fr;/s);
-    expect(block).toMatch(/\.grid\s*{[^}]*grid-template-rows:\s*minmax\(0,\s*0\.62fr\)\s*minmax\(0,\s*1\.38fr\);/s);
+    expect(block).toMatch(/\.grid\s*{[^}]*grid-template-rows:\s*320px\s*auto;/s);
   });
 
   it("allows trace inspector event text to shrink and wrap inside narrow cards", () => {
@@ -94,7 +111,7 @@ describe("responsive inspector layout styles", () => {
     expect(styles).toMatch(/\.analysis-view\s*{[^}]*grid-row:\s*2\s*\/\s*4;/s);
     expect(styles).toMatch(/\.analysis-view\s*{[^}]*overflow-y:\s*auto;/s);
     expect(styles).toMatch(/\.analysis-view\s*{[^}]*overflow-x:\s*hidden;/s);
-    expect(styles).toMatch(/\.analysis-dashboard-grid\s*{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.45fr\)\s*minmax\(0,\s*0\.9fr\);/s);
+    expect(styles).toMatch(/\.analysis-dashboard-grid\s*{[^}]*grid-template-columns:\s*minmax\(0,\s*0\.85fr\)\s*minmax\(0,\s*1\.15fr\);/s);
   });
 
   it("renders the responsive inspector breakpoints with computed viewport styles", () => {
@@ -111,5 +128,6 @@ describe("responsive inspector layout styles", () => {
     const phone = renderResponsiveInspector(520);
     const phoneStyle = computedStyle(phone);
     expect(phoneStyle(".grid").gridTemplateColumns).toBe("1fr");
+    expect(phoneStyle(".grid").gridTemplateRows).toBe("320px auto");
   });
 });

@@ -1061,6 +1061,8 @@ function makeHydrationProgress(hydrated: number, discovered: number): ActivityHy
 }
 
 beforeEach(() => {
+  localStorage.clear();
+  delete document.documentElement.dataset.theme;
   tracesById = {
     "trace-a": makeTrace("trace-a", 1_000),
     "trace-b": makeTrace("trace-b", 2_000),
@@ -1339,12 +1341,256 @@ afterEach(() => {
 });
 
 describe("App sessions list live motion", () => {
-  it("renders hero title with lens emoji and sessions metric label", async () => {
+  it("shows per-loop recorded input, cache, output, cost, and turn totals without text estimates", async () => {
+    const user = { ...makeEvent("loop-user", {}), index: 1, eventKind: "user" as const };
+    const answer = { ...makeEvent("loop-answer", {}), index: 2, eventKind: "assistant" as const, preview: "Response" };
+    const usage = { ...makeEvent("loop-usage", {}), index: 3, eventKind: "system" as const, consumedTokens: 140, preview: "Model call usage", modelUsage: { agent: "codex" as const, model: "test-model", inputTokens: 100, cachedInputTokens: 80, outputTokens: 40, totalTokens: 140, costUsd: 0.0123 } };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, [user, answer, usage]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelector(".trace-tree-usage")?.textContent).toContain("Input 100"));
+    expect(document.querySelector(".trace-tree-usage")?.textContent).toContain("Cached 80");
+    expect(document.querySelector(".trace-tree-usage")?.textContent).toContain("Output 40");
+    expect(document.querySelector(".trace-tree-list")?.textContent).toContain("Loop 1 · Model call");
+    expect(document.querySelector(".trace-tree-list")?.textContent).toContain("140 turn tokens");
+    expect(document.querySelector(".trace-tree-list")?.textContent).toContain("$0.0123");
+    expect(document.querySelector(".trace-tree-list")?.textContent).not.toContain("text tokens");
+    fireEvent.click(view.getByRole("button", { name: "Inspect event #3 system: Model call usage" }));
+    expect(document.querySelector<HTMLDialogElement>(".inspector-drawer")?.open).toBe(true);
+    expect(document.querySelector(".inspector-step")?.textContent).toContain("Model call");
+    expect(document.querySelector(".inspector-step-tabs button")?.textContent).toBe("Usage");
+    expect(view.getByRole("button", { name: "Usage" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(view.getByRole("button", { name: "Usage" }));
+    expect(document.querySelector(".inspector-step-usage")?.textContent).toContain("Input tokens100Cached input80Output tokens40Total tokens140");
+    expect(document.querySelectorAll(".inspector-usage-card")).toHaveLength(6);
+    for (const label of ["input tokens", "output tokens", "cached input", "cost"]) {
+      expect((view.getByRole("progressbar", { name: `Share of group ${label}` }) as HTMLProgressElement).value).toBe(100);
+    }
+    expect(document.querySelectorAll(".inspector-usage-card dt svg[aria-hidden=\"true\"]")).toHaveLength(6);
+  });
+
+  it("collapses all nested branches and expands them again", async () => {
+    const user = { ...makeEvent("all-user", {}), index: 1, eventKind: "user" as const };
+    const call = { ...makeEvent("all-call", {}), index: 2, eventKind: "tool_use" as const, toolCallId: "all-tool" };
+    const output = { ...makeEvent("all-output", {}), index: 3, eventKind: "tool_result" as const, toolCallId: "all-tool" };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, [user, call, output]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(3));
+    const toggle = view.getByRole("button", { name: "Collapse group" });
+    const collapsedIcon = toggle.querySelector("path")?.getAttribute("d");
+    expect(view.queryByRole("button", { name: "Expand group" })).toBeNull();
+    fireEvent.click(toggle);
+    expect(view.getByRole("button", { name: "Expand group" })).toBe(toggle);
+    expect(toggle.querySelector("path")?.getAttribute("d")).not.toBe(collapsedIcon);
+    expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(1);
+    fireEvent.click(view.getByRole("button", { name: "Expand branch #1" }));
+    expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(2);
+    fireEvent.click(view.getByRole("button", { name: "Expand group" }));
+    expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(3);
+    expect(Array.from(document.querySelectorAll(".trace-tree-type-icon")).map(icon => icon.getAttribute("data-event-type"))).toEqual(["user", "tool_use", "tool_result"]);
+    expect(view.getByRole("button", { name: "Collapse branch #2" }).getAttribute("aria-expanded")).toBe("true");
+    expect(view.getByRole("button", { name: "Collapse group" })).toBe(toggle);
+    expect(toggle.querySelector("path")?.getAttribute("d")).toBe(collapsedIcon);
+  });
+
+  it("shows selected tool duration as a share of its session group in Usage", async () => {
+    const rows = [
+      { ...makeEvent("duration-user", {}), index: 1, eventKind: "user" as const, timestampMs: 1000 },
+      { ...makeEvent("duration-call", {}), index: 2, eventKind: "tool_use" as const, toolCallId: "duration-operation", timestampMs: 2000 },
+      { ...makeEvent("duration-result", {}), index: 3, eventKind: "tool_result" as const, toolCallId: "duration-operation", timestampMs: 4000 },
+      { ...makeEvent("duration-answer", {}), index: 4, timestampMs: 5000 },
+    ];
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, rows);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row")).toHaveLength(4));
+    fireEvent.click(Array.from(document.querySelectorAll(".toc-row")).find(row => row.querySelector(".toc-index")?.textContent === "#2")!);
+    fireEvent.click(view.getByRole("button", { name: "Usage" }));
+    const progress = view.getByRole("progressbar", { name: "Share of group duration" }) as HTMLProgressElement;
+    expect(progress.value).toBe(50);
+    expect(progress.max).toBe(100);
+    expect(document.querySelector(".inspector-duration-usage")?.textContent).toContain("2 s of 4 s group duration");
+  });
+
+  it("compares top-level group duration and tokens against the full session", async () => {
+    const rows = [
+      { ...makeEvent("session-share-user", {}), index: 1, eventKind: "user" as const, timestampMs: 1000 },
+      { ...makeEvent("session-share-answer", {}), index: 2, timestampMs: 5000, consumedTokens: 100 },
+    ];
+    const page = makeTracePageWithEvents(tracesById["trace-c"]!, rows);
+    page.summary = { ...page.summary, firstEventTs: 0, lastEventTs: 10000, tokenTotals: { inputTokens: 300, outputTokens: 100, cachedReadTokens: 0, cachedCreateTokens: 0, reasoningOutputTokens: 0, totalTokens: 400 } };
+    tracePagesById["trace-c"] = page;
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row")).toHaveLength(2));
+    fireEvent.click(Array.from(document.querySelectorAll(".toc-row")).find(row => row.querySelector(".toc-index")?.textContent === "#1")!);
+    fireEvent.click(view.getByRole("button", { name: "Usage" }));
+    expect((view.getByRole("progressbar", { name: "Share of session duration" }) as HTMLProgressElement).value).toBe(40);
+    expect((view.getByRole("progressbar", { name: "Share of session tokens" }) as HTMLProgressElement).value).toBe(25);
+    expect(document.querySelector(".inspector-duration-usage")?.textContent).toContain("4 s of 10 s session duration");
+  });
+
+  it("searches nested traces in closed groups while retaining their parents", async () => {
+    const rows = [
+      { ...makeEvent("search-user-one", {}), index: 1, eventKind: "user" as const, preview: "First request", searchText: "First request" },
+      { ...makeEvent("search-call", {}), index: 2, eventKind: "tool_use" as const, toolName: "UniqueTool", searchText: "needle command" },
+      { ...makeEvent("search-user-two", {}), index: 3, eventKind: "user" as const, preview: "Other request", searchText: "Other request" },
+      { ...makeEvent("search-answer", {}), index: 4 },
+    ];
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, rows);
+    const view = render(<App />);
+    await waitFor(() => expect(view.getByRole("button", { name: "Expand branch #1" })).toBeTruthy());
+    const search = view.getByRole("searchbox", { name: "Search trace tree" });
+    fireEvent.change(search, { target: { value: "UNIQUETOOL" } });
+    expect(Array.from(document.querySelectorAll(".trace-tree-meta")).map(el => el.textContent?.split(" · ")[0])).toEqual(["#1", "#2"]);
+    fireEvent.change(search, { target: { value: "needle" } });
+    expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(2);
+    fireEvent.change(search, { target: { value: "nonexistent-query" } });
+    expect(view.getByText("No matching traces in loaded events.")).toBeTruthy();
+    fireEvent.change(search, { target: { value: "" } });
+    expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(3);
+  });
+
+  it("opens only one top-level trace group at a time", async () => {
+    const rows = [
+      { ...makeEvent("accordion-user-one", {}), index: 1, eventKind: "user" as const },
+      { ...makeEvent("accordion-answer-one", {}), index: 2 },
+      { ...makeEvent("accordion-user-two", {}), index: 3, eventKind: "user" as const },
+      { ...makeEvent("accordion-answer-two", {}), index: 4 },
+    ];
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, rows);
+    const view = render(<App />);
+    await waitFor(() => expect(view.getByRole("button", { name: "Collapse branch #3" })).toBeTruthy());
+    fireEvent.click(view.getByRole("button", { name: "Expand branch #1" }));
+    expect(view.getByRole("button", { name: "Expand branch #3" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Collapse branch #1" })).toBeTruthy();
+    expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(3);
+    fireEvent.click(view.getByRole("button", { name: "Expand branch #3" }));
+    expect(view.getByRole("button", { name: "Expand branch #1" })).toBeTruthy();
+  });
+
+  it("toggles trace tree sibling order while preserving parents and timeline order", async () => {
+    const user = { ...makeEvent("sort-user", {}), index: 1, eventKind: "user" as const };
+    const first = { ...makeEvent("sort-first", {}), index: 2, eventKind: "assistant" as const };
+    const last = { ...makeEvent("sort-last", {}), index: 3, eventKind: "assistant" as const };
+    const next = { ...makeEvent("sort-next", {}), index: 4, eventKind: "user" as const };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, [user, first, last, next]);
+    const view = render(<App />);
+    const treeIndices = () => Array.from(document.querySelectorAll(".trace-tree-meta")).map(element => element.textContent?.split(" · ")[0]);
+    await waitFor(() => expect(treeIndices()).toEqual(["#4", "#1", "#3", "#2"]));
+    const timelineIndices = Array.from(document.querySelectorAll(".toc-index")).map(element => element.textContent);
+    fireEvent.click(view.getByRole("button", { name: "Trace tree order: latest to first" }));
+    expect(treeIndices()).toEqual(["#1", "#2", "#3", "#4"]);
+    expect(Array.from(document.querySelectorAll(".toc-index")).map(element => element.textContent)).toEqual(timelineIndices);
+    fireEvent.click(view.getByRole("button", { name: "Collapse branch #1" }));
+    fireEvent.click(view.getByRole("button", { name: "Trace tree order: first to latest" }));
+    expect(treeIndices()).toEqual(["#4", "#1"]);
+    fireEvent.click(view.getByRole("button", { name: "Expand branch #1" }));
+    expect(treeIndices()).toEqual(["#4", "#1", "#3", "#2"]);
+  });
+
+  it("keeps a collapsible trace tree between sessions and timeline and opens its events in the drawer", async () => {
+    const user = { ...makeEvent("tree-user", {}), index: 1, eventKind: "user" as const, preview: "User request", timestampMs: 1000, consumedTokens: 100 };
+    const child = { ...makeEvent("tree-child", {}), index: 2, eventKind: "assistant" as const, preview: "Assistant reply", timestampMs: 3500 };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, [user, child]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(2));
+    expect(document.querySelector(".trace-tree-metrics")?.textContent).toBe("2.5 s100 turn tokens");
+    expect(document.querySelectorAll(".trace-tree-metrics")[1]?.textContent).not.toContain("tokens");
+    const workspace = document.querySelector(".sessions-workspace")!;
+    expect(Array.from(workspace.children).slice(0, 3).map(element => element.className)).toEqual(["panel list-panel", "panel trace-tree-panel", "panel toc-panel"]);
+    fireEvent.click(view.getByRole("button", { name: "Collapse branch #1" }));
+    expect(document.querySelectorAll(".trace-tree-row")).toHaveLength(1);
+    fireEvent.click(view.getByRole("button", { name: "Expand branch #1" }));
+    fireEvent.click(view.getByRole("button", { name: "Inspect event #2 assistant: Assistant reply" }));
+    expect(document.querySelector<HTMLDialogElement>(".inspector-drawer")?.open).toBe(true);
+    expect(document.querySelector(".trace-tree-row.active")?.textContent).toContain("Assistant reply");
+    fireEvent.click(view.getByRole("button", { name: "Close trace inspector" }));
+    fireEvent.click(document.querySelector<HTMLButtonElement>(".timeline-segment")!);
+    expect(document.querySelector<HTMLDialogElement>(".inspector-drawer")?.open).toBe(true);
+  });
+
+  it("opens the inspector drawer from timeline entries and closes it without losing the session", async () => {
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, [makeEvent("drawer-event", {})]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBeGreaterThan(0));
+    const drawer = document.querySelector<HTMLDialogElement>(".inspector-drawer")!;
+    expect(drawer.open).toBe(false);
+    const row = document.querySelector<HTMLButtonElement>(".toc-row")!;
+    fireEvent.click(row);
+    expect(drawer.open).toBe(true);
+    expect(document.querySelector(".inspector-step")).toBeTruthy();
+    const selectedSession = document.querySelector(".trace-row.active");
+    fireEvent.click(view.getByRole("button", { name: "Close trace inspector" }));
+    expect(drawer.open).toBe(false);
+    expect(document.querySelector(".trace-row.active")).toBe(selectedSession);
+    fireEvent.click(document.querySelector<HTMLButtonElement>(".timeline-segment")!);
+    expect(drawer.open).toBe(true);
+    fireEvent.click(drawer);
+    expect(drawer.open).toBe(false);
+  });
+
+  it("pairs tool input/output, loads readable details, and keeps both timeline targets", async () => {
+    const call: NormalizedEvent = {
+      ...makeEvent("paired-call", { payload: { arguments: JSON.stringify({ cmd: "echo readable input" }) } }),
+      eventKind: "tool_use", index: 4, toolCallId: "paired-id", toolName: "exec", toolType: "exec",
+      toolArgsText: "short input", preview: "exec: short input",
+    };
+    const result: NormalizedEvent = {
+      ...makeEvent("paired-result", { payload: { output: JSON.stringify([{ type: "input_text", text: "Readable output\nSecond line" }]) } }),
+      eventKind: "tool_result", index: 5, toolCallId: "paired-id", toolType: "exec", preview: "serialized preview",
+    };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, [call, result]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".event-card")).toHaveLength(1));
+    expect(document.querySelector(".event-operation-status")?.textContent).toContain("Result received");
+    expect(document.querySelector(".event-operation-status")?.textContent).not.toContain("Success");
+    expect(document.getElementById("trace-event-paired-call")).toBeTruthy();
+    expect(document.getElementById("trace-event-paired-result")).toBeTruthy();
+    fireEvent.click(document.querySelector<HTMLButtonElement>(".toc-row")!);
+    fireEvent.click(view.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(document.querySelectorAll(".event-readable-text")).toHaveLength(2));
+    expect(document.querySelectorAll(".event-readable-text")[0]?.textContent).toContain("echo readable input");
+    expect(document.querySelectorAll(".event-readable-text")[1]?.textContent).toBe("Readable output\nSecond line");
+    expect(Array.from(document.querySelectorAll<HTMLDetailsElement>(".event-raw-details")).every((details) => !details.open)).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("/event/paired-call"))).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("/event/paired-result"))).toBe(true);
+    const copy = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText: copy } });
+    fireEvent.click(view.getByRole("button", { name: "Copy output" }));
+    await waitFor(() => expect(copy).toHaveBeenCalledWith("Readable output\nSecond line"));
+    fireEvent.click(view.getByRole("button", { name: "Close trace inspector" }));
+    expect(document.querySelector(".event-readable-details")).toBeNull();
+    fireEvent.click(getEventTypeFilterTrigger());
+    fireEvent.click(getEventTypeOptionInput("tool_use"));
+    await waitFor(() => expect(document.querySelector(".event-card h3")?.textContent).toContain("Unmatched tool result"));
+  });
+
+  it("identifies error events with a visible label and error styling", async () => {
+    tracePagesById["trace-c"] = makeTracePageWithEvents(tracesById["trace-c"]!, [
+      { ...makeEvent("error-event", {}), hasError: true, preview: "Command failed" },
+    ]);
+    render(<App />);
+    await waitFor(() => expect(document.querySelector(".event-card.has-error h3")?.textContent).toBe("Command failed"));
+    expect(document.querySelector(".event-card.has-error .event-error-label")?.textContent).toBe("Error");
+  });
+
+  it("collapses and expands the sidebar while preserving accessible navigation", async () => {
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    fireEvent.click(view.getByRole("button", { name: "Collapse sidebar" }));
+    expect(document.querySelector(".shell")?.classList.contains("sidebar-collapsed")).toBe(true);
+    expect(view.getByRole("button", { name: "Expand sidebar" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(view.getByRole("tab", { name: "Analysis" }));
+    await waitFor(() => expect(document.querySelector(".hero h1")?.textContent).toBe("Analysis"));
+    fireEvent.click(view.getByRole("button", { name: "Expand sidebar" }));
+    expect(document.querySelector(".shell")?.classList.contains("sidebar-collapsed")).toBe(false);
+    expect(view.getByRole("button", { name: "Collapse sidebar" }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("renders workspace navigation, view title, and sessions metric label", async () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
 
     const heroTitle = document.querySelector(".hero h1");
-    expect(heroTitle?.textContent).toBe("🔍 AgentLens");
+    expect(heroTitle?.textContent).toBe("Inspector");
 
     const heroMetrics = Array.from(document.querySelectorAll(".hero-metrics span")).map((node) =>
       node.textContent?.trim(),
@@ -1354,6 +1600,16 @@ describe("App sessions list live motion", () => {
       "https://github.com/RobertTLange/agentlens",
     );
     expect(document.querySelector("footer")).toBeNull();
+    expect(document.querySelector('nav[aria-label="Primary navigation"]')).toBeTruthy();
+  });
+
+  it("helps recover from a session search with no matches", async () => {
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
+    fireEvent.change(view.getByLabelText("Search sessions"), { target: { value: "no-such-session" } });
+    expect(view.getByText("No matching sessions")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Clear search" }));
+    await waitFor(() => expect(document.querySelectorAll(".trace-row").length).toBe(3));
   });
 
   it("opens the Summaries tab, searches, renders detail, and navigates to Inspector", async () => {
@@ -1426,7 +1682,7 @@ describe("App sessions list live motion", () => {
     fireEvent.click(summariesTab);
 
     await waitFor(() => expect(document.querySelector(".rag-view")).toBeTruthy());
-    const dailyTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "daily");
+    const dailyTab = Array.from(document.querySelectorAll('[role="tab"]')).find((node) => node.textContent === "Daily reports");
     if (!(dailyTab instanceof HTMLButtonElement)) throw new Error("missing daily tab");
     fireEvent.click(dailyTab);
 
@@ -1486,6 +1742,32 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelector(".rag-result-row.active")?.textContent).toContain("Parser regression"));
     expect(parserPoint.getAttribute("aria-pressed")).toBe("true");
     expect(document.body.textContent).toContain("Parser behavior fixed");
+  });
+
+  it("ignores an older summaries response after the status filter changes", async () => {
+    const baseFetch = fetch;
+    let resolveComplete: ((response: Response) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/api/rag/summaries?status=complete")) {
+        return new Promise<Response>((resolve) => { resolveComplete = resolve; });
+      }
+      if (url.includes("/api/rag/summaries?status=failed")) {
+        return Promise.resolve(new Response(JSON.stringify({ summaries: [] })));
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch);
+
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("tab", { name: "Summaries" }));
+    await waitFor(() => expect(resolveComplete).toBeDefined());
+    fireEvent.change(view.getByLabelText("Filter summaries by status"), { target: { value: "failed" } });
+    await waitFor(() => expect(view.getByText("No failed summaries. Try another status or agent filter.")).toBeTruthy());
+    await act(async () => {
+      resolveComplete!(new Response(JSON.stringify({ summaries: ragSummaries })));
+    });
+    expect(document.querySelectorAll(".rag-result-row")).toHaveLength(0);
+    expect(view.getByText("No failed summaries. Try another status or agent filter.")).toBeTruthy();
   });
 
   it("keeps hydrated summary detail stable across compact refreshes", async () => {
@@ -2907,7 +3189,7 @@ describe("App sessions list live motion", () => {
     expect(document.querySelector(".events-scroll")?.textContent).toContain("user visible");
   });
 
-  it("falls back selected event when hidden by event type filter", async () => {
+  it("keeps inspector step pinned when event filters change the background selection", async () => {
     const selectedTrace = tracesById["trace-c"];
     if (!selectedTrace) throw new Error("missing trace-c fixture");
     const userEvent: NormalizedEvent = {
@@ -2966,9 +3248,10 @@ describe("App sessions list live motion", () => {
     act(() => {
       assistantTocRow.click();
     });
+    fireEvent.click(document.querySelectorAll(".inspector-step-tabs button")[1]!);
 
     await waitFor(() =>
-      expect(document.querySelector(".event-card.selected h3")?.textContent).toContain("fallback assistant"),
+      expect(document.querySelector(".inspector-step h3")?.textContent).toContain("fallback assistant"),
     );
 
     act(() => {
@@ -2980,7 +3263,7 @@ describe("App sessions list live motion", () => {
     });
 
     await waitFor(() =>
-      expect(document.querySelector(".event-card.selected h3")?.textContent).toContain("fallback user"),
+      expect(document.querySelector(".inspector-step h3")?.textContent).toContain("fallback assistant"),
     );
   });
 
@@ -3089,11 +3372,11 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePage(missingMetricsSummary);
 
     render(<App />);
-    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(6));
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(1));
     let cards = getDetailSummaryCards();
-    expect(cards[0]?.textContent).toContain("cost N/A");
-    expect(cards[1]?.textContent).toContain("0 shown");
+    expect(cards[0]?.textContent).toContain("N/A");
+    expect(findDetailSummaryCard("models")?.textContent).toContain("0 shown");
 
     const source = MockEventSource.instances[0];
     expect(source).toBeTruthy();
@@ -3115,29 +3398,29 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(countTraceDetailRequests("trace-c")).toBe(2));
     await waitFor(() => {
       cards = getDetailSummaryCards();
-      expect(cards[0]?.textContent).not.toContain("cost N/A");
-      expect(cards[1]?.textContent).toContain("gpt-5.3-codex");
+      expect(cards[0]?.textContent).not.toContain("N/A");
+      expect(findDetailSummaryCard("models")?.textContent).toContain("gpt-5.3-codex");
     });
   });
 
   it("renders trace inspector summary cards without a compaction card when none occurred", async () => {
     render(<App />);
-    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(6));
 
     const summaryGrid = document.querySelector(".detail-summary-cards");
     expect(summaryGrid?.className).not.toContain("detail-summary-cards-four-up");
 
     const cards = getDetailSummaryCards();
     const labels = cards.map((card) => card.querySelector(".detail-summary-title")?.textContent?.trim());
-    expect(labels).toEqual(["tokens", "models", "tool calls"]);
+    expect(labels).toEqual(["estimated cost", "tokens", "cache tokens", "context", "models", "tool calls"]);
 
-    expect(cards[0]?.textContent).toContain("out");
-    expect(cards[0]?.textContent).toContain("ctx");
-    expect(cards[0]?.textContent).toContain("cost N/A");
-    expect(cards[1]?.textContent).toContain("gpt-5.3-codex");
-    expect(cards[2]?.textContent).toContain("types -");
-    expect(cards[2]?.textContent).not.toContain("results");
-    expect(cards[2]?.textContent).not.toContain("unmatched");
+    expect(findDetailSummaryCard("tokens")?.textContent).toContain("Output");
+    expect(findDetailSummaryCard("context")?.textContent).toContain("18.2%");
+    expect(cards[0]?.textContent).toContain("N/A");
+    expect(findDetailSummaryCard("models")?.textContent).toContain("gpt-5.3-codex");
+    expect(findDetailSummaryCard("tool calls")?.textContent).toContain("types -");
+    expect(findDetailSummaryCard("tool calls")?.textContent).not.toContain("results");
+    expect(findDetailSummaryCard("tool calls")?.textContent).not.toContain("unmatched");
     expect(findDetailSummaryCard("compaction")).toBeUndefined();
   });
 
@@ -3151,10 +3434,10 @@ describe("App sessions list live motion", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(4));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(7));
 
     const summaryGrid = document.querySelector(".detail-summary-cards");
-    expect(summaryGrid?.className).toContain("detail-summary-cards-four-up");
+    expect(summaryGrid?.className).toContain("inspector-usage-cards");
 
     const compactionCard = findDetailSummaryCard("compaction");
     expect(compactionCard).toBeTruthy();
@@ -3171,10 +3454,10 @@ describe("App sessions list live motion", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(6));
 
     const tokensCard = document.querySelector(".detail-summary-card");
-    expect(tokensCard?.textContent).toContain("cost N/A");
+    expect(tokensCard?.textContent).toContain("N/A");
   });
 
   it("updates trace inspector header in real time and pulses when selected trace updates", async () => {
@@ -3688,7 +3971,7 @@ describe("App sessions list live motion", () => {
     render(<App />);
     await waitFor(() => expect(document.querySelectorAll(".toc-row").length).toBe(1));
     await waitFor(() => expect(document.querySelectorAll(".event-card").length).toBe(1));
-    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(6));
 
     const tocTag = document.querySelector(".toc-row .kind-tool-type");
     expect(tocTag?.textContent?.trim()).toBe("bash");
@@ -3777,7 +4060,7 @@ describe("App sessions list live motion", () => {
     ]);
 
     render(<App />);
-    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(6));
 
     const toolCallsCard = findDetailSummaryCard("tool calls");
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
@@ -3810,7 +4093,7 @@ describe("App sessions list live motion", () => {
     tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, typedEvents);
 
     render(<App />);
-    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(3));
+    await waitFor(() => expect(getDetailSummaryCards()).toHaveLength(6));
 
     const toolCallsCard = findDetailSummaryCard("tool calls");
     const toolCallsValue = toolCallsCard?.querySelector(".detail-summary-value")?.textContent?.trim();
@@ -3820,7 +4103,8 @@ describe("App sessions list live motion", () => {
     for (const toolType of toolTypes) {
       expect(toolCallsCard?.textContent).toContain(`${toolType} 1`);
     }
-    expect(toolCallsCard?.querySelector(".detail-summary-note")).toBeNull();
+    expect(toolCallsCard?.textContent).not.toContain("more types");
+    expect(toolCallsCard?.textContent).toContain("From loaded event types");
   });
 
   it("does not render snippet text under the event header preview", async () => {
@@ -4253,7 +4537,7 @@ describe("App sessions list live motion", () => {
     if (!(expandedButton instanceof HTMLButtonElement)) {
       throw new Error("missing expand button for expanded card after refresh");
     }
-    expect(expandedButton.textContent).toBe("collapse");
+    expect(expandedButton.textContent).toBe("Hide details");
     expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#4");
   });
 
@@ -4333,6 +4617,102 @@ describe("App sessions list live motion", () => {
     await waitFor(() => expect(document.querySelectorAll(".timeline-segment").length).toBe(2));
     await waitFor(() => expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#5"));
     expect(document.querySelector(".inspector-resume-follow-button")).toBeNull();
+  });
+
+  it("switches themes and restores the saved choice", () => {
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "Switch to dark mode" }));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(localStorage.getItem("agentlens-theme")).toBe("dark");
+    view.unmount();
+    const reopened = render(<App />);
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    fireEvent.click(reopened.getByRole("button", { name: "Switch to light mode" }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it("loads a streamed tool result only after refreshing the inspector", async () => {
+    const selectedTrace = tracesById["trace-c"]!;
+    const call = { ...makeEvent("streamed-call", { payload: { arguments: '{"cmd":"echo hello"}' } }), eventKind: "tool_use" as const, toolCallId: "streamed-operation", toolName: "exec" };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [call]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row")).toHaveLength(1));
+    fireEvent.click(document.querySelector(".toc-row")!);
+    fireEvent.click(view.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(document.querySelector(".inspector-step .event-operation-status")?.textContent).toContain("No result"));
+    const result = { ...makeEvent("streamed-result", { payload: { output: "hello from streamed result" } }), eventKind: "tool_result" as const, index: 5, offset: 5, timestampMs: 2000, toolCallId: "streamed-operation" };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [call, result]);
+    act(() => MockEventSource.instances[0]!.emit("events_appended", { id: "trace-c", appended: 1 }));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".toc-row")).toHaveLength(2);
+    });
+    expect(document.querySelector(".inspector-step .event-operation-status")?.textContent).toContain("No result");
+    expect(requestedUrls.some(url => url.includes("/event/streamed-result"))).toBe(false);
+    fireEvent.click(view.getByRole("button", { name: "Refresh events" }));
+    await waitFor(() => {
+      expect(document.querySelector(".inspector-step .event-readable-details")?.textContent).toContain("hello from streamed result");
+    });
+    expect(document.querySelector(".inspector-step-meta")?.textContent).toContain("#4");
+    expect(requestedUrls.some(url => url.includes("/event/streamed-result"))).toBe(true);
+  });
+
+  it("freezes the inspector tree until refresh and preserves the selected detail", async () => {
+    const selectedTrace = tracesById["trace-c"]!;
+    const first = makeEvent("pinned-inspector-first", { marker: "original raw detail" });
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [first]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row")).toHaveLength(1));
+    fireEvent.click(document.querySelector(".toc-row")!);
+    await waitFor(() => expect(document.querySelector(".inspector-step-meta")?.textContent).toContain("#4"));
+    const detailScroller = document.querySelector(".inspector-step-content") as HTMLDivElement;
+    detailScroller.scrollTop = 120;
+    fireEvent.click(view.getByRole("button", { name: "Data" }));
+    await waitFor(() => expect(document.querySelector(".inspector-step .event-raw-json")?.textContent).toContain("original raw detail"));
+    fireEvent.click(view.getByRole("button", { name: "Table" }));
+    expect(document.querySelector(".inspector-data-table")?.textContent).toContain("original raw detail");
+    expect(document.querySelector(".inspector-data-table")?.textContent).toContain("$.marker");
+    fireEvent.click(view.getByRole("button", { name: "Raw" }));
+    const appended = { ...makeEvent("pinned-inspector-new", { marker: "new raw detail" }), index: 5, offset: 5, timestampMs: 2000, preview: "New live message" };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [first, appended]);
+    act(() => MockEventSource.instances[0]!.emit("events_appended", { id: "trace-c", appended: 1 }));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".toc-row")).toHaveLength(2);
+    });
+    expect(document.querySelectorAll(".inspector-explorer .trace-tree-event")).toHaveLength(1);
+    fireEvent.click(view.getByRole("button", { name: "Refresh events" }));
+    await waitFor(() => expect(document.querySelectorAll(".inspector-explorer .trace-tree-event")).toHaveLength(2));
+    expect(document.querySelector(".inspector-step-meta")?.textContent).toContain("#4");
+    expect(document.querySelector(".inspector-step .event-raw-json")?.textContent).toContain("original raw detail");
+    expect(detailScroller.scrollTop).toBe(120);
+    fireEvent.click(view.getByRole("button", { name: "Go to latest" }));
+    await waitFor(() => expect(document.querySelector(".inspector-step-meta")?.textContent).toContain("#5"));
+    expect(view.getByRole("button", { name: "Usage" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("keeps live following enabled after opening and closing the inspector", async () => {
+    const selectedTrace = tracesById["trace-c"]!;
+    const first = makeEvent("modal-connected-first", {});
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [first]);
+    const view = render(<App />);
+    await waitFor(() => expect(document.querySelectorAll(".toc-row")).toHaveLength(1));
+    fireEvent.click(document.querySelector(".trace-tree-event")!);
+    const refresh = view.getByRole("button", { name: "Refresh events" });
+    expect(refresh.querySelector("svg")).toBeTruthy();
+    expect(refresh.closest(".trace-tree-head-actions")?.querySelector(".sort-toggle")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Close trace inspector" }));
+    expect(document.querySelector(".inspector-drawer")?.hasAttribute("open")).toBe(false);
+    const appended = { ...makeEvent("modal-connected-new", {}), index: 5, offset: 5, timestampMs: 2000 };
+    tracePagesById["trace-c"] = makeTracePageWithEvents(selectedTrace, [first, appended]);
+    act(() => MockEventSource.instances[0]!.emit("events_appended", { id: "trace-c", appended: 1 }));
+    await waitFor(() => {
+      flushRafQueue();
+      expect(document.querySelectorAll(".event-card")).toHaveLength(2);
+      expect(document.querySelectorAll(".trace-tree-event")).toHaveLength(2);
+      expect(document.querySelectorAll(".toc-row")).toHaveLength(2);
+      expect(document.querySelector(".timeline-segment.active")?.getAttribute("title")).toContain("#5");
+    });
   });
 
   it("queues new events while scrolled away from latest and resumes on jump", async () => {

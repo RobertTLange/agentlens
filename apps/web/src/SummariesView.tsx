@@ -352,6 +352,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       if (!summariesResponse.ok) throw new Error("failed to load summaries");
       const statusJson = (await statusResponse.json()) as RagIndexStatus;
       const summariesJson = (await summariesResponse.json()) as { summaries: RagSummaryRecord[] };
+      if (projectionRequestRef.current !== projectionRequestId) return;
       const sortedSummaries = sortSummariesByOriginalTraceTime(summariesJson.summaries);
       setStatus(statusJson);
       setSummaries((existing) => mergeHydratedSummaryDetails(existing, sortedSummaries));
@@ -362,9 +363,10 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       });
       void refreshProjectionData(projectionRequestId);
     } catch (err) {
+      if (projectionRequestRef.current !== projectionRequestId) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (showLoading) setLoading(false);
+      if (showLoading && projectionRequestRef.current === projectionRequestId) setLoading(false);
     }
   }
 
@@ -491,7 +493,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
               className={`mono rag-segment ${viewMode === item ? "active" : ""}`}
               onClick={() => setViewMode(item)}
             >
-              {item}
+              {item === "sessions" ? "Sessions" : "Daily reports"}
             </button>
           ))}
         </div>
@@ -500,6 +502,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             <input
               className="search rag-search"
               placeholder="Search summaries and redacted trace text"
+              aria-label="Search summaries"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
@@ -517,6 +520,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             </div>
             <select
               className="mono rag-select"
+              aria-label="Filter summaries by agent"
               value={agent}
               onChange={(event) => {
                 setAgent(event.target.value as AgentKind | "");
@@ -529,6 +533,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
             </select>
             <select
               className="mono rag-select"
+              aria-label="Filter summaries by status"
               value={summaryStatus}
               onChange={(event) => {
                 setSummaryStatus(event.target.value as (typeof STATUS_OPTIONS)[number]);
@@ -547,7 +552,7 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       </section>
 
       <section className="rag-status-strip mono" aria-label="RAG status">
-        <span>{status?.daemon.running ? `daemon ${status.daemon.pid ?? "-"}` : "daemon stopped"}</span>
+        <span>{status ? status.daemon.running ? "Background summaries running" : "Background summaries stopped" : "Checking summary status…"}</span>
         <span>{`complete ${status?.sessions.complete ?? 0}`}</span>
         <span>{`stale ${status?.sessions.stale ?? 0}`}</span>
         <span>{`failed ${status?.sessions.failed ?? 0}`}</span>
@@ -557,6 +562,13 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
       </section>
 
       {error && <div className="hero-warning mono">{error}</div>}
+      {status && status.sessions.total === 0 && !error && (
+        <section className="rag-setup" aria-label="Summary setup">
+          <h2>No summaries generated yet</h2>
+          <p>Summaries turn your sessions into goals, outcomes, and follow-ups. {status.enabled ? status.daemon.running ? "The background worker is preparing your sessions. This page refreshes automatically." : "Start the background worker to generate summaries from your session history." : "Summary generation is disabled in your configuration."}</p>
+          {status.enabled && !status.daemon.running && <p>Run in your terminal: <code>agentlens rag watch</code>. Generation uses your configured AI agent and may consume tokens.</p>}
+        </section>
+      )}
 
       <div className="rag-layout">
         <section className="panel rag-results-panel">
@@ -610,11 +622,11 @@ export function SummariesView({ onInspectTrace, selectedTraceId: selectedTraceId
                 </button>
               ))
             )}
-            {viewMode === "daily" && dailyToc.length === 0 && <div className="empty">No daily reports</div>}
-            {viewMode !== "daily" && isSearching && results.length === 0 && <div className="empty">No search results</div>}
-            {viewMode !== "daily" && !isSearching && tocSummaries.length === 0 && <div className="empty">No summaries</div>}
+            {viewMode === "daily" && dailyToc.length === 0 && <div className="empty">{loading ? "Loading daily reports…" : "No daily reports yet. Reports appear after their scheduled run."}</div>}
+            {viewMode !== "daily" && isSearching && results.length === 0 && <div className="empty">{loading ? "Searching…" : "No matches. Try another search or agent filter."}</div>}
+            {viewMode !== "daily" && !isSearching && tocSummaries.length === 0 && <div className="empty">{loading ? "Loading summaries…" : `No ${summaryStatus} summaries. Try another status or agent filter.`}</div>}
           </div>
-          {viewMode !== "daily" && (
+          {viewMode !== "daily" && (projection?.items.length ?? 0) > 0 && (
             <SummaryProjectionPlot
               projection={projection}
               projectionOffsetDays={projectionOffsetDays}

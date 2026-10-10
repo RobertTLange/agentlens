@@ -16,7 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@agentlens/contracts": "0.1.0",
+    "@agentlens/contracts": "workspace:*",
     "@huggingface/transformers": "^4.2.0",
     "@iarna/toml": "^2.2.5",
     "better-sqlite3": "^12.10.0",

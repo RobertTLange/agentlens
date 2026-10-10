@@ -40,7 +40,7 @@ Default pricing and context-window metadata are checked in under `packages/core/
 Refresh them from `models.dev/api.json` with:
 
 ```bash
-npm run sync:pricing
+pnpm run sync:pricing
 ```
 
 `models.dev` is the primary source of truth for default rates and context windows across a curated first-party provider set.
@@ -65,6 +65,8 @@ timeoutMs = 5000
 ## RAG Summaries
 
 AgentLens can derive a persistent local RAG index from redacted normalized traces. The worker only summarizes traces that have been quiet for at least `quietPeriodMs`; active traces remain available through the live Inspector APIs until they age out.
+
+Install the Headless CLI with `npm install -g @roberttlange/headless` and verify your agent setup with `headless --check`. The worker must be able to find `headless` on its PATH, or `headlessExecutable` must point to its absolute path.
 
 ```toml
 [rag]

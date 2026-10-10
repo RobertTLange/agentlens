@@ -47,16 +47,23 @@ const EVENT_PASTEL_BY_FILL_CLASS: Readonly<Record<string, string>> = {
   "kind-none": "#f8fafc",
 };
 const DEFAULT_EVENT_PASTEL = "#f8fafc";
-const AGENT_LEGEND_ITEMS: Array<{ label: string; className: string }> = [
-  { label: "codex", className: "agent-border-codex" },
-  { label: "claude", className: "agent-border-claude" },
-  { label: "cursor", className: "agent-border-cursor" },
-  { label: "opencode", className: "agent-border-opencode" },
-  { label: "gemini", className: "agent-border-gemini" },
-  { label: "antigravity", className: "agent-border-antigravity" },
-  { label: "pi", className: "agent-border-pi" },
-  { label: "unknown", className: "agent-border-unknown" },
-];
+const sessionColors = new Map<string, string>();
+const usedSessionColors = new Set<string>();
+
+export function sessionColor(traceId: string): string {
+  const existing = sessionColors.get(traceId);
+  if (existing) return existing;
+  let hash = 2166136261;
+  for (const character of traceId) hash = Math.imul(hash ^ character.codePointAt(0)!, 16777619) >>> 0;
+  let color = "";
+  do {
+    color = `hsl(${(hash / 4294967296 * 360).toFixed(6)} 70% 60%)`;
+    hash = (hash + 1) >>> 0;
+  } while (usedSessionColors.has(color));
+  sessionColors.set(traceId, color);
+  usedSessionColors.add(color);
+  return color;
+}
 const AGENT_TOOLTIP_ORDER: AgentKind[] = ["codex", "claude", "cursor", "opencode", "gemini", "antigravity", "pi", "unknown"];
 const HEATMAP_METRIC_OPTIONS: Array<{ value: ActivityHeatmapMetric; label: string }> = [
   { value: "sessions", label: "Sessions" },
@@ -70,7 +77,7 @@ const HEATMAP_COLOR_PRESETS: Array<{ label: string; value: string }> = [
   { label: "Amber", value: "#d97706" },
   { label: "Teal", value: "#0f766e" },
 ];
-const DEFAULT_HEATMAP_COLOR = "#dc2626";
+const DEFAULT_HEATMAP_COLOR = "#16a34a";
 const ACTIVITY_REQUEST_TIMEOUT_MS = 10_000;
 
 interface ActivityDayResponse {
@@ -520,7 +527,7 @@ function buildCompressedColumnTemplate(rows: ActivityTimelineRowModel[], binMinu
   };
 }
 
-function buildSessionSegments(
+export function buildSessionSegments(
   rows: ActivityTimelineRowModel[],
   traceAgentById: Readonly<Record<string, AgentKind>> | undefined,
 ): { segments: SessionSegment[]; laneCount: number } {
@@ -570,41 +577,36 @@ function buildSessionSegments(
     });
   }
 
-  rawSegments.sort((left, right) => left.startIndex - right.startIndex || left.traceId.localeCompare(right.traceId));
-
-  const laneEndIndex: number[] = [];
+  const sessions = Array.from(binIndexesByTraceId.entries()).sort(([leftId, left], [rightId, right]) =>
+    ((right[right.length - 1] ?? 0) - (right[0] ?? 0)) - ((left[left.length - 1] ?? 0) - (left[0] ?? 0))
+    || (left[0] ?? 0) - (right[0] ?? 0)
+    || leftId.localeCompare(rightId));
+  const occupiedBinsByLane: Set<number>[] = [];
+  const laneByTraceId = new Map<string, number>();
+  for (const [traceId, indexes] of sessions) {
+    let laneIndex = occupiedBinsByLane.findIndex((occupied) => indexes.every((index) => !occupied.has(index)));
+    if (laneIndex < 0) {
+      laneIndex = occupiedBinsByLane.length;
+      occupiedBinsByLane.push(new Set());
+    }
+    for (const index of indexes) occupiedBinsByLane[laneIndex]!.add(index);
+    laneByTraceId.set(traceId, laneIndex);
+  }
   const segments: SessionSegment[] = [];
   for (const segment of rawSegments) {
-    let laneIndex = -1;
-    for (let lane = 0; lane < laneEndIndex.length; lane += 1) {
-      const laneEnd = laneEndIndex[lane] ?? -1;
-      if (segment.startIndex > laneEnd) {
-        laneIndex = lane;
-        break;
-      }
-    }
-    if (laneIndex < 0) {
-      laneIndex = laneEndIndex.length;
-      laneEndIndex.push(segment.endIndex);
-    } else {
-      laneEndIndex[laneIndex] = segment.endIndex;
-    }
+    const laneIndex = laneByTraceId.get(segment.traceId)!;
     segments.push({ ...segment, laneIndex });
   }
 
   return {
     segments,
-    laneCount: Math.max(1, laneEndIndex.length),
+    laneCount: Math.max(1, occupiedBinsByLane.length),
   };
 }
 
 function weekSnapshotFromDayActivity(day: AgentActivityDay): AgentActivityWeek {
   return {
-    presentation: {
-      metric: "sessions",
-      color: "#dc2626",
-      palette: ["#ffffff", "#fee2e2", "#fca5a5", "#ef4444", "#b91c1c"],
-    },
+    presentation: buildLocalHeatmapPresentation("sessions", DEFAULT_HEATMAP_COLOR),
     tzOffsetMinutes: day.tzOffsetMinutes,
     dayCount: 1,
     slotMinutes: day.binMinutes,
@@ -1060,71 +1062,73 @@ export function ActivityView({
           <div className="activity-head-meta mono">{activity ? `${activity.dateLocal} overview` : "today"}</div>
         </div>
         <div className="activity-head-right">
-          <div className="activity-head-controls" aria-label="heatmap display controls">
-            <label className="activity-head-control">
-              <span className="mono activity-head-control-label">metric</span>
-              <select
-                className="mono activity-head-select"
-                aria-label="Heatmap metric"
-                value={displayedHeatmapMetric}
-                onChange={(event) => {
-                  handleHeatmapMetricChange(event.target.value as ActivityHeatmapMetric);
-                }}
-              >
-                {HEATMAP_METRIC_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="activity-color-menu">
-              <button
-                type="button"
-                className="mono activity-color-trigger"
-                aria-label="Heatmap color"
-                aria-expanded={isColorPickerOpen}
-                data-current-color={displayedHeatmapColor}
-                onClick={() => {
-                  setIsColorPickerOpen((current) => !current);
-                }}
-              >
-                <span className="activity-color-trigger-label">color</span>
-                <span className="activity-color-current-swatch" style={{ background: displayedHeatmapColor }} aria-hidden="true" />
-              </button>
-              {isColorPickerOpen ? (
-                <div className="activity-color-popover" role="dialog" aria-label="Heatmap color picker">
-                  <div className="activity-color-swatches">
-                    {HEATMAP_COLOR_PRESETS.map((preset) => (
-                      <button
-                        key={preset.value}
-                        type="button"
-                        className={`activity-color-option ${displayedHeatmapColor === preset.value ? "active" : ""}`}
-                        aria-label={`Use ${preset.label} heatmap color`}
-                        data-color={preset.value}
-                        onClick={() => {
-                          handleHeatmapColorChange(preset.value);
+          <div className="activity-head-toolbar">
+            <div className="activity-head-controls" aria-label="heatmap display controls">
+              <label className="activity-head-control">
+                <span className="mono activity-head-control-label">metric</span>
+                <select
+                  className="mono activity-head-select"
+                  aria-label="Heatmap metric"
+                  value={displayedHeatmapMetric}
+                  onChange={(event) => {
+                    handleHeatmapMetricChange(event.target.value as ActivityHeatmapMetric);
+                  }}
+                >
+                  {HEATMAP_METRIC_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="activity-color-menu">
+                <button
+                  type="button"
+                  className="mono activity-color-trigger"
+                  aria-label="Heatmap color"
+                  aria-expanded={isColorPickerOpen}
+                  data-current-color={displayedHeatmapColor}
+                  onClick={() => {
+                    setIsColorPickerOpen((current) => !current);
+                  }}
+                >
+                  <span className="activity-color-trigger-label">color</span>
+                  <span className="activity-color-current-swatch" style={{ background: displayedHeatmapColor }} aria-hidden="true" />
+                </button>
+                {isColorPickerOpen ? (
+                  <div className="activity-color-popover" role="dialog" aria-label="Heatmap color picker">
+                    <div className="activity-color-swatches">
+                      {HEATMAP_COLOR_PRESETS.map((preset) => (
+                        <button
+                          key={preset.value}
+                          type="button"
+                          className={`activity-color-option ${displayedHeatmapColor === preset.value ? "active" : ""}`}
+                          aria-label={`Use ${preset.label} heatmap color`}
+                          data-color={preset.value}
+                          onClick={() => {
+                            handleHeatmapColorChange(preset.value);
+                          }}
+                          style={{ background: preset.value }}
+                        />
+                      ))}
+                    </div>
+                    <label className="activity-color-custom">
+                      <span className="mono activity-head-control-label">custom</span>
+                      <input
+                        type="color"
+                        aria-label="Custom heatmap color"
+                        value={displayedHeatmapColor}
+                        onChange={(event) => {
+                          handleHeatmapColorChange(event.target.value);
                         }}
-                        style={{ background: preset.value }}
                       />
-                    ))}
+                    </label>
                   </div>
-                  <label className="activity-color-custom">
-                    <span className="mono activity-head-control-label">custom</span>
-                    <input
-                      type="color"
-                      aria-label="Custom heatmap color"
-                      value={displayedHeatmapColor}
-                      onChange={(event) => {
-                        handleHeatmapColorChange(event.target.value);
-                      }}
-                    />
-                  </label>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
             </div>
+            <div className="activity-head-status mono">{headerStatus}</div>
           </div>
-          <div className="activity-head-status mono">{headerStatus}</div>
           {activity && model ? (
             <div className="activity-head-stats" aria-label="daily activity summary">
               <span className="mono activity-head-stat">{`sessions ${formatCompactNumber(activity.totalSessionsInWindow)} in window`}</span>
@@ -1142,14 +1146,8 @@ export function ActivityView({
             <div className="activity-day-plot">
               <div className="activity-day-head">
                 <div className="mono activity-day-title">Daily Activity</div>
-                <section className="activity-legend" aria-label="agent legend and no-agent state">
-                  <span className="mono activity-legend-title">agent border legend</span>
-                  {AGENT_LEGEND_ITEMS.map((item) => (
-                    <span key={item.label} className="mono activity-legend-item">
-                      <span className={`activity-legend-swatch ${item.className}`} aria-hidden="true" />
-                      <span>{item.label}</span>
-                    </span>
-                  ))}
+                <section className="activity-legend" aria-label="session colors and no-agent state">
+                  <span className="mono activity-legend-title">each session has its own color</span>
                   <span className="mono activity-legend-item no-agents">
                     <span className="activity-legend-empty-swatch" aria-hidden="true" />
                     <span>no agents ran</span>
@@ -1189,9 +1187,10 @@ export function ActivityView({
                         style={{
                           gridColumn: `${segment.startIndex + 1} / ${segment.endIndex + 2}`,
                           gridRow: `${segment.laneIndex + 1}`,
-                          background: segment.eventBackground,
-                        }}
-                        title={`${segment.traceId} · ${segment.firstLabel}-${segment.lastLabel}`}
+                          "--activity-session-background": segment.eventBackground,
+                          "--activity-session-color": sessionColor(segment.traceId),
+                        } as CSSProperties}
+                        title={`${segment.traceId} · ${segment.agent} · ${segment.firstLabel}-${segment.lastLabel}`}
                         aria-label={`Inspect ${segment.traceId} from ${segment.firstLabel} to ${segment.lastLabel}`}
                       >
                         <span className="mono activity-segment-label">{showSegmentLabels ? segment.traceId : ""}</span>

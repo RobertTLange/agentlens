@@ -2,27 +2,18 @@
   "name": "agentlens-workspace",
   "private": true,
   "version": "0.1.0",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
   "scripts": {
-    "build": "npm -w packages/contracts run build && npm -w packages/core run build && npm -w apps/web run build && npm -w apps/server run build && npm -w apps/cli run build",
-    "typecheck": "npm run -ws typecheck",
-    "pretest": "npm -w packages/contracts run build && npm -w packages/core run build",
-    "test": "npm run -ws test",
+    "build": "pnpm --filter ./packages/contracts run build && pnpm --filter ./packages/core run build && pnpm --filter ./apps/web run build && pnpm --filter ./apps/server run build && pnpm --filter ./apps/cli run build",
+    "typecheck": "pnpm -r run typecheck",
+    "pretest": "pnpm --filter ./packages/contracts run build && pnpm --filter ./packages/core run build",
+    "test": "pnpm -r run test",
     "sync:pricing": "node --experimental-strip-types scripts/sync-pricing.ts",
-    "dev:server": "npm -w apps/server run dev",
-    "dev:web": "npm -w apps/web run dev",
-    "dev:cli": "npm -w apps/cli run dev"
+    "dev:server": "pnpm --filter ./apps/cli run build && node apps/cli/dist/main.js rag watch && pnpm --filter ./apps/server run dev",
+    "dev:web": "pnpm --filter ./apps/web run dev",
+    "dev:cli": "pnpm --filter ./apps/cli run dev"
   },
   "devDependencies": {
     "@types/node": "^22.13.0"
   },
-  "overrides": {
-    "@huggingface/transformers": {
-      "onnxruntime-node": "1.22.0"
-    },
-    "protobufjs": "^7.6.4"
-  }
+  "packageManager": "pnpm@11.21.0"
 }

@@ -1603,7 +1603,7 @@ describe("server api", () => {
     const yearPayload = yearResponse.json() as { activity: AgentActivityYear };
     expect(yearPayload.activity.presentation).toMatchObject({
       metric: "sessions",
-      color: "#dc2626",
+      color: "#16a34a",
     });
 
     await server.close();

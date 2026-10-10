@@ -10,7 +10,7 @@ const serverWebDistPath = path.resolve(serverRoot, "dist/web");
 
 if (!existsSync(webDistPath)) {
   console.error(`[agentlens/server] Missing web build at ${webDistPath}`);
-  console.error(`[agentlens/server] Run: npm -w apps/web run build`);
+  console.error(`[agentlens/server] Run: pnpm --filter ./apps/web build`);
   process.exit(1);
 }
 

@@ -1,0 +1,17 @@
+packages:
+  - apps/*
+  - packages/*
+
+nodeLinker: hoisted
+enablePrePostScripts: true
+
+overrides:
+  '@huggingface/transformers>onnxruntime-node': 1.22.0
+  protobufjs: ^7.6.4
+
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  onnxruntime-node: true
+  sharp: true
+  protobufjs: true

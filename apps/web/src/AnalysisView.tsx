@@ -197,6 +197,7 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
   const [customSince, setCustomSince] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [refreshCount, setRefreshCount] = useState(0);
 
   const since = sinceMode === "custom" ? customSince.trim() : sinceMode;
   const query = useMemo(() => {
@@ -211,6 +212,12 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
     let cancelled = false;
     setLoading(true);
     setError("");
+    setAnalysis(null);
+    if (sinceMode === "custom" && !since) {
+      setLoading(false);
+      setError("Enter a custom range, such as 14d, to load analysis.");
+      return;
+    }
     fetch(`/api/analysis${query}`)
       .then(async (response) => {
         const json = (await response.json()) as AnalysisResponse | { error?: string };
@@ -232,7 +239,7 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
     return () => {
       cancelled = true;
     };
-  }, [query]);
+  }, [query, refreshCount, sinceMode, since]);
 
   const summary = analysis?.summary;
   const noTraces = summary ? summary.traceCount === 0 : false;
@@ -240,28 +247,49 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
   const noObserved = summary ? summary.totalSkillCount === 0 && summary.subagentSpawnCount === 0 : false;
   const dashboard = useMemo(() => (analysis ? buildAnalysisDashboardModel(analysis) : null), [analysis]);
 
+  const highlightedSession = dashboard?.sessionCards[0];
+  const leadingSkill = dashboard?.skillBars[0];
+
   return (
-    <div className="analysis-view">
+    <div className="analysis-view" aria-busy={loading}>
+      <section className="analysis-intro">
+        <div>
+          <span className="analysis-eyebrow">WORKFLOW INSIGHTS</span>
+          <h2>Understand how your agents work</h2>
+          <p>Explore skill usage and delegation, review your setup, and open the sessions behind the numbers.</p>
+        </div>
+        <button type="button" className="analysis-inspect-button" disabled={loading} onClick={() => setRefreshCount((count) => count + 1)}>
+          {loading ? "Refreshing…" : error ? "Retry analysis" : "Refresh analysis"}
+        </button>
+      </section>
       <section className="analysis-toolbar" aria-label="Analysis controls">
-        <select className="mono analysis-select" value={agent} onChange={(event) => setAgent(event.target.value as AgentKind | "")}>
-          {AGENT_OPTIONS.map((value) => (
-            <option key={value || "all"} value={value}>{value || "all agents"}</option>
-          ))}
-        </select>
-        <select
-          className="mono analysis-select"
-          value={sinceMode}
-          onChange={(event) => setSinceMode(event.target.value as (typeof SINCE_OPTIONS)[number])}
-        >
-          <option value="">all time</option>
-          <option value="24h">24h</option>
-          <option value="7d">7d</option>
-          <option value="30d">30d</option>
-          <option value="custom">custom</option>
-        </select>
+        <label className="analysis-filter">
+          Agent
+          <select aria-label="Agent" className="analysis-select" value={agent} onChange={(event) => setAgent(event.target.value as AgentKind | "")}>
+            {AGENT_OPTIONS.map((value) => (
+              <option key={value || "all"} value={value}>{value || "all agents"}</option>
+            ))}
+          </select>
+        </label>
+        <label className="analysis-filter">
+          Time range
+          <select
+            aria-label="Time range"
+            className="analysis-select"
+            value={sinceMode}
+            onChange={(event) => setSinceMode(event.target.value as (typeof SINCE_OPTIONS)[number])}
+          >
+            <option value="">All time</option>
+            <option value="24h">Last 24 hours</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="custom">Custom range</option>
+          </select>
+        </label>
         {sinceMode === "custom" && (
           <input
             className="search analysis-custom-since"
+            aria-label="Custom time range"
             value={customSince}
             placeholder="e.g. 14d"
             onChange={(event) => setCustomSince(event.target.value)}
@@ -270,11 +298,11 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
         <span className="mono analysis-loading">{loading ? "loading" : fmtRuntime(analysis)}</span>
       </section>
 
-      {error && <div className="hero-warning mono">{error}</div>}
+      {error && <div className="analysis-notice" role="alert">{error}</div>}
       {loading && !analysis && !error && <LoadingPanel since={since} />}
-      {noTraces && <div className="empty">No sessions indexed</div>}
-      {noSupported && <div className="empty">No Codex or Claude sessions available for v1 analysis</div>}
-      {noObserved && !noTraces && <div className="empty">No skills or subagents observed</div>}
+      {noTraces && <div className="analysis-notice">No sessions indexed for this selection. Try a wider time range or select all agents.</div>}
+      {noSupported && <div className="analysis-notice">No supported sessions in this selection. Skill and delegation detection currently covers Codex and Claude; other agents still appear in Source mix.</div>}
+      {noObserved && !noTraces && !noSupported && <div className="analysis-notice">No skills or subagents observed in this selection. Try a wider range, or inspect a session to see its raw activity.</div>}
 
       {analysis && (
         <>
@@ -300,8 +328,42 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
                 </div>
               </section>
 
+              <details className="analysis-notice" aria-label="How to read this analysis">
+                <summary>How to read these insights</summary>
+                <p>Explicit uses are recorded in traces. Inferred uses are text matches and may include mentions rather than invocations. More activity does not necessarily mean better results.</p>
+                {summary && summary.supportedTraceCount < summary.traceCount && (
+                  <p><strong>Partial coverage:</strong> {summary.traceCount - summary.supportedTraceCount} sessions have no supported skill detector. Their missing signals are not evidence of zero usage.</p>
+                )}
+                {analysis.runtime?.cache === "stale" && <p>Showing cached results while the server refreshes. Refresh analysis shortly to retrieve the latest results.</p>}
+              </details>
+
+              <section className="analysis-insights" aria-label="Useful insights">
+                <article className="analysis-insight-card">
+                  <span className="analysis-eyebrow">SKILL USAGE</span>
+                  <h3>{leadingSkill?.name ?? "No skill signals yet"}</h3>
+                  <p>{leadingSkill
+                    ? `Most observed skill: ${leadingSkill.totalCount.toLocaleString()} ${leadingSkill.totalCount === 1 ? "use" : "uses"} across ${leadingSkill.sessionCount.toLocaleString()} ${leadingSkill.sessionCount === 1 ? "session" : "sessions"} in this selection.`
+                    : "Choose a wider range to look for recorded skill usage."}</p>
+                  <a href="#analysis-skills">Explore skill usage →</a>
+                </article>
+                <article className="analysis-insight-card">
+                  <span className="analysis-eyebrow">CONFIGURATION REVIEW</span>
+                  <h3>{analysis.inventory.unusedConfiguredSkills.length.toLocaleString()} {analysis.inventory.unusedConfiguredSkills.length === 1 ? "skill" : "skills"} without observed usage</h3>
+                  <p>Review these against your workflow. A skill may be useful outside this time range; missing usage alone is not a reason to remove it.</p>
+                  <a href="#analysis-inventory">Review configured skills →</a>
+                </article>
+                <article className="analysis-insight-card">
+                  <span className="analysis-eyebrow">SESSION SPOTLIGHT</span>
+                  <h3>{highlightedSession ? "Explore the most active workflow" : "No session highlights yet"}</h3>
+                  <p>{highlightedSession
+                    ? `${highlightedSession.activityCount.toLocaleString()} skill and delegation signals. Inspect the trace to understand how this session used them.`
+                    : "Highlights appear when skills or subagent activity are detected."}</p>
+                  {highlightedSession && <button type="button" className="analysis-insight-action" onClick={() => onInspectTrace(highlightedSession.traceId)}>Inspect highlighted session →</button>}
+                </article>
+              </section>
+
               <section className="analysis-dashboard-grid" aria-label="Analysis dashboard">
-                <section className="panel analysis-visual-panel analysis-skill-panel">
+                <section id="analysis-skills" className="panel analysis-visual-panel analysis-skill-panel">
                   <div className="panel-head">
                     <h2>Skill adoption</h2>
                     <span className="mono">top {dashboard.skillBars.length} of {analysis.skills.length}</span>
@@ -339,7 +401,7 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
               <section className="panel analysis-visual-panel">
                 <div className="panel-head">
                   <h2>Session highlights</h2>
-                  <span className="mono">{analysis.topSessions.length} rows</span>
+                  <span className="mono">Ranked by detected skills + subagent spawns</span>
                 </div>
                 <div className="analysis-session-grid">
                   {dashboard.sessionCards.map((row) => (
@@ -351,11 +413,12 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
             </>
           )}
 
-          <section className="panel analysis-section analysis-inventory-panel">
+          <section id="analysis-inventory" className="panel analysis-section analysis-inventory-panel">
             <div className="panel-head">
               <h2>Unused Configured Skills</h2>
               <span className="mono">{analysis.inventory.unusedConfiguredSkills.length} rows</span>
             </div>
+            <p className="analysis-panel-description">Configured skills with no detected use in this selection. Check a wider range before changing your setup.</p>
             <div className="analysis-skill-list">
               {analysis.inventory.unusedConfiguredSkills.map((skill) => (
                 <span key={skill} className="mono">{skill}</span>
@@ -364,11 +427,8 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
             </div>
           </section>
 
-          <section className="panel analysis-section analysis-detail-section">
-            <div className="panel-head">
-              <h2>Detailed data</h2>
-              <span className="mono">tables retained for export-style review</span>
-            </div>
+          <details className="panel analysis-section analysis-detail-section">
+            <summary className="panel-head analysis-details-toggle">Detailed data · source agents, skills, roles, and sessions</summary>
             <div className="analysis-detail-grid">
               <section>
                 <div className="analysis-detail-head">
@@ -512,7 +572,7 @@ export function AnalysisView({ onInspectTrace }: AnalysisViewProps): JSX.Element
                 </div>
               </section>
             </div>
-          </section>
+          </details>
 
           <section className="analysis-coverage-note mono">
             Supported detectors: codex, claude. Other source agents are scanned and marked unsupported for v1-specific detection.

@@ -400,25 +400,25 @@ Add Web tests:
 Run targeted tests while implementing:
 
 ```bash
-npm -w packages/contracts run build
-npm -w packages/core test
-npm -w apps/server test
-npm -w apps/cli test
-npm -w apps/web test
+pnpm --filter ./packages/contracts build
+pnpm --filter ./packages/core test
+pnpm --filter ./apps/server test
+pnpm --filter ./apps/cli test
+pnpm --filter ./apps/web test
 ```
 
 Run full gate before handoff:
 
 ```bash
-npm run build
-npm run typecheck
-npm test
+pnpm run build
+pnpm run typecheck
+pnpm test
 ```
 
 For browser-visible behavior, run the app and verify with Playwright:
 
 ```bash
-npm -w apps/server run dev
+pnpm --filter ./apps/server dev
 ```
 
 Then check:

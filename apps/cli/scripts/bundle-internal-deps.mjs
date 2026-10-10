@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -95,7 +95,14 @@ async function bundleInternalPackage({ packageName, sourceDir, requiredBuildOutp
   await mkdir(targetDir, { recursive: true });
   markCopied(targetDir);
 
-  await cp(sourcePackageJson, path.join(targetDir, "package.json"), { dereference: true });
+  const packageJson = await readJson(sourcePackageJson);
+  for (const [name, version] of Object.entries(packageJson.dependencies ?? {})) {
+    if (version.startsWith("workspace:")) {
+      const target = internalBundleTargets.find((entry) => entry.packageName === name);
+      packageJson.dependencies[name] = (await readJson(path.join(target.sourceDir, "package.json"))).version;
+    }
+  }
+  await writeFile(path.join(targetDir, "package.json"), JSON.stringify(packageJson, null, 2) + "\n");
   await cp(sourceDist, path.join(targetDir, "dist"), { recursive: true, dereference: true });
 
   for (const fileName of optionalPackageFiles) {
@@ -148,6 +155,15 @@ async function bundleExternalDependencyTree(packageName, fromDir = repoRoot, opt
 }
 
 await removePreviousBundle();
+const backupPath = path.join(cliRoot, ".bundle-node_modules");
+if (existsSync(backupPath)) {
+  await rm(targetNodeModulesRoot, { recursive: true, force: true });
+  await rename(backupPath, targetNodeModulesRoot);
+}
+// Preserve pnpm's workspace links while staging dependencies for the tarball.
+if (existsSync(targetNodeModulesRoot)) {
+  await rename(targetNodeModulesRoot, backupPath);
+}
 
 const internalPackageJsons = [];
 for (const target of internalBundleTargets) {

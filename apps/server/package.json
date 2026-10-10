@@ -11,8 +11,8 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@agentlens/contracts": "0.1.0",
-    "@agentlens/core": "0.1.0",
+    "@agentlens/contracts": "workspace:*",
+    "@agentlens/core": "workspace:*",
     "@fastify/static": "^9.1.3",
     "fastify": "^5.2.1"
   },

@@ -270,7 +270,7 @@ function normalizeHexColor(value: string): string {
   if (longMatch) {
     return `#${(longMatch[1] ?? "").toLowerCase()}`;
   }
-  return "#dc2626";
+  return "#16a34a";
 }
 
 function hexChannel(color: string, start: number): number {

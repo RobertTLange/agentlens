@@ -29,7 +29,7 @@ describe("config", () => {
     expect(config.models.defaultContextWindowTokens).toBeGreaterThan(0);
     expect(config.models.contextWindows.some((entry) => entry.model === "gpt-5.2-codex")).toBe(true);
     expect(config.activityHeatmap.metric).toBe("sessions");
-    expect(config.activityHeatmap.color).toBe("#dc2626");
+    expect(config.activityHeatmap.color).toBe("#16a34a");
     expect(
       config.models.contextWindows.some(
         (entry) => entry.model === "gpt-5.2-codex" && entry.contextWindowTokens === 400_000,
@@ -365,7 +365,7 @@ maxResidentEventsPerWarmTrace = 20
     });
 
     expect(config.activityHeatmap.metric).toBe("sessions");
-    expect(config.activityHeatmap.color).toBe("#dc2626");
+    expect(config.activityHeatmap.color).toBe("#16a34a");
   });
 
   it("merges analysis config with sanitized values", () => {

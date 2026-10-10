@@ -3073,8 +3073,8 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 <html><body style="font-family: sans-serif; padding: 2rem;">
 <h1>AgentLens server running</h1>
 <p>Web app not built yet.</p>
-<p>Build once: <code>npm -w apps/web run build</code></p>
-<p>Or run dev UI: <code>npm -w apps/web run dev</code> then open <a href="http://127.0.0.1:5173">http://127.0.0.1:5173</a>.</p>
+<p>Build once: <code>pnpm --filter ./apps/web build</code></p>
+<p>Or run dev UI: <code>pnpm --filter ./apps/web dev</code> then open <a href="http://127.0.0.1:5173">http://127.0.0.1:5173</a>.</p>
 <p>API: <a href="/api/overview">/api/overview</a></p>
 </body></html>`;
     }
@@ -3088,8 +3088,8 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
 <html><body style="font-family: sans-serif; padding: 2rem;">
 <h1>AgentLens server running</h1>
 <p>Web app not built yet.</p>
-<p>Build once: <code>npm -w apps/web run build</code></p>
-<p>Or run dev UI: <code>npm -w apps/web run dev</code> then open <a href="http://127.0.0.1:5173">http://127.0.0.1:5173</a>.</p>
+<p>Build once: <code>pnpm --filter ./apps/web build</code></p>
+<p>Or run dev UI: <code>pnpm --filter ./apps/web dev</code> then open <a href="http://127.0.0.1:5173">http://127.0.0.1:5173</a>.</p>
 <p>API: <a href="/api/overview">/api/overview</a></p>
 </body></html>`;
     }

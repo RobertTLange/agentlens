@@ -1598,6 +1598,20 @@ process.exit(0);
 });
 
 describe("headless summarization", () => {
+  it("parses the final Codex agent message from native JSONL", async () => {
+    const dir = await tempDir();
+    const executable = path.join(dir, "fake-codex-headless.js");
+    await writeFile(executable, `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "thread.started", thread_id: "rag-codex-thread" }));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(JSON.stringify(content()))} } }));
+console.log(JSON.stringify({ type: "turn.completed", usage: {} }));
+`, "utf8");
+    await chmod(executable, 0o755);
+    const result = await runHeadlessSummary(testConfig(path.join(dir, "rag.db"), { headlessExecutable: executable }), "redacted prompt");
+    expect(result.content.title).toBe("Fixed failing tests");
+    expect(result.internalSummarySessionIds).toEqual(["rag-codex-thread"]);
+  });
+
   it("uses argument arrays, forwards Claude auth, and parses Headless JSONL output", async () => {
     const dir = await tempDir();
     const executable = path.join(dir, "fake-headless.js");

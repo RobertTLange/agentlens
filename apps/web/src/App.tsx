@@ -23,12 +23,24 @@ import {
   sortTimelineItems,
   type TimelineSortDirection,
 } from "./view-model.js";
+import { groupInspectorEvents, type InspectorEventGroup } from "./inspector-view-model.js";
+import { TraceTree } from "./TraceTree.js";
+import { InspectorStep } from "./InspectorStep.js";
+import { buildAgentLoopTree, traceTreeMeasurements, traceGroupUsage } from "./trace-tree-model.js";
+import { InspectorEventContent } from "./InspectorEventContent.js";
 import { SessionTraceRow } from "./SessionTraceRow.js";
 import { ActivityView } from "./ActivityView.js";
 import { SummariesView } from "./SummariesView.js";
 import { AnalysisView } from "./AnalysisView.js";
 import { useListReorderAnimation } from "./useListReorderAnimation.js";
 import { useTraceRowReorderAnimation } from "./useTraceRowReorderAnimation.js";
+
+const PRIMARY_VIEWS = [
+  { id: "inspector", label: "Inspector", description: "Follow your agent sessions and inspect every step.", icon: "M4 4h16v16H4z M9 4v16 M9 9h11" },
+  { id: "activity", label: "Activity", description: "See when your agents work and where usage adds up.", icon: "M3 12h4l3-8 4 16 3-8h4" },
+  { id: "summaries", label: "Summaries", description: "Find the work, decisions, and outcomes across your sessions.", icon: "M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h4" },
+  { id: "analysis", label: "Analysis", description: "Understand skill usage, delegation, and your agent setup.", icon: "M4 20V10 M10 20V4 M16 20v-7 M22 20H2" },
+] as const;
 
 const API = "";
 const AD_HOC_TRACE_ID_PREFIX = "adhoc:";
@@ -409,6 +421,18 @@ export function App(): JSX.Element {
   const [isFlashStatusFading, setIsFlashStatusFading] = useState(false);
   const [lastLiveUpdateMs, setLastLiveUpdateMs] = useState<number | null>(null);
   const [activeView, setActiveView] = useState<"inspector" | "activity" | "summaries" | "analysis">("inspector");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    try {
+      const saved = localStorage.getItem("agentlens-theme");
+      if (saved === "light" || saved === "dark") return saved;
+    } catch { /* Storage can be unavailable in private browser contexts. */ }
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem("agentlens-theme", theme); } catch { /* Keep the toggle usable without storage. */ }
+  }, [theme]);
   const [summariesSelectedTraceId, setSummariesSelectedTraceId] = useState("");
   const [inspectorSummaryTraceId, setInspectorSummaryTraceId] = useState("");
   const [selectedHeatmapMetric, setSelectedHeatmapMetric] = useState<ActivityHeatmapMetric | null>(null);
@@ -420,6 +444,11 @@ export function App(): JSX.Element {
   const [isEventTypeFilterMenuOpen, setIsEventTypeFilterMenuOpen] = useState(false);
   const [tocQuery, setTocQuery] = useState("");
   const [selectedEventId, setSelectedEventId] = useState("");
+  const [inspectorStep, setInspectorStep] = useState<InspectorEventGroup | null>(null);
+  const [inspectorPage, setInspectorPage] = useState<TracePage | null>(null);
+  const [inspectorRefreshing, setInspectorRefreshing] = useState(false);
+  const [inspectorRefreshError, setInspectorRefreshError] = useState("");
+  const inspectorRefreshRequestRef = useRef(0);
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
   const [expandedEventById, setExpandedEventById] = useState<Record<string, NormalizedEvent>>({});
   const [loadingExpandedEventIds, setLoadingExpandedEventIds] = useState<Set<string>>(new Set());
@@ -454,6 +483,7 @@ export function App(): JSX.Element {
   const eventTypeFilterRef = useRef<HTMLDivElement | null>(null);
   const timelineStripRef = useRef<HTMLDivElement | null>(null);
   const eventsScrollRef = useRef<HTMLDivElement | null>(null);
+  const inspectorDialogRef = useRef<HTMLDialogElement | null>(null);
   const timelinePinnedToLatestRef = useRef(true);
   const eventsPinnedToLatestRef = useRef(true);
   const timelineHasOverflowRef = useRef(false);
@@ -582,14 +612,38 @@ export function App(): JSX.Element {
     if (timelineEvents.length <= limit) return timelineEvents;
     return timelineEvents.slice(0, limit);
   }, [timelineEventRenderLimit, timelineEvents]);
+  const inspectorGroups = useMemo(() => groupInspectorEvents(renderedTimelineEvents), [renderedTimelineEvents]);
+  const inspectorTree = useMemo(() => buildAgentLoopTree(inspectorPage?.events ?? []), [inspectorPage?.events]);
+  const inspectorMeasurements = useMemo(() => traceTreeMeasurements(inspectorTree), [inspectorTree]);
+  const inspectorGroupMeasurement = useMemo(() => {
+    for (const root of inspectorTree) {
+      const pending = [root];
+      while (pending.length) {
+        const node = pending.pop()!;
+        if (node.event.eventId === inspectorStep?.event.eventId) {
+          if (node === root) {
+            const start = inspectorPage?.summary.firstEventTs;
+            const end = inspectorPage?.summary.lastEventTs;
+            return { scope: "session" as const, usage: traceGroupUsage(root), measurement: {
+              durationSeconds: start != null && end != null && end >= start ? (end - start) / 1000 : null,
+              tokens: inspectorPage?.summary.tokenTotals?.totalTokens ?? null,
+            } };
+          }
+          return { scope: "group" as const, usage: traceGroupUsage(root), measurement: inspectorMeasurements.get(root.event.eventId) };
+        }
+        pending.push(...node.children);
+      }
+    }
+    return undefined;
+  }, [inspectorTree, inspectorMeasurements, inspectorStep?.event.eventId, inspectorPage?.summary]);
   const renderedTocRows = useMemo(() => {
     const limit = Math.max(1, timelineEventRenderLimit);
     if (tocRows.length <= limit) return tocRows;
     return tocRows.slice(0, limit);
   }, [timelineEventRenderLimit, tocRows]);
+  const timelineMeasurements = useMemo(() => traceTreeMeasurements(buildAgentLoopTree(page?.events ?? [])), [page?.events]);
   const timelineStripEvents = useMemo(() => buildTimelineStripSegments(visibleTimelineEvents), [visibleTimelineEvents]);
   const tocRowIds = useMemo(() => renderedTocRows.map((row) => row.eventId), [renderedTocRows]);
-  const timelineEventIds = useMemo(() => renderedTimelineEvents.map((event) => event.eventId), [renderedTimelineEvents]);
   const renderedTraceIds = useMemo(() => renderedTraces.map((trace) => trace.id), [renderedTraces]);
   const hiddenOlderTraceCount = Math.max(0, olderTraces.length - visibleOlderTraces.length);
   const timelineStripShowsRightGlow =
@@ -694,9 +748,6 @@ export function App(): JSX.Element {
   );
   const { bindTraceRowRef, removeTraceRow } = useTraceRowReorderAnimation(renderedTraceIds);
   const { bindItemRef: bindTocRowRef } = useListReorderAnimation<HTMLButtonElement>(tocRowIds, { resetKey: selectedId });
-  const { bindItemRef: bindEventCardRef } = useListReorderAnimation<HTMLElement>(timelineEventIds, {
-    resetKey: selectedId,
-  });
 
   const growTimelineRenderWindow = useCallback((): void => {
     setTimelineEventRenderLimit((prev) => {
@@ -1797,36 +1848,25 @@ export function App(): JSX.Element {
     visibleEventKindKey,
   ]);
 
-  const centerEventInView = (target: HTMLElement): void => {
-    const scroller = target.closest(".events-scroll");
-    if (!(scroller instanceof HTMLElement)) return;
-    const targetRect = target.getBoundingClientRect();
-    const scrollerRect = scroller.getBoundingClientRect();
-    const relativeTop = targetRect.top - scrollerRect.top;
-    const centeredOffset = (scroller.clientHeight - targetRect.height) / 2;
-    const top = scroller.scrollTop + relativeTop - centeredOffset;
-    scroller.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-  };
+  useEffect(() => {
+    inspectorDialogRef.current?.close();
+  }, [selectedId, activeView]);
 
   const jumpToEvent = (eventId: string): void => {
-    setSelectedEventId(eventId);
-    const target = document.getElementById(domIdForEvent(eventId));
-    if (target) {
-      centerEventInView(target);
-      return;
+    const source = inspectorDialogRef.current?.open ? inspectorPage : page;
+    const event = source?.events.find(item => item.eventId === eventId);
+    if (!event) return;
+    if (!inspectorDialogRef.current?.open) {
+      inspectorRefreshRequestRef.current++;
+      setInspectorPage(source!);
+      setInspectorRefreshing(false);
+      setInspectorRefreshError("");
     }
-
-    const eventIndex = timelineEvents.findIndex((event) => event.eventId === eventId);
-    if (eventIndex < 0) return;
-    setTimelineEventRenderLimit((prev) => {
-      const needed = eventIndex + TIMELINE_EVENT_RENDER_STEP;
-      return Math.min(Math.max(prev, needed), timelineEvents.length);
-    });
-    window.setTimeout(() => {
-      const delayedTarget = document.getElementById(domIdForEvent(eventId));
-      if (!delayedTarget) return;
-      centerEventInView(delayedTarget);
-    }, 0);
+    const group = groupInspectorEvents(source!.events).find(item => item.event.eventId === eventId || item.call?.eventId === eventId || item.result?.eventId === eventId);
+    setInspectorStep({ ...group, event });
+    setSelectedEventId(eventId);
+    for (const item of group?.call && group.result ? [group.call, group.result] : [event]) void loadExpandedEvent(item.eventId);
+    if (!inspectorDialogRef.current?.open) inspectorDialogRef.current?.showModal();
   };
 
   const loadExpandedEvent = useCallback(
@@ -1869,17 +1909,48 @@ export function App(): JSX.Element {
     [expandedEventById, includeMeta, loadingExpandedEventIds, selectedId],
   );
 
-  const toggleExpanded = (eventId: string): void => {
-    const willExpand = !expandedEventIds.has(eventId);
+  useEffect(() => {
+    if (!inspectorStep) return;
+    const eventId = inspectorStep.event.eventId;
+    const updated = groupInspectorEvents(inspectorPage?.events ?? []).find(group => group.event.eventId === eventId || group.call?.eventId === eventId || group.result?.eventId === eventId);
+    if (!updated || (updated.call?.eventId === inspectorStep.call?.eventId && updated.result?.eventId === inspectorStep.result?.eventId)) return;
+    setInspectorStep({ ...updated, event: inspectorStep.event });
+    if (updated.call) void loadExpandedEvent(updated.call.eventId);
+    if (updated.result) void loadExpandedEvent(updated.result.eventId);
+  }, [inspectorPage?.events, inspectorStep, loadExpandedEvent]);
+
+  const refreshInspector = async (): Promise<void> => {
+    if (!inspectorPage || inspectorRefreshing) return;
+    const snapshot = inspectorPage;
+    const request = ++inspectorRefreshRequestRef.current;
+    setInspectorRefreshing(true);
+    setInspectorRefreshError("");
+    try {
+      const fresh = await fetchJson<TracePage>(isAdHocTraceSelection(selectedId)
+        ? `${API}/api/tracefile?path=${encodeURIComponent(selectedId.slice(AD_HOC_TRACE_ID_PREFIX.length))}&limit=${TRACE_DETAIL_EVENT_LIMIT}&include_meta=1&payload=${TRACE_DETAIL_PAYLOAD}`
+        : `${API}/api/trace/${encodeURIComponent(snapshot.summary.id)}?limit=${TRACE_DETAIL_EVENT_LIMIT}&include_meta=1&payload=${TRACE_DETAIL_PAYLOAD}`);
+      if (request !== inspectorRefreshRequestRef.current || !inspectorDialogRef.current?.open) return;
+      if (fresh.summary.id !== snapshot.summary.id) throw new Error("Refresh returned a different session.");
+      const merged = appendLatestEventsToTracePage(snapshot, fresh.events);
+      setInspectorPage({ ...merged, summary: fresh.summary });
+    } catch (error) {
+      if (request === inspectorRefreshRequestRef.current) setInspectorRefreshError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (request === inspectorRefreshRequestRef.current) setInspectorRefreshing(false);
+    }
+  };
+
+  const toggleExpanded = (eventIds: string[]): void => {
+    const willExpand = !eventIds.some((id) => expandedEventIds.has(id));
     setExpandedEventIds((prev) => {
       const next = new Set(prev);
-      if (next.has(eventId)) next.delete(eventId);
-      else next.add(eventId);
+      for (const id of eventIds) {
+        if (willExpand) next.add(id);
+        else next.delete(id);
+      }
       return next;
     });
-    if (willExpand) {
-      void loadExpandedEvent(eventId);
-    }
+    if (willExpand) for (const id of eventIds) void loadExpandedEvent(id);
   };
 
   const toggleTracePathExpanded = (traceId: string): void => {
@@ -2132,236 +2203,8 @@ export function App(): JSX.Element {
     );
   };
 
-  return (
-    <main className="shell">
-      <header className="hero">
-        <div className="hero-main">
-          <div className="hero-title-line">
-            <h1>🔍 AgentLens</h1>
-            <div className={heroStatusClassName} title={headerStatus}>
-              {headerStatus}
-            </div>
-          </div>
-          {deepLinkWarning && (
-            <div className="hero-warning mono" role="status">
-              {deepLinkWarning}
-            </div>
-          )}
-          <p>Live observability for your Codex, Claude, Cursor, Gemini, OpenCode and Pi agent sessions.</p>
-        </div>
-        <div className="hero-right">
-          <div className="hero-metrics">
-            <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
-            <span>{`events ${overview?.eventCount ?? 0}`}</span>
-            <span>{`errors ${overview?.errorCount ?? 0}`}</span>
-            <span>{`tool io ${(overview?.toolUseCount ?? 0) + (overview?.toolResultCount ?? 0)}`}</span>
-            {startupSummary ? <span>{startupSummary}</span> : null}
-          </div>
-          <div className="hero-actions">
-            <div className="hero-view-toggle" role="tablist" aria-label="Primary view selector">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeView === "inspector"}
-                className={`mono hero-view-button ${activeView === "inspector" ? "active" : ""}`}
-                onClick={() => setActiveView("inspector")}
-              >
-                Inspector
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeView === "activity"}
-                className={`mono hero-view-button ${activeView === "activity" ? "active" : ""}`}
-                onClick={() => setActiveView("activity")}
-              >
-                Activity
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeView === "summaries"}
-                className={`mono hero-view-button ${activeView === "summaries" ? "active" : ""}`}
-                onClick={() => setActiveView("summaries")}
-              >
-                Summaries
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeView === "analysis"}
-                className={`mono hero-view-button ${activeView === "analysis" ? "active" : ""}`}
-                onClick={() => setActiveView("analysis")}
-              >
-                Analysis
-              </button>
-            </div>
-            <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
-              <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                <path
-                  fill="currentColor"
-                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
-                />
-              </svg>
-              <span>agentlens</span>
-            </a>
-          </div>
-        </div>
-      </header>
-
-      {activeView === "inspector" ? (
-        <>
-          <section
-            className={`timeline-strip-panel ${timelineStripShowsRightGlow ? "timeline-strip-has-right-glow" : ""}`}
-            aria-label={
-              timelineStripShowsRightGlow
-                ? `Session timeline summary, ${timelineOffscreenAppendCount} new events off-screen to the right`
-                : "Session timeline summary"
-            }
-          >
-            {timelineStripEvents.length > 0 ? (
-              <div
-                className="timeline-strip-scroll"
-                ref={timelineStripRef}
-                onScroll={handleTimelineStripScroll}
-                data-at-latest={timelineStripPinnedToLatest ? "true" : "false"}
-                data-has-overflow={timelineStripHasOverflow ? "true" : "false"}
-              >
-                <div className="timeline-strip-track" aria-label="Chronological timeline events">
-                  {timelineStripEvents.map((event) => {
-                    const isActive = event.eventId === selectedEventId;
-                    const eventTime = fmtTime(event.timestampMs);
-                    const eventLabel = event.label || event.eventKind;
-                    return (
-                      <button
-                        key={event.eventId}
-                        type="button"
-                        className={`timeline-segment kind-${kindClassSuffix(event.colorKey)} ${isActive ? "active" : ""} ${enteringEventIds.has(event.eventId) ? "timeline-segment-enter" : ""}`}
-                        onClick={() => jumpToEvent(event.eventId)}
-                        title={`${eventLabel} (${event.eventKind}) #${event.index} ${eventTime}`}
-                        aria-label={`Jump to event #${event.index} ${event.eventKind}: ${eventLabel}`}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            ) : (
-              <div className="timeline-strip-empty">No timeline events</div>
-            )}
-          </section>
-
-          <div className="grid">
-        <section className="panel list-panel">
-          <div className="panel-head">
-            <div className="session-head-top">
-              <h2>Sessions</h2>
-              <div className="session-head-counters mono">
-                <span className="session-head-counter status-running">{`running ${sessionStatusCounts.running}`}</span>
-                <span className="session-head-counter status-waiting">{`waiting ${sessionStatusCounts.waiting_input}`}</span>
-              </div>
-            </div>
-            <input
-              className="search"
-              placeholder="Search session/path"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-          <div className="list-scroll">
-            {primaryTraces.map((trace) => renderTraceRow(trace))}
-            {olderTraces.length > 0 && (
-              <section className="older-traces-block" aria-label="Older sessions">
-                <button
-                  type="button"
-                  className="mono older-traces-toggle"
-                  onClick={toggleOlderTraceVisibility}
-                  aria-expanded={showOlderTraces}
-                >
-                  {showOlderTraces
-                    ? `Hide older sessions (${olderTraces.length})`
-                    : `Show older sessions (${olderTraces.length})`}
-                </button>
-                {showOlderTraces && (
-                  <>
-                    {visibleOlderTraces.map((trace) => renderTraceRow(trace))}
-                    {hiddenOlderTraceCount > 0 && (
-                      <button type="button" className="load-more mono older-traces-load-more" onClick={loadMoreOlderTraces}>
-                        {`Load ${Math.min(OLDER_TRACE_PAGE_SIZE, hiddenOlderTraceCount)} more older sessions`}
-                      </button>
-                    )}
-                  </>
-                )}
-              </section>
-            )}
-            {filteredTraces.length === 0 && <div className="empty">No sessions</div>}
-          </div>
-        </section>
-
-        <section className="panel toc-panel">
-          <div className="panel-head toc-head">
-            <div className="toc-head-top">
-              <h2>Timeline TOC</h2>
-              <button
-                type="button"
-                className="sort-toggle mono"
-                title="Toggle timeline sort direction"
-                onClick={() =>
-                  setTimelineSortDirection((prev) => (prev === "latest-first" ? "first-latest" : "latest-first"))
-                }
-              >
-                {timelineSortDirection === "latest-first" ? "latest->first" : "first->latest"}
-              </button>
-            </div>
-            <input
-              className="search"
-              placeholder="Filter by kind/text"
-              value={tocQuery}
-              onChange={(event) => setTocQuery(event.target.value)}
-            />
-          </div>
-          <div
-            className="toc-scroll"
-            onScroll={(event: UIEvent<HTMLDivElement>) => maybeGrowTimelineRenderWindow(event.currentTarget)}
-          >
-            {renderedTocRows.map((row) => {
-              const isActive = row.eventId === selectedEventId;
-              return (
-                <button
-                  key={row.eventId}
-                  className={`toc-row ${isActive ? "active" : ""} ${enteringEventIds.has(row.eventId) ? "toc-row-enter" : ""}`}
-                  onClick={() => jumpToEvent(row.eventId)}
-                  ref={bindTocRowRef(row.eventId)}
-                >
-                  <span className={`toc-dot kind-${kindClassSuffix(row.colorKey)}`} />
-                  <span className="mono toc-index">{`#${row.index}`}</span>
-                  <span className={classForKind(row.eventKind)}>{row.eventKind}</span>
-                  {row.toolType && <span className="kind kind-tool-type">{row.toolType}</span>}
-                  <span className="mono toc-timestamp">{fmtTimeAgo(row.timestampMs, clockNowMs)}</span>
-                </button>
-              );
-            })}
-            {renderedTocRows.length < tocRows.length && (
-              <button type="button" className="load-more mono" onClick={growTimelineRenderWindow}>
-                {`Load ${Math.min(TIMELINE_EVENT_RENDER_STEP, tocRows.length - renderedTocRows.length)} more`}
-              </button>
-            )}
-            {tocRows.length === 0 && <div className="empty">No timeline rows</div>}
-          </div>
-        </section>
-
-        <section className="panel detail-panel">
-            <div className="panel-head detail-head">
-              <div
-                key={`detail-head-pulse-${selectedTraceSummary?.id ?? "none"}-${selectedTracePulseSeq}`}
-                className={`detail-head-title-block ${selectedTracePulseSeq > 0 ? "pulse" : ""}`}
-              >
-                <h2>Trace Inspector</h2>
-                <div className="detail-head-meta mono" title={selectedTraceLabel || undefined}>
-                  {selectedTraceSummary ? `${selectedTraceLabel} · ${selectedTraceMeta}` : selectedTraceMeta}
-                </div>
-              </div>
-              <div className="detail-controls">
-                <div className="event-kind-filter" ref={eventTypeFilterRef}>
+  const eventKindFilterControl = (
+<div className="event-kind-filter" ref={eventTypeFilterRef}>
                   <button
                     type="button"
                     className="mono event-kind-filter-trigger"
@@ -2398,6 +2241,294 @@ export function App(): JSX.Element {
                     </div>
                   )}
                 </div>
+  );
+
+  return (
+    <main className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <header className="hero">
+        <div className="hero-main">
+          <div className="hero-title-line">
+            <h1>{PRIMARY_VIEWS.find((view) => view.id === activeView)?.label}</h1>
+            <div className={heroStatusClassName} title={headerStatus}>
+              {headerStatus}
+            </div>
+          </div>
+          {deepLinkWarning && (
+            <div className="hero-warning mono" role="status">
+              {deepLinkWarning}
+            </div>
+          )}
+          <p>{PRIMARY_VIEWS.find((view) => view.id === activeView)?.description}</p>
+        </div>
+        <div className="hero-right">
+          <button type="button" className="theme-toggle" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} mode`} onClick={() => setTheme(current => current === "light" ? "dark" : "light")}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+              {theme === "light" ? <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z" /> : <><circle cx="12" cy="12" r="4" /><path d="M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1.5 1.5 M17.5 17.5 19 19 M5 19l1.5-1.5 M17.5 6.5 19 5" /></>}
+            </svg>
+            <span>{theme === "light" ? "Dark mode" : "Light mode"}</span>
+          </button>
+          <div className="hero-metrics">
+            <span>{`sessions ${overview?.sessionCount ?? overview?.traceCount ?? 0}`}</span>
+            <span>{`events ${overview?.eventCount ?? 0}`}</span>
+            <span>{`errors ${overview?.errorCount ?? 0}`}</span>
+            <span>{`tool io ${(overview?.toolUseCount ?? 0) + (overview?.toolResultCount ?? 0)}`}</span>
+            {startupSummary ? <span>{startupSummary}</span> : null}
+          </div>
+          <nav id="workspace-sidebar" className="hero-actions" aria-label="Primary navigation">
+            <div className="workspace-brand">
+              <span className="workspace-logo" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="10" cy="10" r="6" /><path d="m15 15 5 5 M7 10h6 M10 7v6" /></svg>
+              </span>
+              <div><strong>AgentLens</strong><span>YOUR AGENT WORKSPACE</span></div>
+            </div>
+            <button
+              type="button"
+              className="sidebar-toggle"
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!sidebarCollapsed}
+              aria-controls="workspace-sidebar"
+              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            >
+              <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d={sidebarCollapsed ? "m9 6 6 6-6 6" : "m15 6-6 6 6 6"} />
+              </svg>
+              <span>Collapse sidebar</span>
+            </button>
+            <div className="nav-caption">WORKSPACE</div>
+            <div className="hero-view-toggle" role="tablist" aria-label="Primary view selector">
+              {PRIMARY_VIEWS.map((view) => (
+                <button
+                  key={view.id}
+                  type="button"
+                  role="tab"
+                  aria-label={view.label}
+                  title={view.label}
+                  aria-selected={activeView === view.id}
+                  className={`hero-view-button ${activeView === view.id ? "active" : ""}`}
+                  onClick={() => setActiveView(view.id)}
+                >
+                  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={view.icon} /></svg>
+                  <span className="nav-label">{view.label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="workspace-note"><span className="workspace-note-dot" />Local workspace<span>Session logs and workflow insights.</span></div>
+            <a className="hero-github-tag mono" href="https://github.com/RobertTLange/agentlens" title="AgentLens on GitHub">
+              <svg className="hero-github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path
+                  fill="currentColor"
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.22 3.32 12.77c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+                />
+              </svg>
+              <span>agentlens</span>
+            </a>
+          </nav>
+        </div>
+      </header>
+
+      {activeView === "inspector" ? (
+        <>
+          <section
+            className={`timeline-strip-panel ${timelineStripShowsRightGlow ? "timeline-strip-has-right-glow" : ""}`}
+            aria-label={
+              timelineStripShowsRightGlow
+                ? `Session timeline summary, ${timelineOffscreenAppendCount} new events off-screen to the right`
+                : "Session timeline summary"
+            }
+          >
+            <div className="timeline-strip-heading"><span>Session timeline</span><span>{timelineStripEvents.length.toLocaleString()} loaded events</span></div>
+            {timelineStripEvents.length > 0 ? (
+              <div
+                className="timeline-strip-scroll"
+                ref={timelineStripRef}
+                onScroll={handleTimelineStripScroll}
+                data-at-latest={timelineStripPinnedToLatest ? "true" : "false"}
+                data-has-overflow={timelineStripHasOverflow ? "true" : "false"}
+              >
+                <div className="timeline-strip-track" aria-label="Chronological timeline events">
+                  {timelineStripEvents.map((event) => {
+                    const isActive = event.eventId === selectedEventId;
+                    const eventTime = fmtTime(event.timestampMs);
+                    const eventLabel = event.label || event.eventKind;
+                    const duration = timelineMeasurements.get(event.eventId);
+                    return (
+                      <button
+                        key={event.eventId}
+                        type="button"
+                        className={`timeline-segment kind-${kindClassSuffix(event.colorKey)} ${isActive ? "active" : ""} ${enteringEventIds.has(event.eventId) ? "timeline-segment-enter" : ""}`}
+                        onClick={() => jumpToEvent(event.eventId)}
+                        title={`${eventLabel} (${event.eventKind}) #${event.index} ${eventTime}${duration?.durationSeconds != null ? ` · ${duration.durationEstimated ? "~" : ""}${duration.durationSeconds.toLocaleString(undefined, { maximumFractionDigits: 2 })} s` : ""}`}
+                        aria-current={isActive ? "true" : undefined}
+                        aria-label={`Jump to event #${event.index} ${event.eventKind}: ${eventLabel}`}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="timeline-strip-empty">No timeline events</div>
+            )}
+          </section>
+
+          <div className="grid sessions-workspace">
+        <section className="panel list-panel">
+          <div className="panel-head">
+            <div className="session-head-top">
+              <h2>Sessions</h2>
+              <div className="session-head-counters mono">
+                <span className="session-head-counter status-running">{`running ${sessionStatusCounts.running}`}</span>
+                <span className="session-head-counter status-waiting">{`waiting ${sessionStatusCounts.waiting_input}`}</span>
+              </div>
+            </div>
+            <input
+              className="search"
+              aria-label="Search sessions"
+              placeholder="Search session/path"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
+          <div className="list-scroll">
+            {primaryTraces.map((trace) => renderTraceRow(trace))}
+            {olderTraces.length > 0 && (
+              <section className="older-traces-block" aria-label="Older sessions">
+                <button
+                  type="button"
+                  className="mono older-traces-toggle"
+                  onClick={toggleOlderTraceVisibility}
+                  aria-expanded={showOlderTraces}
+                >
+                  {showOlderTraces
+                    ? `Hide older sessions (${olderTraces.length})`
+                    : `Show older sessions (${olderTraces.length})`}
+                </button>
+                {showOlderTraces && (
+                  <>
+                    {visibleOlderTraces.map((trace) => renderTraceRow(trace))}
+                    {hiddenOlderTraceCount > 0 && (
+                      <button type="button" className="load-more mono older-traces-load-more" onClick={loadMoreOlderTraces}>
+                        {`Load ${Math.min(OLDER_TRACE_PAGE_SIZE, hiddenOlderTraceCount)} more older sessions`}
+                      </button>
+                    )}
+                  </>
+                )}
+              </section>
+            )}
+            {filteredTraces.length === 0 && (
+              <div className="empty workspace-empty">
+                <strong>{query.trim() ? "No matching sessions" : status.startsWith("Loading") ? "Loading your sessions…" : "No sessions yet"}</strong>
+                <p>{query.trim() ? "Try a different agent, session ID, or path." : "Start an agent session in a configured source directory. New sessions appear here automatically."}</p>
+                {query.trim() && <button type="button" className="load-more" onClick={() => setQuery("")}>Clear search</button>}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <TraceTree key={selectedId} events={visibleTimelineEvents} measurementEvents={page?.events ?? []} selectedEventId={selectedEventId} onSelectEvent={jumpToEvent} />
+
+        <section className="panel toc-panel">
+          <div className="panel-head toc-head">
+            <div className="toc-head-top">
+              <h2>Timeline TOC</h2>
+              <button
+                type="button"
+                className="sort-toggle sort-icon"
+                title={`Order: ${timelineSortDirection === "latest-first" ? "latest to first" : "first to latest"}. Click to reverse.`}
+                aria-label={`Timeline order: ${timelineSortDirection === "latest-first" ? "latest to first" : "first to latest"}`}
+                onClick={() =>
+                  setTimelineSortDirection((prev) => (prev === "latest-first" ? "first-latest" : "latest-first"))
+                }
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d={timelineSortDirection === "latest-first" ? "M7 4v16m-4-4 4 4 4-4M14 5h7M14 10h5M14 15h3" : "M7 20V4m-4 4 4-4 4 4M14 5h3M14 10h5M14 15h7"} /></svg>
+              </button>
+            </div>
+            <input
+              className="search"
+              aria-label="Filter timeline events"
+              placeholder="Filter by kind/text"
+              value={tocQuery}
+              onChange={(event) => setTocQuery(event.target.value)}
+            />
+          </div>
+          <div
+            className="toc-scroll"
+            onScroll={(event: UIEvent<HTMLDivElement>) => maybeGrowTimelineRenderWindow(event.currentTarget)}
+          >
+            {renderedTocRows.map((row) => {
+              const isActive = row.eventId === selectedEventId;
+              return (
+                <button
+                  key={row.eventId}
+                  className={`toc-row ${isActive ? "active" : ""} ${enteringEventIds.has(row.eventId) ? "toc-row-enter" : ""}`}
+                  onClick={() => jumpToEvent(row.eventId)}
+                  ref={bindTocRowRef(row.eventId)}
+                >
+                  <span className={`toc-dot kind-${kindClassSuffix(row.colorKey)}`} />
+                  <span className="mono toc-index">{`#${row.index}`}</span>
+                  <span className={classForKind(row.eventKind)}>{row.eventKind}</span>
+                  {row.toolType && <span className="kind kind-tool-type">{row.toolType}</span>}
+                  <span className="mono toc-timestamp">{fmtTimeAgo(row.timestampMs, clockNowMs)}</span>
+                </button>
+              );
+            })}
+            {renderedTocRows.length < tocRows.length && (
+              <button type="button" className="load-more mono" onClick={growTimelineRenderWindow}>
+                {`Load ${Math.min(TIMELINE_EVENT_RENDER_STEP, tocRows.length - renderedTocRows.length)} more`}
+              </button>
+            )}
+            {tocRows.length === 0 && <div className="empty">No timeline rows</div>}
+          </div>
+        </section>
+
+        <dialog
+          className="inspector-drawer"
+          ref={inspectorDialogRef}
+          aria-labelledby="inspector-title"
+          onClose={() => { inspectorRefreshRequestRef.current++; setInspectorStep(null); setInspectorPage(null); }}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) event.currentTarget.close();
+          }}
+        >
+        {inspectorStep ? <section className="inspector-explorer">
+          <div className="inspector-drawer-bar">
+            <div><strong id="inspector-title">Trace Inspector</strong><span className="inspector-session-label">{selectedTraceLabel}</span></div>
+            <button type="button" autoFocus aria-label="Close trace inspector" onClick={() => { setInspectorStep(null); inspectorDialogRef.current?.close(); }}>Close <span aria-hidden="true">×</span></button>
+          </div>
+          <div className="inspector-session-summary">
+            {eventKindFilterControl}
+            <span className="inspector-snapshot-label">Session snapshot</span>
+            <span>{formatCompactNumber(inspectorPage?.summary.tokenTotals?.totalTokens)} session tokens</span>
+            <span>{formatUsd(inspectorPage?.summary.costEstimateUsd)} estimated cost</span>
+            <span>{inspectorPage?.summary.eventCount ?? 0} events</span>
+            <button type="button" onClick={() => {
+              const latest = inspectorPage?.events.filter(item => visibleEventKinds.has(item.eventKind)).at(-1);
+              if (latest) jumpToEvent(latest.eventId);
+            }}>Go to latest</button>
+          </div>
+          {inspectorRefreshError && <p className="inspector-refresh-error" role="alert">{inspectorRefreshError}</p>}
+          <div className="inspector-explorer-panes">
+            <TraceTree key={selectedId} headerActions={<button type="button" className="trace-tree-refresh" aria-label="Refresh events" title={inspectorRefreshing ? "Refreshing events…" : "Refresh events"} aria-busy={inspectorRefreshing} disabled={inspectorRefreshing} onClick={() => void refreshInspector()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" /></svg></button>} events={(inspectorPage?.events ?? []).filter(event => visibleEventKinds.has(event.eventKind))} measurementEvents={inspectorPage?.events ?? []} selectedEventId={inspectorStep.event.eventId} onSelectEvent={jumpToEvent} />
+            <InspectorStep key={inspectorStep.event.eventId} group={inspectorStep} details={expandedEventById} loading={[inspectorStep.event, inspectorStep.call, inspectorStep.result].some(item => item && loadingExpandedEventIds.has(item.eventId))} error={[inspectorStep.event, inspectorStep.call, inspectorStep.result].map(item => item ? expandedEventErrorById[item.eventId] : "").filter(Boolean).join(" · ")} measurement={inspectorMeasurements.get(inspectorStep.event.eventId)} groupMeasurement={inspectorGroupMeasurement?.measurement} usageScope={inspectorGroupMeasurement?.scope ?? "group"} groupUsage={inspectorGroupMeasurement?.usage} />
+          </div>
+        </section> : (
+        <section className="panel detail-panel">
+            <div className="inspector-drawer-bar">
+              <span>Session details</span>
+              <button type="button" autoFocus aria-label="Close trace inspector" onClick={() => inspectorDialogRef.current?.close()}>Close <span aria-hidden="true">×</span></button>
+            </div>
+            <div className="panel-head detail-head">
+              <div
+                key={`detail-head-pulse-${selectedTraceSummary?.id ?? "none"}-${selectedTracePulseSeq}`}
+                className={`detail-head-title-block ${selectedTracePulseSeq > 0 ? "pulse" : ""}`}
+              >
+                <h2 id="inspector-title">Trace Inspector</h2>
+                <div className="detail-head-meta mono" title={selectedTraceLabel || undefined}>
+                  {selectedTraceSummary ? `${selectedTraceLabel} · ${selectedTraceMeta}` : selectedTraceMeta}
+                </div>
+              </div>
+              <div className="detail-controls">
+                {eventKindFilterControl}
                 <label className="mono checkbox">
                   <input type="checkbox" checked={autoFollow} onChange={(event) => setAutoFollow(event.target.checked)} />
                   auto follow
@@ -2418,25 +2549,40 @@ export function App(): JSX.Element {
             {page ? (
               <>
                 <section
-                  className={`detail-summary-cards ${page.summary.compactionCount > 0 ? "detail-summary-cards-four-up" : ""}`.trim()}
+                  className="detail-summary-cards inspector-usage-cards"
                   aria-label="trace inspector summary cards"
                 >
                   <article className="detail-summary-card">
-                    <div className="detail-summary-head mono">
+                    <div className="detail-summary-head">
+                      <div className="detail-summary-title">estimated cost</div>
+                      <div className="detail-summary-value">{formatUsd(page.summary.costEstimateUsd)}</div>
+                    </div>
+                    <div className="detail-summary-note">USD · session estimate</div>
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-head">
                       <div className="detail-summary-title">tokens</div>
-                      <div className="detail-summary-value">
-                        {formatCompactNumber(page.summary.tokenTotals?.totalTokens ?? null)}
-                      </div>
+                      <div className="detail-summary-value">{formatCompactNumber(page.summary.tokenTotals?.totalTokens)}</div>
                     </div>
-                    <div className="detail-summary-sub mono">
-                      {`in ${formatCompactNumber(page.summary.tokenTotals?.inputTokens ?? null)} · out ${formatCompactNumber(page.summary.tokenTotals?.outputTokens ?? null)}`}
+                    <div className="detail-summary-sub">Input {formatCompactNumber(page.summary.tokenTotals?.inputTokens)} · Output {formatCompactNumber(page.summary.tokenTotals?.outputTokens)}</div>
+                    <div className="detail-summary-note">Cumulative session usage</div>
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-head">
+                      <div className="detail-summary-title">cache tokens</div>
+                      <div className="detail-summary-value">{formatCompactNumber(page.summary.tokenTotals ? page.summary.tokenTotals.cachedReadTokens + page.summary.tokenTotals.cachedCreateTokens : null)}</div>
                     </div>
-                    <div className="detail-summary-sub mono">
-                      {`cr ${formatCompactNumber(page.summary.tokenTotals?.cachedReadTokens ?? null)} · cc ${formatCompactNumber(page.summary.tokenTotals?.cachedCreateTokens ?? null)}`}
+                    <div className="detail-summary-sub">Read {formatCompactNumber(page.summary.tokenTotals?.cachedReadTokens)} · Written {formatCompactNumber(page.summary.tokenTotals?.cachedCreateTokens)}</div>
+                  </article>
+                  <article className="detail-summary-card">
+                    <div className="detail-summary-head">
+                      <div className="detail-summary-title">context</div>
+                      <div className="detail-summary-value">{formatPercent(page.summary.contextWindowPct)}</div>
                     </div>
-                    <div className="detail-summary-sub mono">
-                      {`ctx ${formatPercent(page.summary.contextWindowPct ?? null)} · cost ${formatUsd(page.summary.costEstimateUsd ?? null)}`}
-                    </div>
+                    <div className="detail-summary-note">Current context occupancy</div>
+                    {typeof page.summary.contextWindowPct === "number" && Number.isFinite(page.summary.contextWindowPct) && (
+                      <progress className="inspector-context-meter" aria-label="Current context occupancy" max={100} value={Math.max(0, Math.min(100, page.summary.contextWindowPct))} />
+                    )}
                   </article>
                   <article className="detail-summary-card">
                     <div className="detail-summary-head mono">
@@ -2468,6 +2614,7 @@ export function App(): JSX.Element {
                     ) : (
                       <div className="detail-summary-sub mono">types -</div>
                     )}
+                    <div className="detail-summary-note">From loaded event types</div>
                     {hiddenToolCallTypeCount > 0 && (
                       <div className="detail-summary-note mono">{`+${hiddenToolCallTypeCount} more types`}</div>
                     )}
@@ -2491,52 +2638,42 @@ export function App(): JSX.Element {
                   ref={eventsScrollRef}
                   onScroll={(event: UIEvent<HTMLDivElement>) => handleEventsScroll(event.currentTarget)}
                 >
-                  {renderedTimelineEvents.map((event) => {
-                    const agentBadges = buildAgentBadges(event);
-                    const expandedEvent = expandedEventById[event.eventId] ?? event;
-                    const expandedEventLoading = loadingExpandedEventIds.has(event.eventId);
-                    const expandedEventError = expandedEventErrorById[event.eventId] ?? "";
+                  {inspectorGroups.map(({ event, call, result }) => {
+                    const groupEvents = call && result ? [call, result] : [event];
+                    const eventIds = groupEvents.map((entry) => entry.eventId);
+                    const expanded = eventIds.some((id) => expandedEventIds.has(id));
+                    const groupHasError = groupEvents.some((entry) => entry.hasError);
+                    const agentBadges = buildAgentBadges(expandedEventById[event.eventId] ?? event);
                     return (
                       <article
                         key={event.eventId}
                         id={domIdForEvent(event.eventId)}
-                        className={`${eventCardClass(event.eventKind)} ${selectedEventId === event.eventId ? "selected" : ""} ${enteringEventIds.has(event.eventId) ? "event-card-enter" : ""}`}
-                        ref={bindEventCardRef(event.eventId)}
+                        className={`${eventCardClass(call ? "tool_use" : event.eventKind)} ${groupHasError ? "has-error" : ""} ${eventIds.includes(selectedEventId) ? "selected" : ""} ${eventIds.some((id) => enteringEventIds.has(id)) ? "event-card-enter" : ""}`}
                       >
-                        <button className="expand-btn mono" onClick={() => toggleExpanded(event.eventId)}>
-                          {expandedEventIds.has(event.eventId) ? "collapse" : "expand"}
+                        {groupEvents.filter((entry) => entry.eventId !== event.eventId).map((entry) => (
+                          <span key={entry.eventId} id={domIdForEvent(entry.eventId)} className="event-anchor" />
+                        ))}
+                        <button className="expand-btn" aria-expanded={expanded} onClick={() => toggleExpanded(eventIds)}>
+                          {expanded ? "Hide details" : "Show details"}
                         </button>
                         <div className="event-top mono">
                           <span>{`#${event.index}`}</span>
-                          <span className={classForKind(event.eventKind)}>{event.eventKind}</span>
-                          {event.toolType && <span className="kind kind-tool-type">{event.toolType}</span>}
+                          <span className={classForKind(event.eventKind)}>{call ? "tool operation" : event.eventKind}</span>
+                          {(call?.toolType || event.toolType) && <span className="kind kind-tool-type">{call?.toolType || event.toolType}</span>}
                           <span>{fmtTime(event.timestampMs)}</span>
+                          {groupHasError && <span className="event-error-label">Error</span>}
                         </div>
-                        <h3>{event.preview}</h3>
-                        {(event.toolName || event.functionName) && (
-                          <div className="mono subtle">
-                            {`tool ${event.toolName || event.functionName}${event.toolCallId ? ` (${event.toolCallId})` : ""}`}
-                          </div>
-                        )}
-                        {agentBadges.length > 0 && (
-                          <div className="event-agent-badges mono">
-                            {agentBadges.map((badge) => (
-                              <span key={`${event.eventId}-${badge}`} className="event-agent-badge">
-                                {badge}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {expandedEventIds.has(event.eventId) && (
-                          expandedEventLoading && !expandedEventById[event.eventId] ? (
-                            <div className="event-raw-status mono">Loading raw event...</div>
-                          ) : (
-                            <>
-                              {expandedEventError && <div className="event-raw-status mono">{expandedEventError}</div>}
-                              <pre className="event-raw-json">{JSON.stringify(expandedEvent.raw, null, 2)}</pre>
-                            </>
-                          )
-                        )}
+                        <InspectorEventContent
+                          event={expandedEventById[event.eventId] ?? event}
+                          call={call ? expandedEventById[call.eventId] ?? call : undefined}
+                          result={result ? expandedEventById[result.eventId] ?? result : undefined}
+                          expanded={expanded}
+                          loading={eventIds.some((id) => loadingExpandedEventIds.has(id))}
+                          error={eventIds.map((id) => expandedEventErrorById[id]).filter(Boolean).join(" · ")}
+                        />
+                        {agentBadges.length > 0 && <div className="event-agent-badges mono">
+                          {agentBadges.map((badge) => <span key={badge} className="event-agent-badge">{badge}</span>)}
+                        </div>}
                       </article>
                     );
                   })}
@@ -2548,9 +2685,11 @@ export function App(): JSX.Element {
                 </div>
               </>
             ) : (
-              <div className="empty">Pick a session to inspect.</div>
+              <div className="empty workspace-empty"><strong>Your session, step by step</strong><p>Pick a session to inspect its messages, tool calls, token usage, and estimated cost.</p></div>
             )}
         </section>
+        )}
+        </dialog>
       </div>
     </>
       ) : activeView === "activity" ? (

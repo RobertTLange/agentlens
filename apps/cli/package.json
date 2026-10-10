@@ -16,7 +16,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run --passWithNoTests",
-    "prepack": "npm --prefix ../.. run build && node scripts/bundle-internal-deps.mjs",
+    "prepack": "pnpm --dir ../.. run build && node scripts/bundle-internal-deps.mjs",
     "postpack": "node scripts/clean-bundle-deps.mjs"
   },
   "publishConfig": {
@@ -27,9 +27,9 @@
     "url": "https://github.com/RobertTLange/agentlens"
   },
   "dependencies": {
-    "@agentlens/contracts": "0.1.0",
-    "@agentlens/core": "0.1.0",
-    "@agentlens/server": "0.1.0",
+    "@agentlens/contracts": "workspace:*",
+    "@agentlens/core": "workspace:*",
+    "@agentlens/server": "workspace:*",
     "@iarna/toml": "^2.2.5",
     "chokidar": "^5.0.0",
     "commander": "^13.1.0",

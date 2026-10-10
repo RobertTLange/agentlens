@@ -17,7 +17,9 @@
 When agent workflows fail, most debugging time goes into piecing together scattered logs, tool calls, and session state. AgentLens gives you one local place to inspect traces live, compare sessions quickly, and jump from summary to event-level detail in seconds.
 
 
-![AgentLens Trace Inspector view](docs/inspector-2026-02-22.png)
+![AgentLens Inspector in dark mode, showing sessions, the trace tree, and the timeline table of contents](docs/inspector-2026-10-10.png)
+
+The Inspector brings the session list, expandable trace tree, and event timeline together. Select a session to explore model calls, token usage, reasoning, and tool activity.
 
 
 ## Quick Start
@@ -37,9 +39,11 @@ agentlens --browser
 
 ### From source
 
+Use Node.js 24+ and pnpm 11.21.0 (pinned in `package.json`).
+
 ```bash
-npm install
-npm run build
+pnpm install
+pnpm run build
 node apps/cli/dist/main.js --browser
 ```
 
@@ -95,9 +99,15 @@ node -e 'const p=process.argv[1]; console.log(`http://localhost:8787/trace-file/
   - `Week Heatmap`: click a day label to load that day in `Daily Activity`.
 - Tool call/result inspection, error visibility, and stream updates.
 
+## Session Trace Details
+
+Open a session or event to inspect its trace tree alongside model usage, input and output tokens, cached input, and timing. The detail drawer also provides Preview and Data tabs for exploring the selected event.
+
+![AgentLens session trace details in dark mode, showing the trace tree and recorded model usage](docs/session-trace-details-2026-10-10.png)
+
 ## Activity View
 
-![AgentLens Daily Activity view](docs/activity-2026-02-22.png)
+![AgentLens Activity in dark mode, showing the daily session timeline and weekly heatmap](docs/activity-2026-10-10.png)
 
 ### How Activity Is Computed
 

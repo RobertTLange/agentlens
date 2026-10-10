@@ -9,13 +9,13 @@
 - Tests are colocated with source as `*.test.ts` (for example, `apps/cli/src/main.test.ts`).
 
 ## Build, Test, and Development Commands
-- `npm install`: install workspace dependencies.
-- `npm run build`: build all workspaces in dependency order (contracts/core/web/server/cli).
-- `npm run typecheck`: strict TS type-check across all workspaces.
-- `npm test`: run all Vitest suites.
-- `npm -w apps/server run dev`: backend watch mode.
-- `npm -w apps/web run dev`: frontend dev server.
-- `npm -w apps/cli run dev -- <args>`: run CLI from source (example: `summary --json`).
+- `pnpm install`: install workspace dependencies.
+- `pnpm run build`: build all workspaces in dependency order (contracts/core/web/server/cli).
+- `pnpm run typecheck`: strict TS type-check across all workspaces.
+- `pnpm test`: run all Vitest suites.
+- `pnpm --filter ./apps/server dev`: backend watch mode.
+- `pnpm --filter ./apps/web dev`: frontend dev server.
+- `pnpm --filter ./apps/cli dev <args>`: run CLI from source (example: `summary --json`).
 - Installed CLI examples: `agentlens --help`, `agentlens --browser`.
 
 ## Coding Style & Naming Conventions
@@ -28,14 +28,14 @@
 - Framework: Vitest (`vitest run`) in each workspace.
 - Naming: use `*.test.ts`; keep tests near the behavior they verify.
 - Add regression tests for bug fixes (especially CLI and server startup behavior).
-- For quick iteration, run workspace tests first: `npm -w apps/cli test`, then full `npm test`.
+- For quick iteration, run workspace tests first: `pnpm --filter ./apps/cli test`, then full `pnpm test`.
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commit prefixes: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, etc.
 - PRs should state: what changed, why it changed, and how to verify (exact commands).
 - Link related issues/tasks when applicable.
 - UI changes should include screenshots and affected flows/routes.
-- Before review, ensure `npm run build`, `npm run typecheck`, and `npm test` all pass.
+- Before review, ensure `pnpm run build`, `pnpm run typecheck`, and `pnpm test` all pass.
 
 ## Security & Configuration Tips
 - Default config location: `~/.agentlens/config.toml`.
