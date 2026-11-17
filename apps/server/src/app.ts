@@ -2626,12 +2626,22 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     }
   });
 
+  // A session asked for by id may still wait for startup hydration: load it now, once.
+  const resolveTraceIdHydrating = async (id: string): Promise<string> => {
+    try {
+      return traceIndex.resolveId(id);
+    } catch (error) {
+      if (await traceIndex.hydrateMatching(id)) return traceIndex.resolveId(id);
+      throw error;
+    }
+  };
+
   server.get("/api/trace/:id", async (request, reply) => {
     const params = request.params as { id: string };
     const query = request.query as TracePageQuery;
 
     try {
-      const resolvedId = traceIndex.resolveId(params.id);
+      const resolvedId = await resolveTraceIdHydrating(params.id);
       const pageOptions = parseTracePageOptions(query);
       const page = traceIndex.getTracePage(resolvedId, pageOptions);
       return page;
