@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildPricingCatalog, loadConfig, mergeConfig, saveConfig } from "@agentlens/core";
+import { PRICING_CACHE_VERSION, buildPricingCatalog, loadConfig, mergeConfig, saveConfig } from "@agentlens/core";
 import { prepareBrowserConfig } from "./pricing-launch.js";
 
 async function createConfigFile(runtimeLabel: string) {
@@ -49,7 +49,7 @@ describe("prepareBrowserConfig", () => {
     expect(effective.cost.modelRates.find((rate) => rate.model === "gpt-5.4")?.inputPer1MUsd).toBe(123);
 
     const cacheText = await readFile(path.join(runtimeDir, "pricing-cache.json"), "utf8");
-    expect(cacheText).toContain('"version": 1');
+    expect(cacheText).toContain(`"version": ${PRICING_CACHE_VERSION}`);
     expect(cacheText).toContain('"inputPer1MUsd": 123');
   });
 
@@ -85,7 +85,7 @@ describe("prepareBrowserConfig", () => {
       cachePath,
       JSON.stringify(
         {
-          version: 1,
+          version: PRICING_CACHE_VERSION,
           ...cachedCatalog,
         },
         null,
