@@ -76,6 +76,8 @@ interface TraceEntry {
 export interface TracePageOptions {
   limit?: number;
   before?: string;
+  /** Live tail: events from this filtered-list position on (a previous page's liveCursor). */
+  after?: string;
   includeMeta?: boolean;
   eventPayload?: TraceEventPayloadMode;
 }
@@ -2068,8 +2070,7 @@ export class TraceIndex extends EventEmitter {
     const eventPayload = options.eventPayload ?? "full";
 
     const limit = Math.max(1, Math.min(5000, options.limit ?? this.config.scan.recentEventWindow));
-    const end = options.before ? Math.max(0, Math.min(filtered.length, Number(options.before))) : filtered.length;
-    const start = Math.max(0, end - limit);
+    const { start, end } = tracePageRange(filtered.length, limit, options);
     const pageEvents = filtered.slice(start, end);
     const events = eventPayload === "compact" ? pageEvents.map(compactEventForList) : pageEvents;
 
@@ -2080,6 +2081,7 @@ export class TraceIndex extends EventEmitter {
       nextBefore: start > 0 ? String(start) : "",
       liveCursor: String(filtered.length),
       eventPayload,
+      ...(options.after !== undefined ? { afterCursor: String(start) } : {}),
     };
   }
 
@@ -2103,4 +2105,19 @@ export class TraceIndex extends EventEmitter {
     }
     throw new Error(`unknown trace/session: ${candidate}`);
   }
+}
+
+/** Page bounds: `after` tails forward from a cursor, else the page ends at `before` (or the end). */
+function tracePageRange(total: number, limit: number, options: TracePageOptions): { start: number; end: number } {
+  if (options.after !== undefined) {
+    const start = clampCursor(options.after, total);
+    return { start, end: Math.min(total, start + limit) };
+  }
+  const end = options.before ? clampCursor(options.before, total) : total;
+  return { start: Math.max(0, end - limit), end };
+}
+
+function clampCursor(cursor: string, total: number): number {
+  const value = Number(cursor);
+  return Number.isFinite(value) ? Math.max(0, Math.min(total, Math.trunc(value))) : total;
 }

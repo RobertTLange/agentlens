@@ -2619,6 +2619,18 @@ describe("server api", () => {
 
     const traceBySession = await server.inject({ method: "GET", url: `/api/trace/${fixture.sessionId}` });
     expect(traceBySession.statusCode).toBe(200);
+    const liveCursor = (traceBySession.json() as { liveCursor: string }).liveCursor;
+    const tail = await server.inject({
+      method: "GET",
+      url: `/api/trace/${fixture.sessionId}?after=${Number(liveCursor) - 1}&payload=compact`,
+    });
+    expect(tail.statusCode).toBe(200);
+    const tailPage = tail.json() as { events: Array<{ eventId: string }>; afterCursor?: string; liveCursor: string };
+    expect(tailPage.afterCursor).toBe(String(Number(liveCursor) - 1));
+    expect(tailPage.liveCursor).toBe(liveCursor);
+    expect(tailPage.events.map((event) => event.eventId)).toEqual([detail.events.at(-1)?.eventId]);
+    const caughtUp = await server.inject({ method: "GET", url: `/api/trace/${fixture.sessionId}?after=${liveCursor}` });
+    expect((caughtUp.json() as { events: unknown[] }).events).toEqual([]);
     const traceFilePath = detail.summary.path;
     const traceFileToken = Buffer.from(traceFilePath, "utf8").toString("base64url");
     const traceByFile = await server.inject({ method: "GET", url: `/api/tracefile?path=${encodeURIComponent(traceFileToken)}` });
