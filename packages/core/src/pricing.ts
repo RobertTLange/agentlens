@@ -94,8 +94,16 @@ function estimateCachedCreateCost(usage: CostUsage, rate: ActiveRate): number {
   return total;
 }
 
+function usageTokenCount(usage: CostUsage): number {
+  return [usage.inputTokens, usage.cachedReadTokens, usage.cachedCreateTokens, usage.outputTokens, usage.reasoningOutputTokens]
+    .reduce((sum, tokens) => sum + Math.max(0, tokens), 0);
+}
+
 export function estimateUsageCost(usage: CostUsage, costConfig: CostConfig): number | null {
   if (!costConfig.enabled) return null;
+
+  // Claude Code's "<synthetic>" rows (local messages, no API call) carry no tokens: they cost nothing.
+  if (usageTokenCount(usage) === 0) return 0;
 
   const rate = findCostRate(usage.model, costConfig);
   if (!rate) {

@@ -239,4 +239,12 @@ describe("pricing", () => {
     expect(modelsPrefixedCost).toBe(0.844);
     expect(googlePrefixedCost).toBe(1.448);
   });
+
+  it("prices a usage row without tokens at zero, whatever its model", () => {
+    const empty = { promptTokens: 0, inputTokens: 0, cachedReadTokens: 0, cachedCreateTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 };
+    const config = mergeConfig({});
+
+    expect(estimateUsageCost({ ...empty, model: "<synthetic>" }, config.cost)).toBe(0);
+    expect(estimateUsageCost({ ...empty, model: "<synthetic>", outputTokens: 5 }, config.cost)).toBeNull();
+  });
 });
