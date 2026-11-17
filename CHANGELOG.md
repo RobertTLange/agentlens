@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [TBD]
+### Changed
+- CLI commands (`summary`, `session`, `sessions`, `analysis`) now price sessions from the models.dev pricing cache that `agentlens --browser` maintains, when it is newer than the bundled table, so CLI and browser costs agree. No network call is made.
+- Refreshed bundled pricing from models.dev (2026-11-17): adds Claude Opus/Sonnet/Haiku 5.x, Fable 5.x, Opus 4.7, gpt-5.5 and gpt-6.x (astra, luna, sol, 6.1-sol, 6.1-terra).
+- Every Claude model now prices 1h cache writes at 2x base input. Haiku 5.5 prompts over 100K tokens use its higher tier. Opus/Sonnet 4.6 no longer carry a 200K-token long-context premium, because their 1M context is billed at standard rates.
+
+### Fixed
+- Kept the last known rates of models that models.dev has retired (for example `gpt-5.2-codex`, `gpt-5.1-codex-max`, Claude 3.x/4.0/4.1), so older sessions keep their costs after a pricing refresh.
+- Priced zero-token usage rows (Claude Code `<synthetic>` messages) at zero, so one such row no longer blanks a whole session's cost.
 
 ## [0.5.0] - 2026-11-17
 ### Added
