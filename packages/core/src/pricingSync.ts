@@ -22,32 +22,15 @@ const CANONICAL_PROVIDER_ORDER = [
 ] as const;
 const CANONICAL_PROVIDERS = new Set<string>(CANONICAL_PROVIDER_ORDER);
 
+// Anthropic bills 1h cache writes at 2x base input (5m writes are models.dev's cache_write).
+const ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER = 2;
+// Haiku 5.5 bills a whole request at a higher tier once its prompt is over 100K tokens.
+const HAIKU_5_5_LONG_PROMPT_TOKENS = 100_000;
+
+// Pricing models.dev cannot express (per platform.claude.com/docs/en/about-claude/pricing, 2026-11).
+// Claude 4.6 and later include their full 1M context at standard rates; 4.5 Sonnet still has a premium.
 const ANTHROPIC_OVERRIDES: Readonly<Record<string, Partial<CostModelRate>>> = {
-  "claude-opus-4.6": {
-    cachedCreate1hPer1MUsd: 10,
-    longContextThresholdTokens: LONG_CONTEXT_THRESHOLD_TOKENS,
-    longContextInputPer1MUsd: 10,
-    longContextOutputPer1MUsd: 37.5,
-    longContextCachedReadPer1MUsd: 1,
-    longContextCachedCreatePer1MUsd: 12.5,
-    longContextCachedCreate5mPer1MUsd: 12.5,
-    longContextCachedCreate1hPer1MUsd: 20,
-  },
-  "claude-opus-4.5": {
-    cachedCreate1hPer1MUsd: 10,
-  },
-  "claude-sonnet-4.6": {
-    cachedCreate1hPer1MUsd: 6,
-    longContextThresholdTokens: LONG_CONTEXT_THRESHOLD_TOKENS,
-    longContextInputPer1MUsd: 6,
-    longContextOutputPer1MUsd: 22.5,
-    longContextCachedReadPer1MUsd: 0.6,
-    longContextCachedCreatePer1MUsd: 7.5,
-    longContextCachedCreate5mPer1MUsd: 7.5,
-    longContextCachedCreate1hPer1MUsd: 12,
-  },
   "claude-sonnet-4.5": {
-    cachedCreate1hPer1MUsd: 6,
     longContextThresholdTokens: LONG_CONTEXT_THRESHOLD_TOKENS,
     longContextInputPer1MUsd: 6,
     longContextOutputPer1MUsd: 22.5,
@@ -56,8 +39,14 @@ const ANTHROPIC_OVERRIDES: Readonly<Record<string, Partial<CostModelRate>>> = {
     longContextCachedCreate5mPer1MUsd: 7.5,
     longContextCachedCreate1hPer1MUsd: 12,
   },
-  "claude-haiku-4.5": {
-    cachedCreate1hPer1MUsd: 2,
+  "claude-haiku-5-5": {
+    longContextThresholdTokens: HAIKU_5_5_LONG_PROMPT_TOKENS,
+    longContextInputPer1MUsd: 0.5,
+    longContextOutputPer1MUsd: 2.5,
+    longContextCachedReadPer1MUsd: 0.05,
+    longContextCachedCreatePer1MUsd: 0.625,
+    longContextCachedCreate5mPer1MUsd: 0.625,
+    longContextCachedCreate1hPer1MUsd: 1,
   },
 };
 
@@ -197,33 +186,30 @@ function buildBaseRate(modelData: Record<string, unknown>): Omit<CostModelRate, 
   return rate;
 }
 
-function resolveAnthropicOverrideKey(model: string): string | null {
+/** The Claude model a rate row prices (`claude-opus-4.6`, `claude-opus-5-5`), or null for other models. */
+function resolveAnthropicModel(model: string): string | null {
   let candidate = String(model).trim();
-  if (!candidate) return null;
   if (candidate.startsWith("anthropic/")) {
     candidate = candidate.slice("anthropic/".length);
   } else if (candidate.includes("/")) {
     return null;
   }
-
-  if (/^claude-opus-4(?:\.6|-6(?:-\d{8})?)$/.test(candidate)) return "claude-opus-4.6";
-  if (/^claude-opus-4(?:\.5|-5(?:-\d{8})?)$/.test(candidate)) return "claude-opus-4.5";
-  if (/^claude-sonnet-4(?:\.6|-6(?:-\d{8})?)$/.test(candidate)) return "claude-sonnet-4.6";
-  if (/^claude-sonnet-4(?:\.5|-5(?:-\d{8})?)$/.test(candidate)) return "claude-sonnet-4.5";
-  if (/^claude-haiku-4(?:\.5|-5(?:-\d{8})?)$/.test(candidate)) return "claude-haiku-4.5";
-  return null;
+  if (!candidate.startsWith("claude-")) return null;
+  return toAgentLensCanonicalModelId("anthropic", candidate.replace(/-\d{8}$/, ""));
 }
 
 function applyAnthropicOverrides(model: string, baseRate: Omit<CostModelRate, "model">): Omit<CostModelRate, "model"> {
-  const overrideKey = resolveAnthropicOverrideKey(model);
-  if (!overrideKey) return { ...baseRate };
+  const anthropicModel = resolveAnthropicModel(model);
+  if (!anthropicModel) return { ...baseRate };
 
   const nextRate: Omit<CostModelRate, "model"> = { ...baseRate };
   if (isFiniteNumber(nextRate.cachedCreatePer1MUsd) && nextRate.cachedCreate5mPer1MUsd === undefined) {
     nextRate.cachedCreate5mPer1MUsd = nextRate.cachedCreatePer1MUsd;
   }
-  const override = ANTHROPIC_OVERRIDES[overrideKey];
-  return override ? { ...nextRate, ...override } : nextRate;
+  if (isFiniteNumber(nextRate.inputPer1MUsd) && nextRate.inputPer1MUsd > 0 && nextRate.cachedCreate1hPer1MUsd === undefined) {
+    nextRate.cachedCreate1hPer1MUsd = Number((nextRate.inputPer1MUsd * ANTHROPIC_CACHE_WRITE_1H_MULTIPLIER).toFixed(6));
+  }
+  return { ...nextRate, ...ANTHROPIC_OVERRIDES[anthropicModel] };
 }
 
 function addRate(rateByModel: Map<string, CostModelRate>, model: string, rate: Omit<CostModelRate, "model">): void {

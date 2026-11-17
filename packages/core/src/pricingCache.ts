@@ -14,7 +14,7 @@ import type { PricingCatalog } from "./pricingSync.js";
 
 // `agentlens --browser` refreshes pricing from models.dev into this cache; every
 // other command reads it (never the network), so CLI costs match the browser.
-export const PRICING_CACHE_VERSION = 1;
+export const PRICING_CACHE_VERSION = 2;
 export const PRICING_CACHE_FILE = "pricing-cache.json";
 
 interface PricingCacheArtifact extends PricingCatalog {
