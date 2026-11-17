@@ -30,7 +30,7 @@ import {
   type DiscoveredTraceFile,
 } from "./discovery.js";
 import { ParserRegistry } from "./parsers/index.js";
-import { loadConfig } from "./config.js";
+import { loadPricedConfig } from "./pricingCache.js";
 import { deriveSessionMetrics, type SessionUsagePoint } from "./metrics.js";
 import { redactEvents } from "./redaction.js";
 import { asRecord, asString, expandHome, nowMs, stableId } from "./utils.js";
@@ -854,7 +854,7 @@ export class TraceIndex extends EventEmitter {
   }
 
   static async fromConfigPath(configPath?: string): Promise<TraceIndex> {
-    const config = await loadConfig(configPath);
+    const config = await loadPricedConfig(configPath);
     return new TraceIndex(config);
   }
 

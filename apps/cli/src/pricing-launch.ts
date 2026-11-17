@@ -1,21 +1,20 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import type { CostModelRate, ModelContextWindow } from "@agentlens/contracts";
 import type { PricingCatalog } from "@agentlens/core";
 import {
   fetchPricingCatalog,
   mergeConfig,
   mergeConfigWithPricingDefaults,
+  pricingCachePath,
   readConfigInput,
+  readPricingCache,
+  resolveRuntimeDir,
   saveConfig,
   stripBundledPricingOverrides,
+  writePricingCache,
 } from "@agentlens/core";
 
-const PRICING_CACHE_VERSION = 1;
 const EFFECTIVE_CONFIG_FILE = "browser-config.toml";
-const PRICING_CACHE_FILE = "pricing-cache.json";
 
 export type PricingLaunchSource = "fresh" | "cached" | "bundled";
 
@@ -27,10 +26,6 @@ export interface PreparedBrowserConfig {
   runtimeDir: string;
 }
 
-interface PricingCacheArtifact extends PricingCatalog {
-  version: number;
-}
-
 interface PrepareBrowserConfigOptions {
   configPath: string;
   runtimeDir?: string;
@@ -38,44 +33,8 @@ interface PrepareBrowserConfigOptions {
   nowMs?: number;
 }
 
-function resolveRuntimeDir(input?: string): string {
-  return input?.trim() || process.env.AGENTLENS_RUNTIME_DIR?.trim() || path.join(os.homedir(), ".agentlens");
-}
-
-function pricingCachePath(runtimeDir: string): string {
-  return path.join(runtimeDir, PRICING_CACHE_FILE);
-}
-
 function effectiveConfigPath(runtimeDir: string): string {
   return path.join(runtimeDir, EFFECTIVE_CONFIG_FILE);
-}
-
-async function readPricingCache(cachePath: string): Promise<PricingCatalog | null> {
-  try {
-    const raw = await readFile(cachePath, "utf8");
-    const parsed = JSON.parse(raw) as Partial<PricingCacheArtifact>;
-    if (parsed.version !== PRICING_CACHE_VERSION) return null;
-    if (!parsed.fetchedAt || !Array.isArray(parsed.sources) || !Array.isArray(parsed.modelRates) || !Array.isArray(parsed.contextWindows)) {
-      return null;
-    }
-    return {
-      fetchedAt: parsed.fetchedAt,
-      sources: parsed.sources,
-      modelRates: parsed.modelRates as CostModelRate[],
-      contextWindows: parsed.contextWindows as ModelContextWindow[],
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function writePricingCache(cachePath: string, catalog: PricingCatalog): Promise<void> {
-  await mkdir(path.dirname(cachePath), { recursive: true });
-  const artifact: PricingCacheArtifact = {
-    version: PRICING_CACHE_VERSION,
-    ...catalog,
-  };
-  await writeFile(cachePath, JSON.stringify(artifact, null, 2) + "\n", "utf8");
 }
 
 function isFresh(catalog: PricingCatalog | null, ttlMs: number, nowMs: number): boolean {
