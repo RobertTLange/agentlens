@@ -1,5 +1,6 @@
 import type { AgentKind, AppConfig, ModelTokenShare, NormalizedEvent, TokenTotals } from "@agentlens/contracts";
 import { estimateUsageCost, resolveContextWindowTokens } from "./pricing.js";
+import { serviceTierMultiplier } from "./serviceTier.js";
 import { asRecord, asString } from "./utils.js";
 
 export interface SessionUsagePoint {
@@ -339,6 +340,13 @@ function deriveClaudeMetrics(events: NormalizedEvent[], config: AppConfig): Sess
   };
 }
 
+// The service tier a thread_settings_applied row sets; rows without settings keep the current one.
+function codexServiceTier(payload: Record<string, unknown>, current: string): string {
+  const settings = asRecord(payload.thread_settings);
+  if (!("service_tier" in settings)) return current;
+  return asString(settings.service_tier);
+}
+
 function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): SessionMetrics {
   const resolveWindow = contextWindowResolver(config);
   const rows: Array<{ raw: Record<string, unknown>; event: NormalizedEvent }> = [];
@@ -350,6 +358,7 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
   }
 
   let currentModel = "";
+  let currentServiceTier = "";
   let latestTotals = emptyTokenTotals();
   let prevTotalTokens: number | null = null;
   let maxContextPct: number | null = null;
@@ -369,7 +378,12 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
 
     if (rowType !== "event_msg") continue;
     const payload = asRecord(row.payload);
-    if (asString(payload.type).toLowerCase() !== "token_count") continue;
+    const payloadType = asString(payload.type).toLowerCase();
+    if (payloadType === "thread_settings_applied") {
+      currentServiceTier = codexServiceTier(payload, currentServiceTier);
+      continue;
+    }
+    if (payloadType !== "token_count") continue;
 
     const info = asRecord(payload.info);
     const totalUsage = asRecord(info.total_token_usage);
@@ -394,7 +408,7 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
     }
 
     if (currentModel) {
-      const cost = estimateUsageCost(
+      const standardCost = estimateUsageCost(
         {
           model: currentModel,
           promptTokens: fallbackPromptTokens,
@@ -406,6 +420,8 @@ function deriveCodexMetrics(events: NormalizedEvent[], config: AppConfig): Sessi
         },
         config.cost,
       );
+      const cost =
+        standardCost === null ? null : standardCost * serviceTierMultiplier(currentServiceTier, event.timestampMs);
       if (cost === null) {
         costKnown = false;
       } else {
