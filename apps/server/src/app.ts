@@ -444,13 +444,20 @@ function parseTraceIncludeMeta(value: string | undefined): boolean | undefined {
   return value === "1" || value === "true";
 }
 
-function parseTracePageOptions(query: { limit?: string; before?: string; include_meta?: string; payload?: string }): {
+function parseTracePageOptions(query: TracePageQuery): {
   limit?: number;
   before?: string;
+  after?: string;
   includeMeta?: boolean;
   eventPayload?: TraceEventPayloadMode;
 } {
-  const pageOptions: { limit?: number; before?: string; includeMeta?: boolean; eventPayload?: TraceEventPayloadMode } = {};
+  const pageOptions: {
+    limit?: number;
+    before?: string;
+    after?: string;
+    includeMeta?: boolean;
+    eventPayload?: TraceEventPayloadMode;
+  } = {};
   const includeMeta = parseTraceIncludeMeta(query.include_meta);
   if (includeMeta !== undefined) {
     pageOptions.includeMeta = includeMeta;
@@ -465,7 +472,18 @@ function parseTracePageOptions(query: { limit?: string; before?: string; include
   if (query.before) {
     pageOptions.before = query.before;
   }
+  if (query.after !== undefined && query.after !== "") {
+    pageOptions.after = query.after;
+  }
   return pageOptions;
+}
+
+interface TracePageQuery {
+  limit?: string;
+  before?: string;
+  after?: string;
+  include_meta?: string;
+  payload?: string;
 }
 
 function buildAdHocTraceConfig(baseConfig: AppConfig, traceFilePath: string): AppConfig {
@@ -2608,12 +2626,22 @@ export async function createServer(options: CreateServerOptions): Promise<Fastif
     }
   });
 
+  // A session asked for by id may still wait for startup hydration: load it now, once.
+  const resolveTraceIdHydrating = async (id: string): Promise<string> => {
+    try {
+      return traceIndex.resolveId(id);
+    } catch (error) {
+      if (await traceIndex.hydrateMatching(id)) return traceIndex.resolveId(id);
+      throw error;
+    }
+  };
+
   server.get("/api/trace/:id", async (request, reply) => {
     const params = request.params as { id: string };
-    const query = request.query as { limit?: string; before?: string; include_meta?: string; payload?: string };
+    const query = request.query as TracePageQuery;
 
     try {
-      const resolvedId = traceIndex.resolveId(params.id);
+      const resolvedId = await resolveTraceIdHydrating(params.id);
       const pageOptions = parseTracePageOptions(query);
       const page = traceIndex.getTracePage(resolvedId, pageOptions);
       return page;

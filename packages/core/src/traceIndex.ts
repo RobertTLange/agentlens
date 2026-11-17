@@ -61,6 +61,8 @@ const WATCH_WRITE_POLL_INTERVAL_MS = 20;
 const STARTUP_RECENT_TRACE_LIMIT = 120;
 const BACKGROUND_HYDRATE_BATCH_SIZE = 25;
 const BACKGROUND_HYDRATE_DELAY_MS = 25;
+/** Shortest candidate hydrateMatching accepts, so a short id can't hydrate everything. */
+const MIN_HYDRATE_MATCH_LENGTH = 8;
 
 interface TraceEntry {
   file: DiscoveredTraceFile;
@@ -76,6 +78,8 @@ interface TraceEntry {
 export interface TracePageOptions {
   limit?: number;
   before?: string;
+  /** Live tail: events from this filtered-list position on (a previous page's liveCursor). */
+  after?: string;
   includeMeta?: boolean;
   eventPayload?: TraceEventPayloadMode;
 }
@@ -2068,8 +2072,7 @@ export class TraceIndex extends EventEmitter {
     const eventPayload = options.eventPayload ?? "full";
 
     const limit = Math.max(1, Math.min(5000, options.limit ?? this.config.scan.recentEventWindow));
-    const end = options.before ? Math.max(0, Math.min(filtered.length, Number(options.before))) : filtered.length;
-    const start = Math.max(0, end - limit);
+    const { start, end } = tracePageRange(filtered.length, limit, options);
     const pageEvents = filtered.slice(start, end);
     const events = eventPayload === "compact" ? pageEvents.map(compactEventForList) : pageEvents;
 
@@ -2080,6 +2083,7 @@ export class TraceIndex extends EventEmitter {
       nextBefore: start > 0 ? String(start) : "",
       liveCursor: String(filtered.length),
       eventPayload,
+      ...(options.after !== undefined ? { afterCursor: String(start) } : {}),
     };
   }
 
@@ -2097,10 +2101,58 @@ export class TraceIndex extends EventEmitter {
     if (this.entries.has(candidate)) {
       return candidate;
     }
-    const bySession = this.getSummaries().find((summary) => summary.sessionId === candidate);
-    if (bySession) {
-      return bySession.id;
+    const bySession = this.getSummaries().filter((summary) => summary.sessionId === candidate);
+    if (bySession.length > 0) {
+      return preferMainSession(bySession, candidate).id;
     }
     throw new Error(`unknown trace/session: ${candidate}`);
   }
+
+  /**
+   * Hydrates, right away, startup files still waiting for background hydration whose
+   * file name contains the candidate (a session id), so a session asked for by id
+   * resolves before the background fill reaches it. Returns whether any were loaded.
+   */
+  async hydrateMatching(candidate: string): Promise<boolean> {
+    if (candidate.length < MIN_HYDRATE_MATCH_LENGTH || !this.hasPendingHydrationWork()) return false;
+    const matches = this.pendingHydrationFiles.filter(
+      (file) => this.pendingHydrationIds.has(file.id) && path.basename(file.path).includes(candidate),
+    );
+    const nowMs = Date.now();
+    for (const file of matches) {
+      this.pendingHydrationIds.delete(file.id);
+      this.pendingHydrationPaths.delete(file.path);
+      await this.upsertFile(file, nowMs);
+    }
+    return matches.length > 0;
+  }
+}
+
+/** Page bounds: `after` tails forward from a cursor, else the page ends at `before` (or the end). */
+function tracePageRange(total: number, limit: number, options: TracePageOptions): { start: number; end: number } {
+  if (options.after !== undefined) {
+    const start = clampCursor(options.after, total);
+    return { start, end: Math.min(total, start + limit) };
+  }
+  const end = options.before ? clampCursor(options.before, total) : total;
+  return { start: Math.max(0, end - limit), end };
+}
+
+function clampCursor(cursor: string, total: number): number {
+  const value = Number(cursor);
+  return Number.isFinite(value) ? Math.max(0, Math.min(total, Math.trunc(value))) : total;
+}
+
+/**
+ * Among traces sharing a session id, the session's own file: Claude subagent logs
+ * (`subagents/`) carry their parent's session id, and the main log is named after it.
+ */
+function preferMainSession(summaries: TraceSummary[], sessionId: string): TraceSummary {
+  const rank = (summary: TraceSummary): number => {
+    const normalized = summary.path.replace(/\\/g, "/");
+    const subagent = normalized.includes("/subagents/") ? 2 : 0;
+    const named = path.basename(normalized).includes(sessionId) ? 0 : 1;
+    return subagent + named;
+  };
+  return summaries.reduce((best, summary) => (rank(summary) < rank(best) ? summary : best));
 }

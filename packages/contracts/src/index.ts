@@ -524,6 +524,8 @@ export interface TracePage {
   nextBefore: string;
   liveCursor: string;
   eventPayload?: TraceEventPayloadMode;
+  /** Set when the page was asked for with `after`: the cursor the page starts at. */
+  afterCursor?: string;
 }
 
 export type IndexStartupPhase = "cold" | "bootstrapping" | "hydrating" | "ready" | "failed";
