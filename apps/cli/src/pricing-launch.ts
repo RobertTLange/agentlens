@@ -11,6 +11,7 @@ import {
   resolveRuntimeDir,
   saveConfig,
   stripBundledPricingOverrides,
+  withBundledRetiredModels,
   writePricingCache,
 } from "@agentlens/core";
 
@@ -112,7 +113,7 @@ export async function prepareBrowserConfig(options: PrepareBrowserConfigOptions)
   }
 
   const effectiveConfig = selectedCatalog
-    ? mergeConfigWithPricingDefaults(rawConfig, selectedCatalog)
+    ? mergeConfigWithPricingDefaults(rawConfig, withBundledRetiredModels(selectedCatalog))
     : mergeConfig(rawConfig);
   const resolvedConfigPath = effectiveConfigPath(runtimeDir);
   await saveConfig(effectiveConfig, resolvedConfigPath);

@@ -262,6 +262,19 @@ export function buildPricingCatalog(sourceApi: unknown, fetchedAt = new Date().t
   };
 }
 
+/** models.dev drops retired models; old sessions still used them, so keep their last known rates. */
+export function keepRetiredModels(catalog: PricingCatalog, previous: Omit<PricingCatalog, "fetchedAt" | "sources">): PricingCatalog {
+  const rateModels = new Set(catalog.modelRates.map((rate) => rate.model));
+  const windowModels = new Set(catalog.contextWindows.map((entry) => entry.model));
+  return {
+    ...catalog,
+    modelRates: [...catalog.modelRates, ...previous.modelRates.filter((rate) => !rateModels.has(rate.model))]
+      .sort((left, right) => compareText(left.model, right.model)),
+    contextWindows: [...catalog.contextWindows, ...previous.contextWindows.filter((entry) => !windowModels.has(entry.model))]
+      .sort((left, right) => compareText(left.model, right.model)),
+  };
+}
+
 export async function fetchPricingCatalog(options: FetchPricingCatalogOptions = {}): Promise<PricingCatalog> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const url = options.url ?? DEFAULT_MODELS_DEV_URL;

@@ -60,4 +60,10 @@ describe("loadPricedConfig", () => {
 
     expect(rateFor(await loadPricedConfig(configPath, runtimeDir), "claude-future-9")?.inputPer1MUsd).toBe(1);
   });
+
+  it("keeps bundled rates for retired models the cache no longer lists", async () => {
+    const { configPath, runtimeDir } = await runtime("", AFTER_BUNDLED);
+
+    expect(rateFor(await loadPricedConfig(configPath, runtimeDir), "claude-opus-4-6")).toBeDefined();
+  });
 });

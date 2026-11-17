@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPricingCatalog } from "./pricingSync.js";
+import { buildPricingCatalog, keepRetiredModels } from "./pricingSync.js";
 
 describe("pricingSync", () => {
   it("builds canonical and provider-qualified pricing rows from models.dev payloads", () => {
@@ -98,5 +98,18 @@ describe("pricingSync", () => {
       longContextCachedReadPer1MUsd: 0.05,
       longContextCachedCreate1hPer1MUsd: 1,
     });
+  });
+
+  it("keeps the last known rate of models a newer catalog drops", () => {
+    const previous = buildPricingCatalog({ openai: { models: {
+      "gpt-5.2-codex": { cost: { input: 1.75, output: 14 }, limit: { context: 400_000 } },
+      "gpt-6.1-sol": { cost: { input: 9, output: 9 } },
+    } } });
+    const fetched = buildPricingCatalog({ openai: { models: { "gpt-6.1-sol": { cost: { input: 2, output: 10 } } } } });
+    const merged = keepRetiredModels(fetched, previous);
+
+    expect(merged.modelRates.find((rate) => rate.model === "gpt-5.2-codex")?.inputPer1MUsd).toBe(1.75);
+    expect(merged.modelRates.find((rate) => rate.model === "gpt-6.1-sol")?.inputPer1MUsd).toBe(2);
+    expect(merged.contextWindows.some((entry) => entry.model === "gpt-5.2-codex")).toBe(true);
   });
 });

@@ -9,8 +9,8 @@ import {
   readConfigInput,
   stripBundledPricingOverrides,
 } from "./config.js";
-import { BUNDLED_PRICING_FETCHED_AT } from "./generatedPricing.js";
-import type { PricingCatalog } from "./pricingSync.js";
+import { BUNDLED_PRICING_FETCHED_AT, DEFAULT_CONTEXT_WINDOWS, DEFAULT_PRICING_MODEL_RATES } from "./generatedPricing.js";
+import { keepRetiredModels, type PricingCatalog } from "./pricingSync.js";
 
 // `agentlens --browser` refreshes pricing from models.dev into this cache; every
 // other command reads it (never the network), so CLI costs match the browser.
@@ -60,10 +60,15 @@ export function isNewerThanBundled(catalog: PricingCatalog | null): catalog is P
   return Number.isFinite(fetchedAtMs) && fetchedAtMs > Date.parse(BUNDLED_PRICING_FETCHED_AT);
 }
 
+/** A fetched catalog plus the bundled rates of models it no longer lists. */
+export function withBundledRetiredModels(catalog: PricingCatalog): PricingCatalog {
+  return keepRetiredModels(catalog, { modelRates: DEFAULT_PRICING_MODEL_RATES, contextWindows: DEFAULT_CONTEXT_WINDOWS });
+}
+
 /** The user's config priced with the newest pricing on disk: the launch cache or the bundled defaults. */
 export async function loadPricedConfig(configPath = DEFAULT_CONFIG_PATH, runtimeDir?: string): Promise<AppConfig> {
   const rawConfig = stripBundledPricingOverrides(await readConfigInput(configPath));
   if (!mergeConfig(rawConfig).pricingSync.enabled) return mergeConfig(rawConfig);
   const cached = await readPricingCache(pricingCachePath(resolveRuntimeDir(runtimeDir)));
-  return isNewerThanBundled(cached) ? mergeConfigWithPricingDefaults(rawConfig, cached) : mergeConfig(rawConfig);
+  return isNewerThanBundled(cached) ? mergeConfigWithPricingDefaults(rawConfig, withBundledRetiredModels(cached)) : mergeConfig(rawConfig);
 }
