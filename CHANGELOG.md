@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [TBD]
 
+## [0.5.0] - 2026-11-17
+### Added
+- Added an `after` cursor to `GET /api/trace/:id` (and `getTracePage`) that returns only events from a position on, echoed as `afterCursor`, so live clients can tail a session with small incremental requests.
+
+### Fixed
+- Resolved a session id to the session's own log instead of a Claude subagent log that carries the parent's session id.
+- Hydrated startup files still pending background hydration when a session is requested by id, instead of answering 404 until the background fill reaches it.
+
 ## [0.4.0] - 2026-06-18
 ### Added
 - Added `agentlens --version` to print the published CLI package version.
