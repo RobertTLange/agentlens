@@ -5,12 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [TBD]
+Unreleased. Installed on garden machines from `main` as `0.5.1-dev`.
+
 ### Added
-- Codex session costs now follow the thread's service tier from `thread_settings_applied`: fast (formerly priority) at 2x the Standard rate, ultrafast at 3x through 2027-02-28 and 6x from 2027-03-01 (Pacific), per OpenAI's API pricing.
+- Codex session costs now follow the thread's service tier from `thread_settings_applied`: fast (formerly priority) at 2x the Standard rate, ultrafast at 3x through 2027-02-28 and 6x from 2027-03-01 (Pacific), per OpenAI's API pricing. (#41)
 
 ### Changed
 - CLI commands (`summary`, `session`, `sessions`, `analysis`) now price sessions from the models.dev pricing cache that `agentlens --browser` maintains, when it is newer than the bundled table, so CLI and browser costs agree. No network call is made.
-- Refreshed bundled pricing from models.dev (2026-11-17): adds Claude Opus/Sonnet/Haiku 5.x, Fable 5.x, Opus 4.7, gpt-5.5 and gpt-6.x (astra, luna, sol, 6.1-sol, 6.1-terra); a second refresh adds gpt-6.2-astra and gpt-6.2-sol.
+- Refreshed bundled pricing from models.dev (2026-11-17): adds Claude Opus/Sonnet/Haiku 5.x, Fable 5.x, Opus 4.7, gpt-5.5 and gpt-6.x (astra, luna, sol, 6.1-sol, 6.1-terra); a second refresh adds gpt-6.2-astra and gpt-6.2-sol (#41).
 - Every Claude model now prices 1h cache writes at 2x base input. Haiku 5.5 prompts over 100K tokens use its higher tier. Opus/Sonnet 4.6 no longer carry a 200K-token long-context premium, because their 1M context is billed at standard rates.
 
 ### Fixed
