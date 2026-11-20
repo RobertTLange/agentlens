@@ -1,0 +1,16 @@
+services:
+  garage:
+    image: dxflrs/garage:v2.2.0
+    restart: unless-stopped
+    ports:
+      - "3900:3900" # S3 API; put a TLS reverse proxy in front for non-local use
+      - "3901:3901"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    command: ["/garage", "server"]
+
+volumes:
+  garage-meta:
+  garage-data:

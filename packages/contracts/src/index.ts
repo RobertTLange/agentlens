@@ -152,6 +152,30 @@ export interface AnalysisConfig {
   cachePath: string;
 }
 
+export type RemoteArchiveStoreConfig =
+  | { kind: "filesystem"; directory: string }
+  | {
+      kind: "s3";
+      bucket: string;
+      prefix: string;
+      region: string;
+      endpoint: string;
+      forcePathStyle: boolean;
+      allowInsecureHttpEndpoint: boolean;
+    };
+
+export interface RemoteArchiveConfig {
+  enabled: boolean;
+  namespace: string;
+  originId: string;
+  flushIntervalMs: number;
+  idleFlushMs: number;
+  statePath: string;
+  cachePath: string;
+  rawPublicKeyPath: string;
+  store: RemoteArchiveStoreConfig;
+}
+
 export interface TokenTotals {
   inputTokens: number;
   cachedReadTokens: number;
@@ -195,6 +219,7 @@ export interface AppConfig {
   models: ModelsConfig;
   rag: RagConfig;
   analysis: AnalysisConfig;
+  remoteArchive: RemoteArchiveConfig;
 }
 
 export interface NormalizedEvent {

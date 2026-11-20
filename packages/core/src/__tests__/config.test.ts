@@ -77,6 +77,8 @@ describe("config", () => {
     expect(config.sessionLogDirectories).toContainEqual({ directory: "~/.pi", logType: "pi" });
     expect(config.analysis.skillRoots).toEqual(["~/.codex/skills", "~/.claude/skills"]);
     expect(config.analysis.topSessionLimit).toBe(20);
+    expect(config.remoteArchive).toMatchObject({ enabled: false, flushIntervalMs: 60_000, idleFlushMs: 120_000 });
+    expect(config.remoteArchive.store).toEqual({ kind: "filesystem", directory: "~/.agentlens/remote-archive" });
     const defaultEnabledSources = [
       "codex_home",
       "claude_projects",
@@ -91,6 +93,43 @@ describe("config", () => {
       expect(config.sources[sourceName]?.enabled).toBe(true);
     }
     expect(config.sources.claude_projects?.excludeGlobs).toContain("**/subagents/agent-acompact-*.jsonl");
+  });
+
+  it("merges self-hosted S3 archive settings without credentials", () => {
+    const config = mergeConfig({
+      remoteArchive: {
+        enabled: true,
+        namespace: "personal",
+        originId: "laptop",
+        rawPublicKeyPath: "~/.agentlens/keys/archive.pub",
+        store: {
+          kind: "s3",
+          bucket: "agentlens",
+          endpoint: "https://garage.example.test",
+          region: "garage",
+          prefix: "personal",
+          forcePathStyle: true,
+          allowInsecureHttpEndpoint: false,
+        },
+      },
+    });
+
+    expect(config.remoteArchive).toMatchObject({ enabled: true, namespace: "personal", originId: "laptop" });
+    expect(config.remoteArchive.store).toEqual({
+      kind: "s3",
+      bucket: "agentlens",
+      endpoint: "https://garage.example.test",
+      region: "garage",
+      prefix: "personal",
+      forcePathStyle: true,
+      allowInsecureHttpEndpoint: false,
+    });
+  });
+
+  it("does not activate remote uploads for malformed booleans or store kinds", () => {
+    const malformed = mergeConfig({ remoteArchive: { enabled: "false" as unknown as boolean } });
+    expect(malformed.remoteArchive.enabled).toBe(false);
+    expect(() => mergeConfig({ remoteArchive: { store: { kind: "invalid" } as never } })).toThrow("store kind");
   });
 
   it("infers gemini log type from legacy sessionJsonlDirectories paths", () => {
