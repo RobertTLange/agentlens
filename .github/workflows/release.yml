@@ -70,10 +70,12 @@ jobs:
           echo "pkg_version=${PKG_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
+      # Trusted publishing (OIDC, no token) needs npm >= 11.5.1; Node 22 ships npm 10.
+      - name: Update npm
+        run: npm install -g npm@latest
+
       - name: Publish to npm
         run: npm publish -w apps/cli --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Extract release notes from CHANGELOG
         run: node scripts/release-notes.mjs "${{ steps.release_info.outputs.pkg_version }}" > release-notes.md
