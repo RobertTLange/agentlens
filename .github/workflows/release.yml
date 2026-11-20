@@ -28,8 +28,11 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # onnxruntime-node's optional CUDA download breaks on the runner; the CPU binaries are bundled.
       - name: Install dependencies
         run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
 
       - name: Verify workspace gate
         run: |
