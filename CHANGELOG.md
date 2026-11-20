@@ -4,10 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [TBD]
-Unreleased. Installed on garden machines from `main` as `0.5.1-dev`.
-
+## [0.5.0] - 2026-11-20
 ### Added
+- Added an `after` cursor to `GET /api/trace/:id` (and `getTracePage`) that returns only events from a position on, echoed as `afterCursor`, so live clients can tail a session with small incremental requests.
 - Codex session costs now follow the thread's service tier from `thread_settings_applied`: fast (formerly priority) at 2x the Standard rate, ultrafast at 3x through 2027-02-28 and 6x from 2027-03-01 (Pacific), per OpenAI's API pricing. (#41)
 
 ### Changed
@@ -16,16 +15,10 @@ Unreleased. Installed on garden machines from `main` as `0.5.1-dev`.
 - Every Claude model now prices 1h cache writes at 2x base input. Haiku 5.5 prompts over 100K tokens use its higher tier. Opus/Sonnet 4.6 no longer carry a 200K-token long-context premium, because their 1M context is billed at standard rates.
 
 ### Fixed
-- Kept the last known rates of models that models.dev has retired (for example `gpt-5.2-codex`, `gpt-5.1-codex-max`, Claude 3.x/4.0/4.1), so older sessions keep their costs after a pricing refresh.
-- Priced zero-token usage rows (Claude Code `<synthetic>` messages) at zero, so one such row no longer blanks a whole session's cost.
-
-## [0.5.0] - 2026-11-17
-### Added
-- Added an `after` cursor to `GET /api/trace/:id` (and `getTracePage`) that returns only events from a position on, echoed as `afterCursor`, so live clients can tail a session with small incremental requests.
-
-### Fixed
 - Resolved a session id to the session's own log instead of a Claude subagent log that carries the parent's session id.
 - Hydrated startup files still pending background hydration when a session is requested by id, instead of answering 404 until the background fill reaches it.
+- Kept the last known rates of models that models.dev has retired (for example `gpt-5.2-codex`, `gpt-5.1-codex-max`, Claude 3.x/4.0/4.1), so older sessions keep their costs after a pricing refresh.
+- Priced zero-token usage rows (Claude Code `<synthetic>` messages) at zero, so one such row no longer blanks a whole session's cost.
 
 ## [0.4.0] - 2026-06-18
 ### Added
